@@ -1,0 +1,58 @@
+{
+  "git": { "deploymentEnabled": false },
+  "outputDirectory": "Builds/WebGL",
+  "buildCommand": null,
+  "framework": null,
+  "crons": [
+    { "path": "/api/admin/cleanup", "schedule": "0 4 * * *" },
+    { "path": "/api/admin/google-play-voided-reconcile", "schedule": "30 4 * * *" },
+    { "path": "/api/cron/heart-pulse", "schedule": "0 5 * * *" },
+    { "path": "/api/cron/swap-quote-probe", "schedule": "*/15 * * * *" },
+    { "path": "/api/cron/api-health-probe", "schedule": "*/15 * * * *" },
+    { "path": "/api/cron/applixir-read-probe", "schedule": "20 * * * *" },
+    { "path": "/api/cron/r2-public-read-probe", "schedule": "40 6 */2 * *" },
+    { "path": "/api/cron/stale-entitlement-check", "schedule": "15 7 * * *" }
+  ],
+  "rewrites": [
+    { "source": "/admin", "destination": "/api/admin/console" },
+    { "source": "/privacy", "destination": "/privacy.html" },
+    { "source": "/terms", "destination": "/terms.html" },
+    { "source": "/.well-known/assetlinks.json", "destination": "/api/assetlinks" },
+    { "source": "/app-ads.txt", "destination": "/api/app-ads-txt" },
+    { "source": "/icon.png", "destination": "/api/icon" }
+  ],
+  "headers": [
+    {
+      "source": "/Build/:file(.*\\.data\\.unityweb)",
+      "headers": [{ "key": "Content-Type", "value": "application/octet-stream" }]
+    },
+    {
+      "source": "/Build/:file(.*\\.wasm\\.unityweb)",
+      "headers": [
+        { "key": "Content-Type", "value": "application/wasm" },
+        { "key": "Content-Encoding", "value": "br" }
+      ]
+    },
+    {
+      "source": "/Build/:file(.*\\.js\\.unityweb)",
+      "headers": [
+        { "key": "Content-Type", "value": "application/javascript" },
+        { "key": "Content-Encoding", "value": "br" }
+      ]
+    },
+    {
+      "source": "/",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-store, must-revalidate" },
+        { "key": "Cross-Origin-Opener-Policy", "value": "same-origin-allow-popups" }
+      ]
+    },
+    {
+      "source": "/index.html",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-store, must-revalidate" },
+        { "key": "Cross-Origin-Opener-Policy", "value": "same-origin-allow-popups" }
+      ]
+    }
+  ]
+}

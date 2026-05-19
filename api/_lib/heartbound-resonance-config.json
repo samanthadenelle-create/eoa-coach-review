@@ -1,0 +1,91 @@
+{
+  "_comment": [
+    "WO-1676 / HEART-003 - THE ONE AUTHORED TABLE FOR HEARTBOUND RESONANCE.",
+    "",
+    "Spec: docs/specs/HEARTBOUND_SKR_RESONANCE_WORK_ORDERS_2026-09-10.md:260-375.",
+    "Spec :280 - 'Keep this server-configurable'. Spec :367 - 'Thresholds must be",
+    "configuration-driven. Do not scatter them through gameplay code.'",
+    "",
+    "EVERY constant of the resonance curve lives HERE and nowhere else. There is no",
+    "second copy in api/_lib/heartbound-resonance.js - that module reads this file and",
+    "takes a cfg override on every exported function, so a test can inject a table and",
+    "purity is structural rather than promised.",
+    "",
+    "⛔ THERE IS DELIBERATELY NO CANONICAL TWIN UNDER Assets/. Every other data table in",
+    "this repo has one, and this one must not: spec :1274 - 'UI contains no staking",
+    "calculations' - and WO-1676 §4 records why. A tier threshold the Unity client can",
+    "read is a SECOND AUTHORITY on a score product rule 6 (spec :21) makes the backend",
+    "authoritative for. The client is told its tier; it never computes one. Adding a twin",
+    "here would look like tidiness and would be the exact duplicated-state failure",
+    "CLAUDE.md §2/§5/§8/§16 each record a scar from.",
+    "",
+    "⚠ THIS FILE IS THE INTERIM SINGLE HOME, NOT THE FINAL ONE. WO-1676 Q-CONFIG asks the",
+    "owner whether these knobs belong on the Command Center tunables rail (option (a): teach",
+    "api/_lib/tunable-manifest.js a serverOnly marker) or stay backend-only (option (b): this",
+    "file). Until that is ruled, this file is option (b) and it is ONE file, so lifting it",
+    "onto the rail later is a data move and not an archaeology exercise.",
+    "",
+    "Ships to Vercel: .vercelignore re-includes /api wholesale (precedent: this folder's",
+    "dungeon-manifest.json and sku-catalog.generated.json), so this JSON is present in the",
+    "deployment. Verified by reading .vercelignore 2026-09-10.",
+    "",
+    "The test vector table that pins every number below lives in",
+    "test/heartbound-resonance.test.js. Change a number here and that suite reds."
+  ],
+
+  "version": 1,
+
+  "chain": {
+    "_comment": [
+      "Base-unit conversion. Mirrors Assets/_Modules/Wallet/NativeSkrStakeQuery.cs:28-29",
+      "(SharePriceScale 1e9, SkrBaseUnits 1e6) - EXCEPT the truncation at :76",
+      "(rawTokens / SkrBaseUnits into a long), which throws away every fractional SKR.",
+      "WO-1674 requires the snapshot carry raw base units so the backend never repeats it."
+    ],
+    "skrBaseUnits": 1000000,
+    "sharePriceScale": 1000000000
+  },
+
+  "minHeartboundStake": 100,
+
+  "effectiveStake": {
+    "_comment": [
+      "Spec :288-298. Increases ramp (trust is earned over pulses); decreases are IMMEDIATE.",
+      "That asymmetry is the whole anti-exploit design - spec :306: 'This kills flash-staking",
+      "exploits.'"
+    ],
+    "activationFraction": 0.25,
+    "pulseRampFraction": 0.25
+  },
+
+  "stakePower": {
+    "_comment": [
+      "Spec :317-319: StakePower = 1000 x log10(1 + EffectiveStake / 250).",
+      "Logarithmic on purpose - spec :313: '500,000 SKR does NOT provide 500 times the",
+      "power of 1,000 SKR.'"
+    ],
+    "multiplier": 1000,
+    "divisor": 250
+  },
+
+  "tenurePower": {
+    "_comment": ["Spec :339-341: TenurePower = MIN(700, 150 x ln(1 + ContinuousPulseCount / 5))."],
+    "cap": 700,
+    "multiplier": 150,
+    "divisor": 5
+  },
+
+  "tiers": [
+    { "tier": 0, "name": "Silent", "minScore": 0 },
+    { "tier": 1, "name": "Emberbound", "minScore": 300 },
+    { "tier": 2, "name": "Rootbound", "minScore": 600 },
+    { "tier": 3, "name": "Stonebound", "minScore": 900 },
+    { "tier": 4, "name": "Echoing", "minScore": 1200 },
+    { "tier": 5, "name": "Awakened", "minScore": 1500 },
+    { "tier": 6, "name": "Hearttouched", "minScore": 1800 },
+    { "tier": 7, "name": "Deep Resonance", "minScore": 2150 },
+    { "tier": 8, "name": "Heartforged", "minScore": 2500 },
+    { "tier": 9, "name": "Eternal Echo", "minScore": 2850 },
+    { "tier": 10, "name": "Heartbound", "minScore": 3200 }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+    "name": "DeNelle.Village",
+    "rootNamespace": "DeNelle.Village",
+    "references": [
+        "DeNelle.Core",
+        "DeNelle.Data",
+        "Unity.Localization",
+        "UniTask",
+        "Unity.Cinemachine",
+        "Unity.InputSystem"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

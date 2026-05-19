@@ -1,0 +1,11 @@
+{
+  "_comment": "WO-1958. COPY THIS FILE to reown.config.json (gitignored) and paste the Project ID from https://dashboard.reown.com/. Then run `npm run web:bundle`, which reads it and writes the gitignored reown-config.js shim that index.html loads. A projectId is a PUBLIC client identifier - it is kept out of git because it is account-specific, not because it is a secret. With no projectId the Jupiter Mobile door REFUSES BY NAME (reason=no-project-id) and the Solflare/Phantom handoff from WO-1957 is unaffected.",
+  "_console_steps": [
+    "1. https://dashboard.reown.com/ -> sign in",
+    "2. Create project -> name it (e.g. Echoes of Elarion)",
+    "3. Product: AppKit. Platform: Web",
+    "4. Project URL: the live origin that will serve the game (https://defenders-webgl.vercel.app, and the production domain when that is the one that ships) - AppKit sends this origin in its metadata and Reown checks it",
+    "5. Project settings -> copy Project ID into the projectId field below"
+  ],
+  "projectId": ""
+}

@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="en-us">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <title>Unity XNFT | {{{ PRODUCT_NAME }}}<</title>
+    <!-- WO-1962 — removed <link rel="icon" href="favicon.ico">: this template ships no
+         favicon.ico, so the reference 404'd on every load. Same class as the two dead
+         TemplateData/ links removed from the Pi template; pinned by the
+         WEB_TEMPLATE_REFERENCES contract row in tools/web-build-contracts.ps1. -->
+    <!-- WO-1910. A real browser build of npm buffer 6.0.3, generated from node_modules by
+         tools/build-page-buffer.mjs. Provides the page global the Solana wallet SIGN path
+         reads. FIRST, and before the loader below - the wallet-adapter CDN bundle prefers
+         the page's copy, so it must be the complete one, not a shim. -->
+    <script src="page-buffer.js"></script>
+
+    <!-- WO-1908 (amended WO-1910: owns `unityWebView` only - gree WebGL plugin; the
+         wallet-adapter page global moved to page-buffer.js above).
+         MUST load before the Unity loader below - a bare-identifier ReferenceError
+         inside a jslib aborts the whole runtime. See page-globals.js. -->
+    <script src="page-globals.js"></script>
+
+    <!-- WO-1957. The mobile-browser wallet handoff door. LOCAL, SYNCHRONOUS, before the loader:
+         EoaWalletBridge.jslib reads `window.eoaWalletHandoff`, and a bare-identifier miss inside
+         a jslib aborts the runtime. It also reads the `?eoaWallet=` return marker off
+         location.search before anything can rewrite the URL. NO navigation on load - C# asks.
+         Inside an xNFT host `window.xnft.solana` is already injected, so capability() reports
+         injected and this door correctly stays out of the way. -->
+    <script src="wallet-handoff.js"></script>
+
+    <!-- WO-1958. The Reown projectId for the Jupiter Mobile door, and NOTHING ELSE. GENERATED
+         by `npm run web:bundle` from the gitignored reown.config.json, and gitignored itself.
+         A MISSING FILE IS A DELIBERATE, SURVIVABLE 404 — the global stays undefined and the
+         door refuses by name (reason=no-project-id). The multi-megabyte
+         wallet-connect.bundle.js is NOT loaded here; EoaWalletBridge.jslib injects it on the
+         connect tap. Inside an xNFT host the injected wallet wins before any of this runs. -->
+    <script src="reown-config.js"></script>
+  </head>
+  <body style="text-align: center; padding: 0; border: 0; margin: 0;">
+    <script src="Build/{{{ LOADER_FILENAME }}}"></script>
+    <div id="unity-container" class="unity-desktop">
+      <canvas id="unity-canvas" width=960 height=600></canvas>
+      <div id="unity-loading-bar">
+        <div id="unity-logo"></div>
+        <div id="unity-progress-bar-empty">
+          <div id="unity-progress-bar-full"></div>
+        </div>
+      </div>
+    </div>
+    <script>
+      var container = document.querySelector("#unity-container");
+      var canvas = document.querySelector("#unity-canvas");
+      var loadingBar = document.querySelector("#unity-loading-bar");
+      var progressBarFull = document.querySelector("#unity-progress-bar-full");
+      var fullscreenButton = document.querySelector("#unity-fullscreen-button");
+      var warningBanner = document.querySelector("#unity-warning");
+      
+      // Shows a temporary message banner/ribbon for a few seconds, or
+      // a permanent error message on top of the canvas if type=='error'.
+      // If type=='warning', a yellow highlight color is used.
+      // Modify or remove this function to customize the visually presented
+      // way that non-critical warnings and error messages are presented to the
+      // user.
+      function unityShowBanner(msg, type) {
+        function updateBannerVisibility() {
+          warningBanner.style.display = warningBanner.children.length ? 'block' : 'none';
+        }
+        var div = document.createElement('div');
+        div.innerHTML = msg;
+        warningBanner.appendChild(div);
+        if (type == 'error') div.style = 'background: red; padding: 10px;';
+        else {
+          if (type == 'warning') div.style = 'background: yellow; padding: 10px;';
+          setTimeout(function() {
+            warningBanner.removeChild(div);
+            updateBannerVisibility();
+          }, 5000);
+        }
+        updateBannerVisibility();
+      }
+      
+      var buildUrl = "Build";
+      var loaderUrl = buildUrl + "/{{{ LOADER_FILENAME }}}";
+      var config = {
+        dataUrl: "Build/{{{ DATA_FILENAME }}}",
+        frameworkUrl: "Build/{{{ FRAMEWORK_FILENAME }}}",
+#if USE_WASM
+        codeUrl: "Build/{{{ CODE_FILENAME }}}",
+#endif
+#if MEMORY_FILENAME
+        memoryUrl: "Build/{{{ MEMORY_FILENAME }}}",
+#endif
+#if SYMBOLS_FILENAME
+        symbolsUrl: "Build/{{{ SYMBOLS_FILENAME }}}",
+#endif
+        streamingAssetsUrl: "StreamingAssets",
+        companyName: {{{ JSON.stringify(COMPANY_NAME) }}},
+        productName: {{{ JSON.stringify(PRODUCT_NAME) }}},
+        productVersion: {{{ JSON.stringify(PRODUCT_VERSION) }}},
+        // WO-1906: cap the backing-store scale. Proven at source from the built framework
+        // (Builds/WebGL/Build/<hash>.framework.js.unityweb): _JS_SystemInfo_GetPreferredDevicePixelRatio
+        // returns `Module.devicePixelRatio || window.devicePixelRatio || 1`, so leaving this key unset
+        // lets a DPR-3 phone allocate 9x the fragments of the CSS box. Same cap as the Pi template.
+        devicePixelRatio: Math.min(window.devicePixelRatio || 1, 2),
+        showBanner: unityShowBanner,
+        // WO-1963: the same alert this template's `.catch` already refuses (see :419) is STILL
+        // reachable after a successful boot, through the loader's own window 'error' /
+        // 'unhandledrejection' listeners -> E() -> alert(). `showBanner` does not cover that path;
+        // only `errorHandler` does, because every config key is copied onto the Module
+        // (`for(o in n)w[o]=n[o]`) and a truthy return short-circuits the alert. Derivation is
+        // written out in full in the Pi template - this is the same fix, kept in step.
+        // ⛔ Every <script> on this page is LOCAL (page-buffer.js, page-globals.js,
+        // wallet-handoff.js, reown-config.js, the loader), so there is deliberately no
+        // crossorigin work here: nothing same-origin is ever masked as "Script error.".
+        errorHandler: function (message, source, lineno) {
+          var text = '' + (message || '');
+          // Unity's r() folds the stack into the message ("<msg>\n<stack>") before calling this,
+          // so split it: the head is the message, the tail is the ONLY copy of the stack on this
+          // path. Same reasoning written out in full in the Pi template.
+          var nl = text.indexOf('\n');
+          var head = nl >= 0 ? text.slice(0, nl) : text;
+          var tail = nl >= 0 ? text.slice(nl + 1) : '';
+          console.error('[Loader] runtime error: ' + head + ' @ ' + (source || '<masked>') + ':' + (lineno || 0));
+          try {
+            eoaTraceEmit('[PageError] kind=unity-errorHandler msg=' + JSON.stringify(head) +
+              ' src=' + JSON.stringify('' + (source || '')) + ' line=' + (lineno || 0) +
+              ' masked=' + (!source && !lineno && !tail) +
+              ' stack=' + JSON.stringify(tail.slice(0, 700)) +
+              ' session=' + eoaTraceSession + ' upMs=' + (Date.now() - eoaBootAt));
+          } catch (e) { /* telemetry never throws out of the error reporter */ }
+          try { unityShowBanner('Something went wrong. You can keep playing; please report it.', 'error'); }
+          catch (e) { /* the banner is a nicety - never let it resurrect the alert */ }
+          try { eoaDoorPromote('runtime-error'); } catch (e) { }
+          return true;   // handled - do NOT let the loader alert()
+        },
+      };
+
+      // Mobile device style: fill the whole browser client area with the game canvas.
+      // WO-1906: `viewport-fit=cover` added so the layout viewport reaches under the notch, and the
+      // fit block below then subtracts the real safe-area insets. `height=device-height` is GONE -
+      // it is not a valid viewport descriptor on iOS and never did anything here; the JS fit is what
+      // actually tracks the visible height.
+      var meta = document.createElement('meta');
+      meta.name = 'viewport';
+      meta.content = 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover';
+      document.getElementsByTagName('head')[0].appendChild(meta);
+      // The safe-area probe: env() is CSS-only, so the four insets are parked on a zero-size
+      // element's padding and read back with getComputedStyle.
+      var eoaProbe = document.createElement('div');
+      eoaProbe.id = 'eoa-safe-probe';
+      eoaProbe.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;visibility:hidden;' +
+        'pointer-events:none;padding-left:env(safe-area-inset-left,0px);' +
+        'padding-right:env(safe-area-inset-right,0px);padding-top:env(safe-area-inset-top,0px);' +
+        'padding-bottom:env(safe-area-inset-bottom,0px);';
+      document.body.appendChild(eoaProbe);
+
+      var canvas = document.querySelector("#unity-canvas");
+      canvas.style.width = "100%";
+      canvas.style.height = "100%";
+      canvas.style.position = "fixed";
+      // Load-bearing on mobile web: without touch-action:none the browser claims pan/pinch before
+      // Unity's canvas ever sees the gesture (RCA 2026-07-16, same line the Pi template carries).
+      canvas.style.touchAction = "none";
+      canvas.style.display = "block";
+      document.documentElement.style.overflow = "hidden";
+      document.body.style.overflow = "hidden";
+      document.body.style.margin = "0";
+
+      document.body.style.textAlign = "left";
+
+      // ===================================================================================
+      // WO-1906: FIT THE CANVAS TO THE VISUAL VIEWPORT. Every host, no UA gate.
+      // ===================================================================================
+      // Same rule and the same reasoning as Assets/WebGLTemplates/Pi/index.html (read the long
+      // derivation there): `100%` resolves against the LAYOUT viewport, which on iOS Safari and
+      // inside a parent-sized iframe can be bigger than what the player can actually see - so the
+      // HUD edges end up off-screen with nothing to scroll to. We size the canvas in px from
+      // window.visualViewport (fallback innerWidth/innerHeight) and re-assert on every event.
+      // No letterbox: the canvas FILLS the visible box (owner ruling WO-1906:31).
+      var EOA_FIT_MIN_PX = 64;
+      var eoaFitLastStamp = '';
+      function eoaSafeInsets() {
+        try {
+          var cs = window.getComputedStyle(eoaProbe);
+          var n = function (v) { var f = parseFloat(v); return (isFinite(f) && f > 0) ? f : 0; };
+          return { l: n(cs.paddingLeft), r: n(cs.paddingRight), t: n(cs.paddingTop), b: n(cs.paddingBottom) };
+        } catch (e) {
+          console.info('[EoaFit] safe-area probe unreadable (treating insets as 0): ' + e);
+          return { l: 0, r: 0, t: 0, b: 0 };
+        }
+      }
+      function eoaVisualViewport() {
+        var vv = window.visualViewport;
+        if (vv && vv.width > 0 && vv.height > 0) {
+          return { w: vv.width, h: vv.height, ox: vv.offsetLeft || 0, oy: vv.offsetTop || 0, src: 'vv' };
+        }
+        return { w: window.innerWidth, h: window.innerHeight, ox: 0, oy: 0, src: 'inner' };
+      }
+      function eoaApplyFit(reason) {
+        try {
+          var v = eoaVisualViewport();
+          var ins = eoaSafeInsets();
+          var w = Math.round(v.w - ins.l - ins.r);
+          var h = Math.round(v.h - ins.t - ins.b);
+          if (w < EOA_FIT_MIN_PX || h < EOA_FIT_MIN_PX) {
+            console.info('[EoaFit] safe-area insets rejected (would leave ' + w + 'x' + h + ') - using raw viewport');
+            w = Math.round(v.w); h = Math.round(v.h); ins = { l: 0, r: 0, t: 0, b: 0 };
+          }
+          w = Math.max(EOA_FIT_MIN_PX, w); h = Math.max(EOA_FIT_MIN_PX, h);
+          canvas.style.position = 'fixed';
+          canvas.style.left = Math.round(v.ox + ins.l) + 'px';
+          canvas.style.top = Math.round(v.oy + ins.t) + 'px';
+          canvas.style.width = w + 'px';
+          canvas.style.height = h + 'px';
+          var dpr = Math.min(window.devicePixelRatio || 1, 2);
+          // The deterministic seam tools/web-canvas-fit.mjs waits on - readable long before the
+          // runtime has booted.
+          var stamp = w + 'x' + h + '@' + dpr + ':' + v.src;
+          canvas.setAttribute('data-eoa-fit', stamp);
+          if (stamp !== eoaFitLastStamp) {
+            eoaFitLastStamp = stamp;
+            console.info('[EoaFit] fit ' + stamp + ' reason=' + reason +
+              ' inner=' + window.innerWidth + 'x' + window.innerHeight +
+              ' safe=' + ins.l + ',' + ins.t + ',' + ins.r + ',' + ins.b);
+          }
+        } catch (e) {
+          console.info('[EoaFit] fit skipped: ' + e);   // reported, never silent, never fatal
+        }
+      }
+      window.addEventListener('resize', function () { eoaApplyFit('resize'); });
+      window.addEventListener('orientationchange', function () {
+        eoaApplyFit('orientationchange');
+        window.setTimeout(function () { eoaApplyFit('orientationchange-settle'); }, 300);
+      });
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', function () { eoaApplyFit('vv-resize'); });
+        window.visualViewport.addEventListener('scroll', function () { eoaApplyFit('vv-scroll'); });
+      }
+      document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'visible') eoaApplyFit('visible');
+      });
+      eoaApplyFit('boot');   // synchronous, before the loader script is appended below
+
+      loadingBar.style.display = "block";
+
+      // WO-1926 (2026-09-21): this template has no piTraceEmit, so the beacon is self-contained.
+      // Endpoint + payload shape are copied from Assets/WebGLTemplates/Pi/index.html:182-236 so both
+      // templates land in the SAME trace sink and ?view=traces needs no second reader.
+      var EOA_TRACE_ENDPOINT = 'https://defenders-of-the-realm-v2.vercel.app/api/trace';
+      var eoaTraceSession = 'wt-xnft' + Math.random().toString(16).slice(2, 12);
+      var eoaBootAt = Date.now();
+      var eoaLastPct = 0;
+      function eoaTraceEmit(message) {
+        try {
+          var payload = JSON.stringify({
+            sessionId: eoaTraceSession,
+            buildId: '{{{ PRODUCT_VERSION }}}',
+            entries: [{ utcMs: Date.now(), kind: 'log', tag: 'PiLifecycle',
+                        message: '' + message, scene: 'xNFTTemplate' }]
+          });
+          // Teardown-adjacent: sendBeacon is queued and delivered after the document is gone, so it
+          // is the only transport that lands when the tab is being killed. keepalive fetch is the
+          // fallback for a browser without it.
+          if (navigator.sendBeacon) {
+            var blob = new Blob([payload], { type: 'text/plain;charset=UTF-8' });
+            if (navigator.sendBeacon(EOA_TRACE_ENDPOINT, blob)) return;
+          }
+          fetch(EOA_TRACE_ENDPOINT, {
+            method: 'POST', body: payload,
+            headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+            keepalive: true, mode: 'cors', credentials: 'omit'
+          })['catch'](function (e) {
+            console.info('[PiLifecycle] crumb POST failed (fire-and-forget, dropped): ' + e);
+          });
+        } catch (e) {
+          console.info('[PiLifecycle] crumb skipped: ' + e);   // telemetry never blocks a boot
+        }
+      }
+
+      // =================================================================================
+      // WO-1927: the PRE-RUNTIME bug door, xNFT twin of Assets/WebGLTemplates/Pi/index.html.
+      // =================================================================================
+      // Same reason, same endpoint, same payload shape - but built in JS (this template has no
+      // authored markup block) and self-contained, exactly like eoaTraceEmit above.
+      // ⚠ SAME RECORDED GAP: this template has NO LOCALE SEAM either, so the strings below are
+      // canonical en literals from Assets/Resources/Data/Canonical/en.json with their keys named
+      // in comments. `hud.bug_report.log_notice` is excluded - it promises "your player id",
+      // which does not exist before the runtime boots.
+      var EOA_BUG_REPORT_ENDPOINT = 'https://defenders-of-the-realm-v2.vercel.app/api/bug-report';
+      var EOA_DOOR_STALL_MS = 20000;   // no progress callback at all for 20s; see the Pi template
+      var eoaBootId = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+      var eoaNavType = 'unknown';
+      try {
+        eoaNavType = (performance.getEntriesByType('navigation')[0] || {}).type || 'unknown';
+      } catch (e) { /* navigation timing is a nicety, never a boot dependency */ }
+      var eoaDoorEl = null, eoaDoorOpen = null, eoaDoorForm = null,
+          eoaDoorNote = null, eoaDoorSend = null, eoaDoorStatus = null;
+      var eoaDoorStallTimer = null, eoaDoorSent = false;
+
+      function eoaDoorBuild() {
+        try {
+          eoaDoorEl = document.createElement('div');
+          // Bottom-centre inside the safe area, above everything, phone-width, no scrolling.
+          eoaDoorEl.style.cssText = 'position:fixed;z-index:100000;left:50%;' +
+            'transform:translateX(-50%);bottom:calc(env(safe-area-inset-bottom,0px) + 12px);' +
+            'width:min(92vw,420px);box-sizing:border-box;text-align:center;font-family:sans-serif;';
+          eoaDoorOpen = document.createElement('button');
+          eoaDoorOpen.type = 'button';
+          eoaDoorOpen.textContent = 'REPORT A BUG';                 // en.json hud.bug_report.title
+          eoaDoorOpen.style.cssText = 'min-height:48px;padding:10px 20px;width:100%;color:#d7c9f0;' +
+            'background:rgba(13,10,20,0.82);border:1px solid #4b3c6b;border-radius:8px;' +
+            'font:600 16px sans-serif;';
+          eoaDoorForm = document.createElement('div');
+          eoaDoorForm.style.cssText = 'display:none;margin-top:8px;padding:10px;' +
+            'background:rgba(13,10,20,0.94);border:1px solid #4b3c6b;border-radius:8px;';
+          eoaDoorNote = document.createElement('textarea');
+          eoaDoorNote.rows = 3;
+          eoaDoorNote.maxLength = 4000;
+          eoaDoorNote.placeholder = 'What went wrong?';     // en.json hud.bug_report.note_placeholder
+          eoaDoorNote.setAttribute('aria-label', 'What went wrong?');
+          // touch-action/user-select are re-enabled for the FIELD ONLY: the page turns both off
+          // for the game canvas, and an inherited touch-action:none stops iOS typing into it.
+          eoaDoorNote.style.cssText = 'display:block;width:100%;box-sizing:border-box;' +
+            'min-height:72px;padding:8px;color:#f4e5b5;background:#1a1424;border:1px solid #6b5a2e;' +
+            'border-radius:6px;font:400 16px/1.35 sans-serif;touch-action:auto;' +
+            '-webkit-user-select:text;user-select:text;';
+          eoaDoorSend = document.createElement('button');
+          eoaDoorSend.type = 'button';
+          eoaDoorSend.textContent = 'Send report';                   // en.json hud.bug_report.send
+          eoaDoorSend.style.cssText = 'margin-top:8px;min-height:56px;width:100%;color:#17100a;' +
+            'background:#d9ad38;border:2px solid #f4d16b;border-radius:8px;font:700 17px sans-serif;';
+          eoaDoorStatus = document.createElement('div');
+          eoaDoorStatus.setAttribute('role', 'status');
+          eoaDoorStatus.style.cssText = 'margin-top:6px;min-height:18px;color:#d7c9f0;' +
+            'font:600 14px/1.3 sans-serif;';
+          eoaDoorForm.appendChild(eoaDoorNote);
+          eoaDoorForm.appendChild(eoaDoorSend);
+          eoaDoorForm.appendChild(eoaDoorStatus);
+          eoaDoorEl.appendChild(eoaDoorOpen);
+          eoaDoorEl.appendChild(eoaDoorForm);
+          document.body.appendChild(eoaDoorEl);
+          eoaDoorOpen.addEventListener('click', function () {
+            var showing = eoaDoorForm.style.display === 'block';
+            eoaDoorForm.style.display = showing ? 'none' : 'block';
+            if (!showing) { try { eoaDoorNote.focus(); } catch (e) { } }
+          });
+          eoaDoorSend.addEventListener('click', eoaDoorSubmit);
+        } catch (e) {
+          console.info('[PiLifecycle] bug-door not built: ' + e);   // logged, never fatal
+        }
+      }
+      function eoaDoorPromote(reason) {
+        try {
+          if (!eoaDoorOpen) return;
+          // WO-1963: RE-SHOW the door. eoaDoorHide() sets display:none once the runtime is up, so
+          // a promote AFTER boot (the new 'runtime-error' reason) would style an invisible element
+          // and give the player nothing. No-op for the pre-runtime reasons.
+          if (eoaDoorEl) eoaDoorEl.style.display = '';
+          // Promotion is by weight/size/border, never colour alone (owner is colourblind).
+          eoaDoorOpen.style.minHeight = '56px';
+          eoaDoorOpen.style.color = '#17100a';
+          eoaDoorOpen.style.background = '#d9ad38';
+          eoaDoorOpen.style.border = '2px solid #f4d16b';
+          eoaDoorOpen.style.font = '700 18px sans-serif';
+          console.info('[PiLifecycle] bug-door promoted reason=' + reason);
+        } catch (e) { console.info('[PiLifecycle] bug-door promote skipped: ' + e); }
+      }
+      function eoaDoorHide() {
+        try {
+          if (eoaDoorStallTimer !== null) { window.clearTimeout(eoaDoorStallTimer); eoaDoorStallTimer = null; }
+          if (eoaDoorEl) eoaDoorEl.style.display = 'none';
+        } catch (e) { console.info('[PiLifecycle] bug-door hide skipped: ' + e); }
+      }
+      function eoaDoorNoteProgress() {
+        try {
+          if (eoaDoorStallTimer !== null) window.clearTimeout(eoaDoorStallTimer);
+          eoaDoorStallTimer = window.setTimeout(function () {
+            eoaDoorPromote('stall pct=' + eoaLastPct);
+          }, EOA_DOOR_STALL_MS);
+        } catch (e) { console.info('[PiLifecycle] bug-door stall timer skipped: ' + e); }
+      }
+      function eoaDoorSubmit() {
+        try {
+          if (eoaDoorSent) return;
+          var note = (eoaDoorNote && eoaDoorNote.value) ? String(eoaDoorNote.value) : '';
+          var pm = null;
+          try { pm = (performance && performance.memory) ? performance.memory : null; } catch (e) { pm = null; }
+          var tail = [
+            'boot=' + eoaBootId,
+            'session=' + eoaTraceSession,
+            'pct=' + eoaLastPct,
+            'upMs=' + (Date.now() - eoaBootAt),
+            'navigation=' + eoaNavType,
+            'ua=' + (navigator.userAgent || ''),
+            'deviceMemoryGB=' + (navigator.deviceMemory || '?'),
+            'jsHeapLimitMB=' + (pm ? Math.round(pm.jsHeapSizeLimit / 1048576) : '?'),
+            'inner=' + window.innerWidth + 'x' + window.innerHeight,
+            'dpr=' + (window.devicePixelRatio || '?'),
+            'unityStarted=' + (!!window.unityInstance)
+          ];
+          var payload = JSON.stringify({
+            note: note,
+            sceneName: 'xNFTTemplate',
+            version: '{{{ PRODUCT_VERSION }}}',   // same buildId the trace rows carry
+            platform: 'webgl-preruntime',
+            sessionId: eoaTraceSession,   // THE JOIN KEY: analytics_events.player_id (api/trace.js)
+            traceTail: tail
+          });
+          eoaDoorSent = true;
+          if (eoaDoorSend) eoaDoorSend.disabled = true;
+          if (eoaDoorStatus) eoaDoorStatus.textContent = 'Sending...';   // en.json feedback.sending
+          fetch(EOA_BUG_REPORT_ENDPOINT, {
+            method: 'POST', body: payload,
+            headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+            keepalive: true, mode: 'cors', credentials: 'omit'
+          }).then(function (r) {
+            if (r && r.ok) {
+              // en.json hud.bug_report.sent_toast
+              if (eoaDoorStatus) eoaDoorStatus.textContent = 'Report sent - thank you, defender.';
+              eoaTraceEmit('[PiLifecycle] bug-door sent boot=' + eoaBootId +
+                ' pct=' + eoaLastPct + ' noteChars=' + note.length);
+            } else {
+              eoaDoorSent = false;
+              if (eoaDoorSend) eoaDoorSend.disabled = false;
+              // en.json hud.bug_report.failed_toast
+              if (eoaDoorStatus) eoaDoorStatus.textContent = "Couldn't send - check your connection and retry.";
+              console.info('[PiLifecycle] bug-door POST refused status=' + (r && r.status));
+            }
+          })['catch'](function (e) {
+            eoaDoorSent = false;
+            if (eoaDoorSend) eoaDoorSend.disabled = false;
+            // en.json hud.bug_report.failed_toast
+            if (eoaDoorStatus) eoaDoorStatus.textContent = "Couldn't send - check your connection and retry.";
+            console.info('[PiLifecycle] bug-door POST failed: ' + e);
+          });
+        } catch (e) {
+          eoaDoorSent = false;
+          console.info('[PiLifecycle] bug-door submit skipped: ' + e);   // never breaks the boot
+        }
+      }
+      eoaDoorBuild();
+
+      var script = document.createElement("script");
+      script.src = loaderUrl;
+      script.onload = () => {
+        createUnityInstance(canvas, config, (progress) => {
+          progressBarFull.style.width = 100 * progress + "%";
+          try { eoaLastPct = Math.round(progress * 100); } catch (e) { /* never fatal */ }
+          eoaDoorNoteProgress();   // WO-1927: progress means not stalled - re-arm the watch
+        }).then((unityInstance) => {
+          loadingBar.style.display = "none";
+          eoaTraceEmit('[PiLifecycle] unity-running session=' + eoaTraceSession +
+            ' upMs=' + (Date.now() - eoaBootAt));
+          eoaDoorHide();   // WO-1927: the runtime owns the feedback door from here
+        }).catch((message) => {
+          // Was a raw alert(), which the Pi template forbids (WO-678) and which tells the server
+          // nothing. A rejection HERE is the boot dying inside the loader - the window in which 11
+          // iPhones died at progress=90% on 2026-09-21 (WO-1925) with nothing recorded anywhere.
+          console.error('[Loader] ' + message);
+          if (loadingBar) loadingBar.textContent = 'Load error: ' + message;
+          eoaTraceEmit('[PiLifecycle] loader-failed pct=' + eoaLastPct +
+            ' session=' + eoaTraceSession + ' upMs=' + (Date.now() - eoaBootAt) +
+            ' err=' + ('' + message));   // '' + message: the rejection may be an Error
+          // WO-1927: the ONE line that ticket adds inside WO-1926's catch - the runtime will
+          // never exist, so the page door is the player's only channel. Promote it.
+          eoaDoorPromote('loader-failed');
+        });
+      };
+      // WO-1927: arm the stall watch BEFORE the loader script is appended, never inside
+      // script.onload. A loader.js that 404s never fires onload at all - so onload-armed, the
+      // LOUDEST stall there is would be the one case that never promotes the door.
+      eoaDoorNoteProgress();
+      document.body.appendChild(script);
+    </script>
+  </body>
+</html>

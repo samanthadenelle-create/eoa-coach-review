@@ -1,0 +1,34 @@
+{
+  "_comment": [
+    "WO-2061h - THE ONE HOME for the Heart tree's stake-driven 'living' numbers.",
+    "",
+    "Owner rulings 2026-09-25, verbatim:",
+    "  'If total orders have over 200k staked should persist to all players showing it's living'",
+    "  'The total should be tunable from the command center'",
+    "  'The higher the stake the more alive it displays' / 'For all the circle'",
+    "",
+    "livingStakeThresholdSkr is the SHIPPING DEFAULT of the Command Center knob",
+    "`realm.livingStakeThresholdSkr` (a serverOnly tunable, api/_lib/tunables.js). The live",
+    "value is read from the client_tunables table by api/_lib/realm-stake.js; this number",
+    "answers only when that row is absent or unreadable. The Command Center card's `def` is a",
+    "require() of this file, never a retyped copy (api/_lib/tunable-manifest.js serverOnly rule).",
+    "",
+    "circleCanopy is the Circle (Order) layer's stake -> canopy fullness curve. NO EXISTING",
+    "STAKE LADDER FITS: heartbound-resonance-config.json `tiers` are resonance SCORES (minScore),",
+    "not stake, and `minHeartboundStake` (100) is per wallet. So the curve is two named",
+    "constants in THIS one place, stated as such: a resolved vote always shows",
+    "minAtResolvedVote01 of the canopy, rising linearly to full at fullAtStakeSkr of the WHOLE",
+    "Circle's verified stake. fullAtStakeSkr = a quarter of the realm threshold is a lane pick",
+    "for the Oct 7 demo, flagged for the owner in the WO-2061 RESULT.",
+    "",
+    "No Unity twin: the client is told a density float, it never computes one (same posture",
+    "as heartbound-resonance-config.json)."
+  ],
+  "version": 1,
+  "livingStakeThresholdSkr": 200000,
+  "circleCanopy": {
+    "minAtResolvedVote01": 0.35,
+    "fullAtStakeSkr": 50000
+  },
+  "realmLivingCanopy01": 0.5
+}
