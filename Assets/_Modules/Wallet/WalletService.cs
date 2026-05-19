@@ -196,23 +196,32 @@ namespace DeNelle.Wallet
     /// </summary>
     public sealed class WalletService
     {
+        // ── The owner-gated network constant (spec Part 10) ──────────────────
+        // THIS is the single static constant the spec calls out: the v2
+        // foundation runs devnet, and flipping the realm to mainnet is ONE edit
+        // here — and an edit the agent never makes. It ships, and stays, Devnet.
+        // Mainnet requires explicit written owner approval (Part 10).
+        public const WalletNetwork DefaultNetwork = WalletNetwork.Devnet;
+
         // ── Treasury (devnet display only) ───────────────────────────────────
         // Public address shown for transparency (spec Week 7 "Rewards Distributor
-        // display"). Pulled from docs/wallets-of-record.md §2 — the hardware-backed
-        // Rewards Distributor wallet. Public addresses only; never a private key
-        // (spec Part 10). The revenue-treasury wallets (§4 of wallets-of-record)
-        // are not yet provisioned, so the Rewards Distributor stands in for the
-        // transparency display until the Squads multisig treasuries exist.
-        public const string RewardsDistributorAddress = "2JRmEmrqUbhTiHX3u5bes5kHYZeZkJ2V1cMWubxwnmNi";
+        // display"). Sourced from docs/wallets-of-record.md §2 — the hardware-
+        // backed Rewards Distributor wallet — via the canonical wallets.json
+        // (WalletRegistry). Public addresses only; never a private key (Part 10).
+        // The revenue-treasury wallets (§4 of wallets-of-record) are not yet
+        // provisioned, so the Rewards Distributor stands in for the transparency
+        // display until the Squads multisig treasuries exist.
+        public static string RewardsDistributorAddress => WalletRegistry.RewardsDistributorAddress;
 
         private readonly IWalletProvider _provider;
 
         /// <summary>
-        /// The active Solana network. Devnet in the v2 foundation (spec Part 10).
-        /// A single static-style flip to Mainnet is owner-gated — the agent never
-        /// sets this to Mainnet without written owner approval.
+        /// The active Solana network. Devnet in the v2 foundation (spec Part 10),
+        /// seeded from <see cref="DefaultNetwork"/>. The flip to Mainnet is
+        /// owner-gated — the agent never sets this to Mainnet without written
+        /// owner approval.
         /// </summary>
-        public WalletNetwork Network { get; private set; } = WalletNetwork.Devnet;
+        public WalletNetwork Network { get; private set; } = DefaultNetwork;
 
         /// <summary>Human-readable label for the active network — used by UI badges.</summary>
         public string NetworkLabel => Network == WalletNetwork.Mainnet ? "Mainnet" : "Devnet";
@@ -233,13 +242,48 @@ namespace DeNelle.Wallet
         public string ProviderName => _provider.ProviderName;
 
         /// <summary>
-        /// Constructs the service over a provider. With no argument, ships the
-        /// devnet <see cref="StubWalletProvider"/> — everything compiles and runs
-        /// without the Solana Unity SDK. Pass a real provider once the SDK lands.
+        /// Constructs the service over an explicit provider — used by tests and
+        /// any caller that wants to pin the provider (e.g. force the stub).
         /// </summary>
-        public WalletService(IWalletProvider provider = null)
+        public WalletService(IWalletProvider provider)
         {
             _provider = provider ?? new StubWalletProvider();
+        }
+
+        /// <summary>
+        /// Constructs the service and AUTO-SELECTS the provider: the real
+        /// <see cref="SolanaWalletProvider"/> when the Solana Unity SDK is
+        /// compiled in (the <c>SOLANA_SDK</c> scripting define is set), the
+        /// devnet <see cref="StubWalletProvider"/> otherwise. So the whole
+        /// wallet + store module compiles and runs end-to-end with no SDK
+        /// installed, and "lights up" the real SDK the moment the integrator
+        /// resolves the package and sets the define — with no caller change.
+        /// </summary>
+        public WalletService()
+        {
+            if (SolanaWalletProvider.IsSdkAvailable)
+            {
+                _provider = new SolanaWalletProvider();
+                Debug.Log("[WalletService] Using SolanaWalletProvider (Solana Unity SDK detected).");
+            }
+            else
+            {
+                _provider = new StubWalletProvider();
+                Debug.Log("[WalletService] Using StubWalletProvider (Solana Unity SDK absent — devnet mock).");
+            }
+        }
+
+        /// <summary>
+        /// Constructs the service for a chosen provider mode. Passing
+        /// <c>useStub: true</c> forces the editor/no-wallet mock even when the
+        /// SDK is present — handy for offline dev and EditMode tests. The default
+        /// auto-selects the real SDK provider when it is available.
+        /// </summary>
+        public static WalletService Create(bool useStub = false)
+        {
+            return useStub
+                ? new WalletService(new StubWalletProvider())
+                : new WalletService();
         }
 
         // =====================================================================
