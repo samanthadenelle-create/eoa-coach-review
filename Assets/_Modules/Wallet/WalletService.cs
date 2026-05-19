@@ -18,15 +18,8 @@
 // =============================================================================
 
 using System;
-using System.Threading.Tasks;
 using Cysharp.Threading.Tasks;
-using DeNelle.Core;
-using DeNelle.Core.Analytics;   // WO-1948 review add-on: wallet_connect_attempted / wallet_connect_result on the ONE EventTracker rail
-using DeNelle.Core.Backend;
-using DeNelle.Core.Diagnostics;
-using DeNelle.Core.Platform;
 using UnityEngine;
-using LocalText = DeNelle.Core.UI.LocalText;
 
 namespace DeNelle.Wallet
 {
@@ -102,15 +95,6 @@ namespace DeNelle.Wallet
         /// <summary>SKR balance (in whole SKR).</summary>
         public double Skr;
 
-        /// <summary>
-        /// WO-1948 review add-on (2026-09-22): TRUE when the read did NOT happen - no wallet
-        /// connected, or the provider threw - so the zeros above are an ABSENCE of data, not a
-        /// balance. A caller that treats an Unknown balance as "holds nothing" refuses a swap
-        /// it might have afforded; one that treats it as "known" Pays against an unread wallet.
-        /// Both are wrong: check this flag and stop, with the not-charged copy.
-        /// </summary>
-        public bool Unknown;
-
         /// <summary>Returns the balance for one rail.</summary>
         public double For(CurrencyKind currency)
         {
@@ -161,16 +145,6 @@ namespace DeNelle.Wallet
                 TxSignature = signature,
             };
         }
-
-        public static PaymentResult Indeterminate(string sku, CurrencyKind currency, double amount,
-                                                   string signature, string error)
-        {
-            return new PaymentResult
-            {
-                Ok = false, PackSku = sku, Currency = currency, AmountNative = amount,
-                TxSignature = signature, Error = error,
-            };
-        }
     }
 
     /// <summary>
@@ -211,22 +185,6 @@ namespace DeNelle.Wallet
         /// Devnet only in the v2 foundation.
         /// </summary>
         UniTask<PaymentResult> SendPayment(string packSku, CurrencyKind currency, double amount, WalletNetwork network);
-
-        /// <summary>
-        /// True when this provider can ed25519-sign an arbitrary message with the
-        /// connected wallet key (the real SolanaWalletProvider). False for the
-        /// devnet stub, which has no key — the backend save-auth path skips the
-        /// auth headers when this is false (WO-121, offline-safe).
-        /// </summary>
-        bool CanSignMessages { get; }
-
-        /// <summary>
-        /// ed25519-signs the EXACT UTF-8 bytes of <paramref name="utf8Message"/> with
-        /// the connected wallet and returns the base58 signature, or null when the
-        /// provider cannot sign / no wallet is connected. Used for the backend
-        /// save-auth challenge (WO-121); the caller owns the message format.
-        /// </summary>
-        UniTask<string> SignMessageBase58(string utf8Message);
     }
 
     /// <summary>
@@ -236,103 +194,28 @@ namespace DeNelle.Wallet
     /// never on the Solana SDK. Exposes <see cref="Connect"/>, <see cref="GetBalance"/>
     /// and <see cref="Pay"/> as the spec's three required operations (Part 3).
     /// </summary>
-    public sealed class WalletService : IWalletSigner
+    public sealed class WalletService
     {
-        // ── The owner-gated network constant (spec Part 10) ──────────────────
-        // THIS is the single static constant the spec calls out: the v2
-        // foundation runs devnet, and flipping the realm to mainnet is ONE edit
-        // here — and an edit the agent never makes. It ships, and stays, Devnet.
-        // Mainnet requires explicit written owner approval (Part 10).
-        // ⛔ MAINNET IS THE RULED, PERMANENT STATE. DO NOT REVERT THIS LINE.
-        //
-        // ⚠ THE COMMENT THAT STOOD HERE UNTIL 2026-08-25 SAID THE OPPOSITE, AND FOLLOWING IT WOULD
-        // NOW KILL LIVE SALES. It read "TEMPORARILY MAINNET ... REVERT TO Devnet THE MOMENT THE
-        // CANARY IS DONE", and described safety as resting on a canary-only allowlist: one SKU, one
-        // wallet. That was TRUE on 2026-08-23 and every clause of it is now FALSE:
-        //   * the owner ruled the FULL authored ladder live (WO-1159) - 27 SKUs, $1.99-$49.99;
-        //   * the server quotes every one of them on mainnet-beta (verified live 2026-08-25);
-        //   * two real ladder purchases SETTLED (391 SKR each) into the 2-of-3 treasury vault;
-        //   * the owner has since WITHDRAWN that revenue on chain.
-        // A seat obeying the old instruction would have reverted a live, paying game to devnet while
-        // believing it was following canon - the exact failure class CLAUDE.md sec.15 exists to stop,
-        // and the reason a stale instruction is more dangerous than no instruction at all.
-        //
-        // ⛔ THE MATCHED PAIR STILL GOVERNS (CANON_GROUND_TRUTH_2026-08-23): this constant is safe at
-        // Mainnet ONLY while FeatureFlags.RealmStorePurchase is true, and that flag is safe ONLY
-        // while this is Mainnet. On Devnet the tokens are free test tokens and the purchase chain
-        // COMPLETES - real packs granted for worthless SKR, with purchase_completed events
-        // indistinguishable from real revenue. MonetizationActivationRegression pins BOTH; moving
-        // either one alone turns the suite red, on purpose. Move them together or not at all.
-        //
-        // Depth beyond this line is unchanged: SolanaWalletProvider.SendPayment still requires the
-        // SKR rail and a positive SERVER-QUOTED amount, and carries no SKU allowlist of its own
-        // because the server quote is the single authority on what is sellable.
-        public const WalletNetwork DefaultNetwork = WalletNetwork.Mainnet;
-
         // ── Treasury (devnet display only) ───────────────────────────────────
         // Public address shown for transparency (spec Week 7 "Rewards Distributor
-        // display"). Sourced from docs/wallets-of-record.md §2 — the hardware-
-        // backed Rewards Distributor wallet — via the canonical wallets.json
-        // (WalletRegistry). Public addresses only; never a private key (Part 10).
-        // The revenue-treasury wallets (§4 of wallets-of-record) are not yet
-        // provisioned, so the Rewards Distributor stands in for the transparency
-        // display until the Squads multisig treasuries exist.
-        public static string RewardsDistributorAddress => WalletRegistry.RewardsDistributorAddress;
+        // display"). Pulled from docs/wallets-of-record.md §2 — the hardware-backed
+        // Rewards Distributor wallet. Public addresses only; never a private key
+        // (spec Part 10). The revenue-treasury wallets (§4 of wallets-of-record)
+        // are not yet provisioned, so the Rewards Distributor stands in for the
+        // transparency display until the Squads multisig treasuries exist.
+        public const string RewardsDistributorAddress = "2JRmEmrqUbhTiHX3u5bes5kHYZeZkJ2V1cMWubxwnmNi";
 
         private readonly IWalletProvider _provider;
 
         /// <summary>
-        /// Hard ceiling on ONE wallet-connect handshake (seconds).
-        /// <para>
-        /// Mobile Wallet Adapter has no failure mode of its own for "no wallet app is
-        /// installed" or "the player backgrounded the wallet and never came back" - the
-        /// await simply never resolves, which on the login surface reads to the player as
-        /// a frozen game. 30s matches the existing PiSignInController.Authenticate ceiling
-        /// (the same shape of problem: an external app must answer) and is generous enough
-        /// that a real player picking an account is never cut off.
-        /// </para>
-        /// <para>
-        /// Counted in UNSCALED player-loop time: while the app is backgrounded (the player
-        /// IS in the wallet app) Unity's loop is paused, so the budget does not burn - it
-        /// resumes counting when they return. That is the intended semantic.
-        /// </para>
+        /// The active Solana network. Devnet in the v2 foundation (spec Part 10).
+        /// A single static-style flip to Mainnet is owner-gated — the agent never
+        /// sets this to Mainnet without written owner approval.
         /// </summary>
-        public const float ConnectTimeoutSeconds = 30f;
-
-        /// <summary>
-        /// Why the LAST <see cref="Connect"/> did not produce an account, in player-facing
-        /// words; empty after a success. Callers surface this instead of guessing
-        /// "cancelled" - a timeout and a refusal need different next steps from the player.
-        /// </summary>
-        public string LastConnectError { get; private set; } = string.Empty;
-
-        /// <summary>
-        /// The active Solana network. Devnet in the v2 foundation (spec Part 10),
-        /// seeded from <see cref="DefaultNetwork"/>. The flip to Mainnet is
-        /// owner-gated — the agent never sets this to Mainnet without written
-        /// owner approval.
-        /// </summary>
-        public WalletNetwork Network { get; private set; } = DefaultNetwork;
-
-        /// <summary>
-        /// The WalletService that last completed Connect. PackStore and Jupiter
-        /// swap must share this instance — WalletConnectDialog constructs its own
-        /// disconnected WalletService in Awake, so FindAnyObjectByType on the
-        /// dialog is the wrong wallet (Seeker 16:40:29, 1222 SKR in store, swap
-        /// saw none).
-        /// </summary>
-        public static WalletService ConnectedInstance { get; private set; }
-
-        /// <summary>Night Market / Jupiter must use THIS instance, not WalletConnectDialog's spare.</summary>
-        public void BindAsConnectedInstance()
-        {
-            if (IsConnected) ConnectedInstance = this;
-        }
+        public WalletNetwork Network { get; private set; } = WalletNetwork.Devnet;
 
         /// <summary>Human-readable label for the active network — used by UI badges.</summary>
-        public string NetworkLabel => Network == WalletNetwork.Mainnet
-            ? LocalText.Get("store.wallet.network_mainnet", "Mainnet")
-            : LocalText.Get("store.wallet.network_devnet", "Devnet");
+        public string NetworkLabel => Network == WalletNetwork.Mainnet ? "Mainnet" : "Devnet";
 
         /// <summary>Raised whenever the connection status changes (connected / disconnected).</summary>
         public event Action<WalletStatus> StatusChanged;
@@ -350,138 +233,13 @@ namespace DeNelle.Wallet
         public string ProviderName => _provider.ProviderName;
 
         /// <summary>
-        /// True ONLY when the connected wallet is a real, key-holding, signing wallet -
-        /// never the devnet stub. This is the single attestation the save layer accepts
-        /// before a wallet address may key a CLOUD identity (GameStateService.BindWallet
-        /// attested overload).
-        /// <para>
-        /// Why it exists: the stub used to mint a plain 44-char base58 string, and the
-        /// old cloud-identity test was a denylist ("does not start with guest-local-"), so
-        /// a stub address read as a real player. With SOLANA_SDK missing from a build,
-        /// EVERY device would have keyed the SAME cloud row. Attestation is now positive
-        /// and comes from the provider, not from the shape of a string.
-        /// </para>
+        /// Constructs the service over a provider. With no argument, ships the
+        /// devnet <see cref="StubWalletProvider"/> — everything compiles and runs
+        /// without the Solana Unity SDK. Pass a real provider once the SDK lands.
         /// </summary>
-        public bool IsRealSigningWallet =>
-            IsConnected && !(_provider is StubWalletProvider) && _provider.CanSignMessages;
-
-        // ── WO-931 (2026-08-10): payment-seam refusal reasons ────────────────
-        // The save layer consults IsRealSigningWallet before keying a cloud
-        // identity; until WO-931 the PAYMENT layer never did — so on any build
-        // where auto-select lands on the stub (release desktop/WebGL, Android
-        // without SOLANA_SDK), a fabricated SendPayment "success" flowed straight
-        // into PackStore.ApplyPackContents: free packs plus a fake
-        // purchase_completed analytics event. Pay/PayFlat now refuse at the seam,
-        // BEFORE _provider.SendPayment, in every build configuration (Editor,
-        // development and release alike — deliberately NOT #if-guarded). Public
-        // consts so the regression cases assert the exact reason, not a paraphrase.
-        /// <summary>WO-931: <see cref="Pay"/>/<see cref="PayFlat"/> refusal reason when the resolved provider is the devnet stub.</summary>
-        public static string StubPaymentRefusalReason =>
-            LocalText.Get("store.pay.sol_stub_refused",
-                "Payments are unavailable: the devnet stub wallet cannot make a real payment.");
-        /// <summary>WO-931: refusal reason when a connected provider holds no signing key (fails <see cref="IsRealSigningWallet"/>).</summary>
-        public static string NonSigningPaymentRefusalReason =>
-            LocalText.Get("store.pay.sol_nonsigning_refused",
-                "Payments are unavailable: the connected wallet provider holds no signing key.");
-
-        /// <summary>
-        /// Constructs the service over an explicit provider — used by tests and
-        /// any caller that wants to pin the provider (e.g. force the stub).
-        /// </summary>
-        public WalletService(IWalletProvider provider)
+        public WalletService(IWalletProvider provider = null)
         {
             _provider = provider ?? new StubWalletProvider();
-        }
-
-        /// <summary>
-        /// Constructs the service and AUTO-SELECTS the provider: the real
-        /// <see cref="SolanaWalletProvider"/> when the Solana Unity SDK is
-        /// compiled in (the <c>SOLANA_SDK</c> scripting define is set), the
-        /// devnet <see cref="StubWalletProvider"/> otherwise. So the whole
-        /// wallet + store module compiles and runs end-to-end with no SDK
-        /// installed, and "lights up" the real SDK the moment the integrator
-        /// resolves the package and sets the define — with no caller change.
-        /// </summary>
-        public WalletService()
-        {
-            // WO-766: the real provider is selected only where it can actually
-            // complete a connect - an ANDROID DEVICE build with the SDK compiled in.
-            //
-            // 2026-08-06 FIX (F8 capture 10:41:22, scene Title, WINDOWS standalone
-            // Player.log): this test used to be
-            //     SolanaWalletProvider.IsSdkAvailable && !Application.isEditor
-            // on the belief - stated in the comment that lived here - that
-            // "SOLANA_SDK is set for the ANDROID target group only". It is not.
-            // The define comes from a platform-independent versionDefine in
-            // DeNelle.Wallet.asmdef ("com.solana.unity_sdk" -> "SOLANA_SDK",
-            // includePlatforms empty), NOT from ProjectSettings, so it is defined on
-            // EVERY target including Standalone and WebGL. The old test therefore
-            // excluded only the Editor: the Windows exe picked the real provider and
-            // Connect threw NotSupportedException("...Editor/desktop use
-            // StubWalletProvider") - naming a fallback that never happened. Desktop
-            // Connect Wallet produced a LogError and nothing else, and because no
-            // account was ever bound the save layer stayed local-only while telling
-            // the log to "tap Connect Wallet once to re-attest".
-            //
-            // IsSupportedOnThisPlatform is compiled from the same
-            // "#if SOLANA_SDK && UNITY_ANDROID && !UNITY_EDITOR" that guards the
-            // working body of SolanaWalletProvider.Connect, so this branch and that
-            // capability cannot drift. It also closes the identical latent hole for
-            // WebGL / any future non-Android target, which the old test had too.
-            //
-            // NOT WEAKENED: on an Android device build the condition is unchanged -
-            // SDK compiled in, not the editor - so the Seeker still gets, and only
-            // gets, the real MWA provider.
-            //
-            // NOT A CLOUD-SYNC LOOPHOLE: the stub is still a StubWalletProvider, so
-            // IsRealSigningWallet (above) stays FALSE on desktop and BindWallet is
-            // called un-attested. Desktop remains LOCAL-ONLY by design - a devnet
-            // stub address must never key a shared cloud save row. This change only
-            // stops Connect from erroring; it grants the stub nothing.
-#if UNITY_WEBGL && !UNITY_EDITOR && SOLANA_SDK
-            _provider = new WebGLWalletProvider();
-            FlowTrace.Once("Wallet", "wo1887-webgl-adapter",
-                "WebGLWalletProvider selected - Magicblock Wallet Standard (not StubWalletProvider, not MWA).");
-            Debug.Log("[WalletService] Using WebGLWalletProvider (SolanaWalletAdapter / Wallet Standard).");
-#else
-            if (SolanaWalletProvider.IsSupportedOnThisPlatform)
-            {
-                _provider = new SolanaWalletProvider();
-                // WO-766 safety invariant (spec s3), traced once per session:
-                // the real wallet is IDENTITY + cloud-save message-signing only.
-                // FeatureFlags.RealmStorePurchase stays release-gated OFF, so no
-                // transfer transaction is ever constructed with purchases off.
-                FlowTrace.Once("Wallet", "wo766-real-provider",
-                    "SolanaWalletProvider selected - identity/save mode, purchases off " +
-                    "(RealmStorePurchase release-gated; no transfer path reachable).");
-                Debug.Log("[WalletService] Using SolanaWalletProvider (Solana Unity SDK compiled in).");
-            }
-            else
-            {
-                _provider = new StubWalletProvider();
-                // Say WHICH of the two reasons it was. The old line claimed "Editor
-                // session" for every stub selection, which is what made the desktop
-                // player's mis-selection invisible until it threw (F8 2026-08-06).
-                // Local-only saves are the correct outcome here, not a degradation.
-                Debug.Log(SolanaWalletProvider.IsSdkAvailable
-                    ? "[WalletService] Using StubWalletProvider (SDK present, but Mobile Wallet Adapter needs an " +
-                      "Android device - editor/desktop/WebGL run the devnet mock; saves stay local-only)."
-                    : "[WalletService] Using StubWalletProvider (Solana Unity SDK absent - devnet mock).");
-            }
-#endif
-        }
-
-        /// <summary>
-        /// Constructs the service for a chosen provider mode. Passing
-        /// <c>useStub: true</c> forces the editor/no-wallet mock even when the
-        /// SDK is present — handy for offline dev and EditMode tests. The default
-        /// auto-selects the real SDK provider when it is available.
-        /// </summary>
-        public static WalletService Create(bool useStub = false)
-        {
-            return useStub
-                ? new WalletService(new StubWalletProvider())
-                : new WalletService();
         }
 
         // =====================================================================
@@ -496,170 +254,21 @@ namespace DeNelle.Wallet
         /// </summary>
         public async UniTask<WalletAccount> Connect()
         {
-            using var _ = FlowTrace.Enter("Wallet", $"Connect (provider={ProviderName}, {NetworkLabel})");
-            if (IsConnected)
-            {
-                ConnectedInstance = this;
-                return Account;
-            }
+            if (IsConnected) return Account;
 
             SetStatus(WalletStatus.Connecting);
-            LastConnectError = string.Empty;
-            Guard.Try("Wallet", "analytics wallet_connect_attempted", () => EventTracker.Track("wallet_connect_attempted", new
-            {
-                provider = ProviderName,
-                network = Network.ToString(),
-                platform = EventTracker.Platform,
-                channel = EventTracker.Channel
-            }));
-
-            // WO-1420: the ONLY way to tell "our deadline expired" from "the provider threw a
-            // TimeoutException as its refusal shape" is to measure. Unscaled real time, because the
-            // Timeout below uses UnscaledDeltaTime and a paused/slowed game must not skew the branch.
-            float connectStartedAt = Time.realtimeSinceStartup;
-            DateTime associationCloseBefore = TargetedLocalAssociationScenario.LastAssociationCloseUtc;
-#if UNITY_WEBGL && !UNITY_EDITOR
-            float connectCeiling = 90f;
-#else
-            float connectCeiling = ConnectTimeoutSeconds;
-#endif
             try
             {
-                // TIME-BOUNDED (security audit 2026-08-02): an unanswered MWA handshake
-                // used to hang forever and froze the login surface. On expiry this throws
-                // TimeoutException, which lands in the catch below as a normal failure -
-                // status returns to Disconnected and the caller gets an honest reason.
-                var account = await _provider.Connect(Network)
-                    .Timeout(TimeSpan.FromSeconds(connectCeiling), DelayType.UnscaledDeltaTime);
+                var account = await _provider.Connect(Network);
                 SetStatus(account.IsValid ? WalletStatus.Connected : WalletStatus.Disconnected);
-
-                // WO-121: expose this connected wallet as the backend save-auth
-                // signer so GameStateService (DeNelle.Core) can sign the nonce
-                // without referencing DeNelle.Wallet. The devnet stub registers
-                // too but reports CanSign == false, so headers stay skipped until
-                // a real signer (SolanaWalletProvider) is connected.
-                if (account.IsValid)
-                {
-                    ConnectedInstance = this;
-                    CoreServices.RegisterWalletSigner(this);
-                    // PRIVACY (security audit 2026-08-02): log the MASKED address only.
-                    // FlowTrace lines ride WebTraceSink -> api/trace.js into analytics_events
-                    // AND into plaintext Vercel logs, so a full base58 pubkey here publishes
-                    // the player's on-chain identity (and every transaction they ever made)
-                    // to anyone with log access. ShortAddress is enough to tell two wallets
-                    // apart while debugging.
-                    FlowTrace.Step("Wallet", $"Connect OK — {account.ShortAddress} ({account.WalletName}).");
-
-                    // The RETURN LEG of the connect seam (2026-08-05 Seeker capture): the
-                    // connect above succeeded end to end while every view still read
-                    // "Connect Wallet", because nothing ever published a CONNECTED state.
-                    // Published HERE, not in a caller, because this is the single choke
-                    // point BOTH connect paths pass through - the corner button
-                    // (WalletSkinBootstrap) and the login surface (LoginWalletBridge).
-                    CurrencySkinResolver.PublishWalletConnected(account.Address);
-                    TrackConnectResult("ok", null, null, Time.realtimeSinceStartup - connectStartedAt);
-                }
-                else
-                {
-                    LastConnectError = LocalText.Get("store.wallet.connect_refused",
-                        "Connect was cancelled or refused by the wallet.");
-                    FlowTrace.Warn("Wallet", "Connect resolved an INVALID account — cancelled or refused; staying disconnected.");
-                    TrackConnectResult("refused", "invalid-account", null, Time.realtimeSinceStartup - connectStartedAt);
-                }
-
                 return account;
-            }
-            // ⛔ WO-1420 — A TimeoutException HERE HAS TWO VERY DIFFERENT CAUSES, AND REPORTING THE
-            // WRONG ONE MIS-STEERS EVERY FUTURE TRIAGE OF THIS SEAM.
-            //   (a) OUR deadline expired: the wallet never answered for ConnectTimeoutSeconds.
-            //   (b) The provider/MWA layer threw TimeoutException as its REFUSAL shape, long before
-            //       our deadline, and UniTask.Timeout re-surfaced it (the delay promise never won
-            //       the race).
-            // Device capture seq 4683, 2026-09-06 00:49:31 (build 2026.09.06.357453): Connect at
-            // 31.425, Fail at 31.822 - FOUR HUNDRED MILLISECONDS - while the message asserted 30 s.
-            // Five wallet handlers were installed and one of them ANSWERED, closing the association
-            // endpoint at 31.538. The old copy sent a reader looking for a missing wallet app.
-            // Branch on measured elapsed time; nothing else can tell (a) from (b).
-            catch (TimeoutException ex)
-            {
-                float elapsed = Time.realtimeSinceStartup - connectStartedAt;
-                bool ourDeadline = elapsed >= connectCeiling;
-
-                // WO-1420 item 2: name the association close in the SAME line when it happened
-                // during THIS attempt, so a triage never again has to correlate two threads by
-                // timestamp. Correlation only - see LastAssociationCloseUtc's remarks.
-                DateTime closedAt = TargetedLocalAssociationScenario.LastAssociationCloseUtc;
-                string closeNote = closedAt > associationCloseBefore
-                    ? " A wallet closed its one-shot association endpoint during this attempt, so the " +
-                      "wallet app WAS reachable and answered."
-                    : string.Empty;
-
-                if (ourDeadline)
-                {
-                    LastConnectError = LocalText.FormatWithFallback("store.wallet.connect_timeout",
-                        "Your wallet did not respond in {0} seconds. Open your wallet app and try again.",
-                        (int)connectCeiling);
-                    FlowTrace.Fail("Wallet",
-                        $"Connect TIMED OUT after {elapsed:F1}s (our {connectCeiling}s deadline expired - " +
-                        "no wallet app installed, or the handshake was never answered) — staying disconnected." +
-                        closeNote);
-                }
-                else
-                {
-                    LastConnectError = LocalText.Get("store.wallet.connect_refused_retry",
-                        "Your wallet refused the connection. Open your wallet app and try again.");
-                    FlowTrace.Fail("Wallet",
-                        $"Connect REFUSED by the wallet after {elapsed:F1}s (TimeoutException raised INSIDE the " +
-                        $"provider, not our {ConnectTimeoutSeconds}s deadline): {ex.Message} — staying disconnected." +
-                        closeNote);
-                }
-                TrackConnectResult(ourDeadline ? "timeout" : "refused", ex.GetType().Name, ex.Message, elapsed);
-
-                SetStatus(WalletStatus.Disconnected);
-                return default;
             }
             catch (Exception ex)
             {
-                LastConnectError = LocalText.FormatWithFallback("store.wallet.connect_failed_type",
-                    "Wallet connect failed ({0}).", ex.GetType().Name);
-                FlowTrace.Fail("Wallet", $"Connect FAILED: {ex.GetType().Name}: {ex.Message} — staying disconnected.");
-                TrackConnectResult("error", ex.GetType().Name, ex.Message, Time.realtimeSinceStartup - connectStartedAt);
+                Debug.LogError($"[WalletService] Connect failed: {ex.Message}");
                 SetStatus(WalletStatus.Disconnected);
                 return default;
             }
-        }
-
-        /// <summary>
-        /// wallet_connect_result on the one EventTracker rail (WO-1948 review add-on): outcome
-        /// ok | refused | timeout | error, the exception type as <c>code</c>, the MWA code when
-        /// the message carries one ("... (-1)"), elapsed ms. Never throws (Guard).
-        /// </summary>
-        private void TrackConnectResult(string outcome, string code, string message, float elapsedSeconds)
-        {
-            int? mwaCode = null;
-            if (!string.IsNullOrEmpty(message))
-            {
-                int open = message.IndexOf('(');
-                int close = open >= 0 ? message.IndexOf(')', open) : -1;
-                if (open >= 0 && close > open &&
-                    int.TryParse(message.Substring(open + 1, close - open - 1).Trim(),
-                        System.Globalization.NumberStyles.AllowLeadingSign,
-                        System.Globalization.CultureInfo.InvariantCulture, out int parsed))
-                    mwaCode = parsed;
-            }
-            long elapsedMs = (long)(elapsedSeconds * 1000f);
-            Guard.Try("Wallet", "analytics wallet_connect_result", () => EventTracker.Track("wallet_connect_result", new
-            {
-                outcome,
-                code = code ?? string.Empty,
-                mwaCode,
-                elapsedMs,
-                error = message ?? string.Empty,
-                provider = ProviderName,
-                network = Network.ToString(),
-                platform = EventTracker.Platform,
-                channel = EventTracker.Channel
-            }));
         }
 
         /// <summary>Disconnects the current wallet (React parity: <c>useGameWallet.disconnect</c>).</summary>
@@ -671,17 +280,11 @@ namespace DeNelle.Wallet
             }
             catch (Exception ex)
             {
-                FlowTrace.Fail("Wallet", $"Disconnect FAILED: {ex.GetType().Name}: {ex.Message}");
+                Debug.LogError($"[WalletService] Disconnect failed: {ex.Message}");
             }
             finally
             {
-                CoreServices.UnregisterWalletSigner(this); // WO-121
-                if (ReferenceEquals(ConnectedInstance, this)) ConnectedInstance = null;
                 SetStatus(WalletStatus.Disconnected);
-                // Same seam as the connect publish above - a view that showed the
-                // connected address must fall back to its connect label, never keep
-                // claiming a wallet that is gone.
-                CurrencySkinResolver.PublishWalletDisconnected();
             }
         }
 
@@ -695,15 +298,10 @@ namespace DeNelle.Wallet
         /// </summary>
         public async UniTask<WalletBalance> GetBalance()
         {
-            // WO-1948 review add-on (2026-09-22): a failed read is NOT a zero balance. The old
-            // `return default` handed callers three zeros indistinguishable from a genuinely empty
-            // wallet, so the store could Pay (or refuse) against a wallet it had never read.
-            // Both exits below mark the result Unknown and Warn; the swap rail refuses on it.
             if (!IsConnected)
             {
-                FlowTrace.Warn("Wallet", "GetBalance called with no wallet connected — balance UNKNOWN (not zero); callers must not Pay against it.");
                 Debug.LogWarning("[WalletService] GetBalance called with no wallet connected.");
-                return new WalletBalance { Unknown = true };
+                return default;
             }
 
             try
@@ -712,9 +310,8 @@ namespace DeNelle.Wallet
             }
             catch (Exception ex)
             {
-                FlowTrace.Fail("Wallet", $"GetBalance FAILED: {ex.GetType().Name}: {ex.Message} — returning zero balance.");
-                FlowTrace.Warn("Wallet", "GetBalance result is UNKNOWN (the read threw) — not a zero balance; the swap rail refuses rather than quote against it.");
-                return new WalletBalance { Unknown = true };
+                Debug.LogError($"[WalletService] GetBalance failed: {ex.Message}");
+                return default;
             }
         }
 
@@ -732,139 +329,24 @@ namespace DeNelle.Wallet
         /// <param name="currency">The rail to pay in (SOL / USDC / SKR).</param>
         public async UniTask<PaymentResult> Pay(PackDef pack, CurrencyKind currency)
         {
-            using var _ = FlowTrace.Enter("Wallet", $"Pay pack='{pack?.Sku ?? "<null>"}' {currency} ({NetworkLabel})");
-
             if (pack == null)
-            {
-                FlowTrace.Fail("Wallet", "Pay: pack definition is null — payment aborted.");
                 return PaymentResult.Failure(string.Empty, currency, "Pack definition is null.");
-            }
-
-            // WO-931: the stub can NEVER pay — refuse OUTRIGHT, before any
-            // connection-state check, so the refusal cannot be raced by connect
-            // timing and sits before the first await (the [wallet-provider]
-            // regression drives this branch synchronously). This is the
-            // IsConnected-free half of IsRealSigningWallet: the type test.
-            if (_provider is StubWalletProvider)
-            {
-                FlowTrace.Fail("Wallet",
-                    $"Pay '{pack.Sku}' ({currency}) REFUSED: stub provider cannot sign — no real payment " +
-                    "rail on this platform (WO-931; player NOT charged, pack NOT granted).");
-                return PaymentResult.Failure(pack.Sku, currency, StubPaymentRefusalReason);
-            }
 
             if (!IsConnected)
-            {
-                FlowTrace.Warn("Wallet", $"Pay '{pack.Sku}' ({currency}): no wallet connected — aborted (player NOT charged).");
-                return PaymentResult.Failure(pack.Sku, currency,
-                    LocalText.Get("store.pay.sol_connect_first", "No wallet connected — connect a wallet first."));
-            }
+                return PaymentResult.Failure(pack.Sku, currency, "No wallet connected — connect a wallet first.");
 
             var amount = pack.AmountFor(currency);
             if (amount <= 0d)
-            {
-                FlowTrace.Fail("Wallet", $"Pay '{pack.Sku}': no price for {currency} (amount={amount}) — payment aborted.");
-                return PaymentResult.Failure(pack.Sku, currency,
-                    LocalText.FormatWithFallback("store.pay.sol_no_price_for_currency",
-                        "Pack '{0}' has no price for {1}.", pack.Sku, currency));
-            }
-
-            // WO-931 belt to the stub short-circuit above: with IsConnected now
-            // settled, this is EXACTLY the save layer's attestation (reused, not
-            // rewritten). It also closes the decorator dodge — the dev-only
-            // DevWalletProbe delegates SendPayment to an INNER stub, so it passes
-            // the type test above but can never attest here (CanSignMessages
-            // delegates to the stub's false). No key, no payment.
-            if (!IsRealSigningWallet)
-            {
-                FlowTrace.Fail("Wallet",
-                    $"Pay '{pack.Sku}' ({currency}) REFUSED: provider '{ProviderName}' is not a real signing " +
-                    "wallet (IsRealSigningWallet is false) — no key, no payment (WO-931; player NOT charged).");
-                return PaymentResult.Failure(pack.Sku, currency, NonSigningPaymentRefusalReason);
-            }
+                return PaymentResult.Failure(pack.Sku, currency, $"Pack '{pack.Sku}' has no price for {currency}.");
 
             try
             {
-                var result = await _provider.SendPayment(pack.Sku, currency, amount, Network);
-                if (!result.Ok)
-                    FlowTrace.Fail("Wallet",
-                        $"Pay '{pack.Sku}' ({currency}, {amount}) FAILED at provider: {result.Error}");
-                else
-                    FlowTrace.Step("Wallet", $"Pay '{pack.Sku}' ({currency}, {amount}) confirmed — tx {result.TxSignature}.");
-                return result;
+                return await _provider.SendPayment(pack.Sku, currency, amount, Network);
             }
             catch (Exception ex)
             {
-                FlowTrace.Fail("Wallet",
-                    $"Pay '{pack.Sku}' ({currency}, {amount}) THREW: {ex.GetType().Name}: {ex.Message} — outcome indeterminate.");
+                Debug.LogError($"[WalletService] Pay failed: {ex.Message}");
                 return PaymentResult.Failure(pack.Sku, currency, ex.Message);
-            }
-        }
-
-        /// <summary>
-        /// WO7: Flat-fee payment for non-pack transactions (e.g. tower swaps).
-        /// Sends <paramref name="amount"/> of <paramref name="currency"/> using
-        /// the raw provider payment path, bypassing PackDef. The
-        /// <paramref name="transactionId"/> is used as the SKU memo for audit logs.
-        /// </summary>
-        public async UniTask<PaymentResult> PayFlat(
-            string       transactionId,
-            CurrencyKind currency,
-            double       amount)
-        {
-            using var _ = FlowTrace.Enter("Wallet", $"PayFlat tx='{transactionId}' {currency} amount={amount} ({NetworkLabel})");
-
-            // WO-931: same seam as Pay. PayFlat reaches the SAME
-            // StubWalletProvider.SendPayment and was gated by NOTHING (not even
-            // RealmStorePurchase) — unreachable today only because both its
-            // callers are scene-absent. Gate it now, while the seam is open.
-            if (_provider is StubWalletProvider)
-            {
-                FlowTrace.Fail("Wallet",
-                    $"PayFlat '{transactionId}' ({currency}) REFUSED: stub provider cannot sign — no real " +
-                    "payment rail on this platform (WO-931; player NOT charged).");
-                return PaymentResult.Failure(transactionId, currency, StubPaymentRefusalReason);
-            }
-
-            if (!IsConnected)
-            {
-                FlowTrace.Warn("Wallet", $"PayFlat '{transactionId}' ({currency}): no wallet connected — aborted (player NOT charged).");
-                return PaymentResult.Failure(transactionId, currency,
-                    LocalText.Get("store.pay.sol_no_wallet", "No wallet connected."));
-            }
-
-            if (amount <= 0d)
-            {
-                FlowTrace.Fail("Wallet", $"PayFlat '{transactionId}' ({currency}): amount must be > 0 (was {amount}) — aborted.");
-                return PaymentResult.Failure(transactionId, currency,
-                    LocalText.Get("store.pay.sol_amount_invalid", "Amount must be > 0."));
-            }
-
-            // WO-931 belt (see Pay): a connected provider that cannot attest a
-            // real signing key must never fabricate a "settled" flat payment.
-            if (!IsRealSigningWallet)
-            {
-                FlowTrace.Fail("Wallet",
-                    $"PayFlat '{transactionId}' ({currency}) REFUSED: provider '{ProviderName}' is not a real " +
-                    "signing wallet (IsRealSigningWallet is false) — no key, no payment (WO-931).");
-                return PaymentResult.Failure(transactionId, currency, NonSigningPaymentRefusalReason);
-            }
-
-            try
-            {
-                var result = await _provider.SendPayment(transactionId, currency, amount, Network);
-                if (!result.Ok)
-                    FlowTrace.Fail("Wallet",
-                        $"PayFlat '{transactionId}' ({currency}, {amount}) FAILED at provider: {result.Error}");
-                else
-                    FlowTrace.Step("Wallet", $"PayFlat '{transactionId}' ({currency}, {amount}) confirmed — tx {result.TxSignature}.");
-                return result;
-            }
-            catch (Exception ex)
-            {
-                FlowTrace.Fail("Wallet",
-                    $"PayFlat '{transactionId}' ({currency}, {amount}) THREW: {ex.GetType().Name}: {ex.Message} — outcome indeterminate.");
-                return PaymentResult.Failure(transactionId, currency, ex.Message);
             }
         }
 
@@ -880,7 +362,7 @@ namespace DeNelle.Wallet
         public void SetNetwork(WalletNetwork network)
         {
             if (network == WalletNetwork.Mainnet)
-                FlowTrace.Warn("Wallet", "Mainnet selected — owner-gated per spec Part 10. The v2 foundation runs devnet only.");
+                Debug.LogWarning("[WalletService] Mainnet selected — owner-gated per spec Part 10. The v2 foundation runs devnet only.");
             Network = network;
         }
 
@@ -889,74 +371,6 @@ namespace DeNelle.Wallet
             if (Status == status) return;
             Status = status;
             StatusChanged?.Invoke(status);
-        }
-
-        // =====================================================================
-        /// <summary>
-        /// Signs an opaque Jupiter v0 swap transaction (base64) via the connected
-        /// wallet and submits it. Does NOT deserialize as SDK Transaction (1.2.9
-        /// has no VersionedTransaction). Returns ok=false if this provider cannot.
-        /// </summary>
-        public async UniTask<(bool ok, string signature, string error)> SignAndSendSwapTransaction(
-            string swapTransactionBase64)
-        {
-            if (string.IsNullOrEmpty(swapTransactionBase64))
-                return (false, null, "empty swapTransaction");
-            if (_provider is StubWalletProvider)
-                return (false, null, "stub wallet cannot sign a Jupiter swap");
-
-            // ⛔ DISPATCH ON THE CAPABILITY, NEVER ON THE TYPE. This line used to read
-            // a pattern test against the concrete Android/MWA provider type, inside a
-            // `#if SOLANA_SDK`. (The literal text is deliberately not reproduced here:
-            // WebPayPathRegression's [capability] pin fails on exactly that string, and a
-            // comment quoting it would fail the suite over prose.)
-            // The Jupiter branch is compiled into the WEB build and IS
-            // reachable there (PackStore's swap door is gated `#if !GOOGLE_PLAY`, not on
-            // platform), so a web player who tapped Buy without enough SKR walked
-            // JupiterSwapService -> here, missed a test that asked which class this was,
-            // fell through to the line below, and was told "this wallet cannot sign a
-            // Jupiter swap" by a wallet that can sign one. A type test answers a question
-            // the caller never asked. The interface is declared outside every #if, so this
-            // needs no platform guard and gains no new one when a third provider lands.
-            if (_provider is ISwapSigningWallet swapper)
-                return await swapper.SignAndSendSwapTransaction(swapTransactionBase64, Network);
-
-            return (false, null, "this wallet cannot sign a Jupiter swap");
-        }
-
-        //  IWalletSigner — backend save-auth signing seam (WO-121)
-        // =====================================================================
-
-        /// <summary>
-        /// True when the underlying provider can ed25519-sign a message AND a
-        /// wallet is connected. The devnet stub returns false, so the backend
-        /// save-auth path skips the auth headers (offline-safe).
-        /// </summary>
-        bool IWalletSigner.CanSign => IsConnected && _provider.CanSignMessages;
-
-        /// <summary>The connected wallet's base58 address (the on-chain identity = playerId).</summary>
-        string IWalletSigner.WalletAddress => _provider.Account.Address;
-
-        /// <summary>
-        /// ed25519-signs the UTF-8 message with the connected wallet and returns
-        /// the base58 signature (or null when it cannot sign). Delegates to the
-        /// provider; the caller (GameStateService) owns the canonical message
-        /// format so client + backend agree byte-for-byte.
-        /// </summary>
-        async Task<string> IWalletSigner.SignMessageBase58(string utf8Message)
-        {
-            if (!IsConnected || !_provider.CanSignMessages)
-                return null;
-
-            try
-            {
-                return await _provider.SignMessageBase58(utf8Message);
-            }
-            catch (Exception ex)
-            {
-                FlowTrace.Fail("Wallet", $"SignMessage FAILED: {ex.GetType().Name}: {ex.Message} — returning null (save-auth headers skipped).");
-                return null;
-            }
         }
     }
 }
