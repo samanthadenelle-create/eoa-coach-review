@@ -3,10 +3,8 @@
     "rootNamespace": "DeNelle.Web3",
     "references": [
         "DeNelle.Core",
-        "DeNelle.Commerce",
         "DeNelle.Wallet",
-        "UniTask",
-        "Unity.TextMeshPro"
+        "UniTask"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
@@ -14,9 +12,7 @@
     "overrideReferences": false,
     "precompiledReferences": [],
     "autoReferenced": false,
-    "defineConstraints": [
-        "!GOOGLE_PLAY"
-    ],
+    "defineConstraints": [],
     "versionDefines": [],
     "noEngineReferences": false
 }
