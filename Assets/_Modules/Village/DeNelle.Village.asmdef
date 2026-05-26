@@ -4,6 +4,7 @@
     "references": [
         "DeNelle.Core",
         "DeNelle.Data",
+        "DeNelle.Pets",
         "Unity.Localization",
         "UniTask",
         "Unity.Cinemachine",
