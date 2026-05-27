@@ -3,6 +3,7 @@
     "rootNamespace": "DeNelle.Village",
     "references": [
         "DeNelle.Core",
+        "DeNelle.Cosmetics",
         "DeNelle.Data",
         "DeNelle.Pets",
         "Unity.Localization",
