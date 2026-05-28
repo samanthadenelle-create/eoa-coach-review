@@ -394,6 +394,34 @@ namespace DeNelle.Wallet
             }
         }
 
+        /// <summary>
+        /// WO7: Flat-fee payment for non-pack transactions (e.g. tower swaps).
+        /// Sends <paramref name="amount"/> of <paramref name="currency"/> using
+        /// the raw provider payment path, bypassing PackDef. The
+        /// <paramref name="transactionId"/> is used as the SKU memo for audit logs.
+        /// </summary>
+        public async UniTask<PaymentResult> PayFlat(
+            string       transactionId,
+            CurrencyKind currency,
+            double       amount)
+        {
+            if (!IsConnected)
+                return PaymentResult.Failure(transactionId, currency, "No wallet connected.");
+
+            if (amount <= 0d)
+                return PaymentResult.Failure(transactionId, currency, "Amount must be > 0.");
+
+            try
+            {
+                return await _provider.SendPayment(transactionId, currency, amount, Network);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[WalletService] PayFlat failed: {ex.Message}");
+                return PaymentResult.Failure(transactionId, currency, ex.Message);
+            }
+        }
+
         // =====================================================================
         //  Network — owner-gated
         // =====================================================================

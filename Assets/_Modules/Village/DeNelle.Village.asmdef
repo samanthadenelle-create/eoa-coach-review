@@ -7,10 +7,12 @@
         "DeNelle.Cosmetics",
         "DeNelle.Data",
         "DeNelle.Pets",
+        "DeNelle.Wallet",
         "Unity.Localization",
         "UniTask",
         "Unity.Cinemachine",
-        "Unity.InputSystem"
+        "Unity.InputSystem",
+        "Unity.TextMeshPro"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
