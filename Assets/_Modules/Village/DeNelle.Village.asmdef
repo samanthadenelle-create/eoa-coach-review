@@ -12,7 +12,10 @@
         "UniTask",
         "Unity.Cinemachine",
         "Unity.InputSystem",
-        "Unity.TextMeshPro"
+        "Unity.TextMeshPro",
+        "LeanTouch",
+        "LeanCommon",
+        "CW.Common"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
