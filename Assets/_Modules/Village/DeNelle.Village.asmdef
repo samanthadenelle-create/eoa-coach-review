@@ -15,7 +15,10 @@
         "Unity.TextMeshPro",
         "LeanTouch",
         "LeanCommon",
-        "CW.Common"
+        "CW.Common",
+        "DeNelle.Audio",
+        "Unity.RenderPipelines.Core.Runtime",
+        "Unity.RenderPipelines.Universal.Runtime"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
