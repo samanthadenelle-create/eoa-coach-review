@@ -81,10 +81,18 @@ namespace DeNelle.BattleATB.Engine
         // The turn pipeline
         // ---------------------------------------------------------------------
 
-        /// <summary>True when the unit is player-controlled (the hero only).</summary>
+        /// <summary>
+        /// WO-169 P0 — true when this unit's turn pauses for player input. Reads the
+        /// per-member <see cref="BattleUnit.ControlMode"/> (Player → input UI; AI →
+        /// existing AI policy) instead of the old hard tie to
+        /// <see cref="UnitKind.Hero"/>. Draws no RNG — purely a phase decision in
+        /// <see cref="BeginNextTurn"/> — so determinism is preserved. The legacy
+        /// build path stamps hero = Player and pets/enemies = AI, keeping the golden
+        /// vectors identical.
+        /// </summary>
         public static bool IsPlayerControlled(BattleUnit unit)
         {
-            return unit.Kind == UnitKind.Hero;
+            return unit.ControlMode == ControlMode.Player;
         }
 
         /// <summary>

@@ -66,6 +66,15 @@ namespace DeNelle.BattleATB.Engine
     public enum UnitKind { Hero, Pet, Enemy }
 
     /// <summary>
+    /// WO-169 P0 — per-member command source. A <see cref="Player"/> member pauses
+    /// the engine for the input UI on its turn; an <see cref="AI"/> member runs the
+    /// existing AI policy (<see cref="Ai.ChoosePetAction"/> / archetype logic). This
+    /// is decoupled from <see cref="UnitKind"/> so the player can toggle ANY member
+    /// (hero or recruit) to Command/Auto in Settings. Enemies are always AI.
+    /// </summary>
+    public enum ControlMode { Player, AI }
+
+    /// <summary>
     /// Machine-readable battle-log event. Derived from the 14-member TS union on
     /// BattleLogEntry.event.
     /// </summary>
@@ -261,6 +270,15 @@ namespace DeNelle.BattleATB.Engine
         public string Name;
         public UnitKind Kind;
 
+        /// <summary>
+        /// WO-169 P0 — who drives this unit's turn. Set at build time from the
+        /// party-member spec (hero/recruits default Player; pets default AI; enemies
+        /// always AI). Read by <see cref="Turn.IsPlayerControlled"/> — replaces the
+        /// old hard-tie to <see cref="UnitKind.Hero"/>. Does NOT participate in any
+        /// RNG draw or damage calc, so it cannot perturb determinism.
+        /// </summary>
+        public ControlMode ControlMode;
+
         public int Hp;
         public int MaxHp;
         public int Resource;
@@ -405,12 +423,50 @@ namespace DeNelle.BattleATB.Engine
         public bool JoinsImmediately;
     }
 
+    /// <summary>
+    /// WO-169 P0 — one PLAYABLE party member as handed to the engine at setup. This
+    /// is the multi-member party record the controller surfaces (hero + recruits +
+    /// pets), each carrying its own <see cref="ControlMode"/>. A member is either a
+    /// hero-class fighter (<see cref="HeroClass"/> set) or a pet
+    /// (<see cref="Species"/> set) — exactly one is non-null. The engine keeps the
+    /// existing per-kind stat/ability tables; this only chooses WHICH unit builder
+    /// runs and stamps the member's id + control mode. Does not alter any math.
+    /// </summary>
+    public sealed class PartyMemberSpec
+    {
+        /// <summary>Stable unique id (e.g. "hero", "pet-0", "member-2"). Drives the
+        /// HUD card key + the persisted control-mode preference.</summary>
+        public string Id;
+        public string Name;
+        /// <summary>Set for a hero-class fighter; null for a pet member.</summary>
+        public HeroClass? HeroClass;
+        /// <summary>Set for a pet member; null for a hero-class fighter.</summary>
+        public PetSpecies? Species;
+        /// <summary>Pet bond rank 0..4 (ignored for hero-class members).</summary>
+        public int BondRank;
+        /// <summary>Pet AI temperament (ignored for hero-class members).</summary>
+        public PetAiMode AiMode;
+        /// <summary>Player-commanded or AI-driven this battle. Toggled in Settings.</summary>
+        public ControlMode ControlMode;
+    }
+
     /// <summary>Everything needed to construct a battle.</summary>
     public sealed class BattleSetup
     {
         public int Wave;
         /// <summary>Documented assumption: a non-negative 32-bit integer seed.</summary>
         public int Seed;
+
+        /// <summary>
+        /// WO-169 — the multi-member party (hero + recruits/pets), each with its own
+        /// control mode. When NON-EMPTY this is authoritative and supersedes the
+        /// legacy <see cref="HeroClass"/>/<see cref="HeroName"/>/<see cref="Pets"/>
+        /// triple. When null/empty the engine falls back to the legacy single-hero +
+        /// Pets path below — that fallback is byte-identical to the pre-WO-169
+        /// construction, which is why the RNG golden vectors are unaffected.
+        /// </summary>
+        public List<PartyMemberSpec> PartyMembers;
+
         public HeroClass HeroClass;
         public string HeroName;
         public List<PartyPetSpec> Pets;

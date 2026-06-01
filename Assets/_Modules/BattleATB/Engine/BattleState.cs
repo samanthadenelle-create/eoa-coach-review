@@ -46,18 +46,32 @@ namespace DeNelle.BattleATB.Engine
         // Unit builders
         // ---------------------------------------------------------------------
 
-        /// <summary>Build the hero unit.</summary>
+        /// <summary>Build the hero unit. Legacy entry — stamps Player control.</summary>
         public static BattleUnit BuildHeroUnit(BattleSetup setup, bool reinforced)
         {
-            HeroClassStats stats = HERO_STATS[setup.HeroClass];
+            return BuildHeroUnit(setup.HeroClass, setup.HeroName, "hero", ControlMode.Player, reinforced);
+        }
+
+        /// <summary>
+        /// WO-169 — build a hero-class fighter with an explicit id + control mode
+        /// (used by the multi-member party path). Stats/abilities are unchanged; only
+        /// the id and <see cref="BattleUnit.ControlMode"/> are parameterised. The
+        /// legacy overload above forwards here with id="hero" + Player, so the
+        /// single-hero path is byte-identical to before (golden test unaffected).
+        /// </summary>
+        public static BattleUnit BuildHeroUnit(
+            HeroClass heroClass, string name, string id, ControlMode controlMode, bool reinforced)
+        {
+            HeroClassStats stats = HERO_STATS[heroClass];
             // F-STATE-1: Math.round -> RoundTs (half-up).
             int maxHp = RoundTs(stats.MaxHp * (reinforced ? 1.3 : 1));
             return new BattleUnit
             {
-                Id = "hero",
+                Id = id,
                 Side = Side.Party,
-                Name = setup.HeroName,
+                Name = name,
                 Kind = UnitKind.Hero,
+                ControlMode = controlMode,
                 Hp = maxHp,
                 MaxHp = maxHp,
                 Resource = stats.MaxResource,
@@ -72,22 +86,40 @@ namespace DeNelle.BattleATB.Engine
                 Cooldowns = new Dictionary<AbilitySlot, int>(),
                 Defending = false,
                 Alive = true,
-                HeroClass = setup.HeroClass,
+                HeroClass = heroClass,
             };
         }
 
-        /// <summary>Build a pet unit from its species + bond rank.</summary>
+        /// <summary>Build a pet unit from its species + bond rank. Legacy entry —
+        /// stamps AI control + the conventional <c>pet-{index}</c> id.</summary>
         public static BattleUnit BuildPetUnit(PartyPetSpec spec, int index, bool reinforced)
         {
-            PetSpeciesStats stats = PET_STATS[spec.Species];
+            return BuildPetUnit(
+                spec.Species, spec.Name, spec.BondRank, spec.AiMode,
+                $"pet-{index}", ControlMode.AI, reinforced);
+        }
+
+        /// <summary>
+        /// WO-169 — build a pet unit with an explicit id + control mode (multi-member
+        /// path). Stat math is unchanged; only the id and
+        /// <see cref="BattleUnit.ControlMode"/> are parameterised. The legacy overload
+        /// forwards here with <c>pet-{index}</c> + AI, so the existing pet path is
+        /// byte-identical (golden test unaffected).
+        /// </summary>
+        public static BattleUnit BuildPetUnit(
+            PetSpecies species, string name, int bondRank, PetAiMode aiMode,
+            string id, ControlMode controlMode, bool reinforced)
+        {
+            PetSpeciesStats stats = PET_STATS[species];
             // F-STATE-1: Math.round -> RoundTs.
-            int maxHp = RoundTs(stats.MaxHp * PetBondHpMul(spec.BondRank) * (reinforced ? 1.3 : 1));
+            int maxHp = RoundTs(stats.MaxHp * PetBondHpMul(bondRank) * (reinforced ? 1.3 : 1));
             return new BattleUnit
             {
-                Id = $"pet-{index}",
+                Id = id,
                 Side = Side.Party,
-                Name = spec.Name,
+                Name = name,
                 Kind = UnitKind.Pet,
+                ControlMode = controlMode,
                 Hp = maxHp,
                 MaxHp = maxHp,
                 Resource = stats.MaxResource,
@@ -97,15 +129,15 @@ namespace DeNelle.BattleATB.Engine
                 Speed = stats.Speed,
                 // defense is hard-coded 0.1 in TS — NOT taken from stats.
                 Defense = 0.1,
-                Attack = RoundTs(stats.Attack * PetBondDamageMul(spec.BondRank)),
+                Attack = RoundTs(stats.Attack * PetBondDamageMul(bondRank)),
                 Element = stats.Element,
                 Statuses = new List<StatusEffect>(),
                 Cooldowns = new Dictionary<AbilitySlot, int>(),
                 Defending = false,
                 Alive = true,
-                Species = spec.Species,
-                BondRank = spec.BondRank,
-                AiMode = spec.AiMode,
+                Species = species,
+                BondRank = bondRank,
+                AiMode = aiMode,
             };
         }
 
@@ -128,6 +160,7 @@ namespace DeNelle.BattleATB.Engine
                 Side = Side.Enemy,
                 Name = def.Name,
                 Kind = UnitKind.Enemy,
+                ControlMode = ControlMode.AI, // enemies are always engine-driven
                 Hp = spec.Hp != null ? Math.Max(1, Math.Min(spec.Hp.Value, maxHp)) : maxHp,
                 MaxHp = maxHp,
                 Resource = 0,
@@ -159,18 +192,66 @@ namespace DeNelle.BattleATB.Engine
         {
             bool reinforced = setup.Reinforcements == true;
 
-            BattleUnit hero = BuildHeroUnit(setup, reinforced);
-            // joining pets get MAX_PARTY - 1 slots (hero takes the 8th).
-            List<PartyPetSpec> joining = setup.Pets
-                .Where(p => p.JoinsImmediately)
-                .Take(MAX_PARTY - 1)
-                .ToList();
-            List<PartyPetSpec> benched = setup.Pets
-                .Where(p => !p.JoinsImmediately)
-                .ToList();
-            List<BattleUnit> petUnits = joining
-                .Select((p, i) => BuildPetUnit(p, i, reinforced))
-                .ToList();
+            // WO-169 — when the controller supplies an explicit multi-member party,
+            // build from it (each member carries its own id + ControlMode). Otherwise
+            // fall back to the legacy single-hero + Pets construction, which is
+            // byte-identical to the pre-WO-169 engine (golden vectors unaffected).
+            bool useMultiMember = setup.PartyMembers != null && setup.PartyMembers.Count > 0;
+
+            BattleUnit hero;
+            List<BattleUnit> petUnits;
+            List<PartyPetSpec> benched;
+
+            if (useMultiMember)
+            {
+                // The members list is authoritative + already capped/ordered by the
+                // controller. Cap defensively at MAX_PARTY. Hero-class members build
+                // as heroes; pet members build as pets — both honour their stored id +
+                // control mode. No benched reserve in the multi-member path.
+                List<PartyMemberSpec> members = setup.PartyMembers.Take(MAX_PARTY).ToList();
+                hero = null;
+                petUnits = new List<BattleUnit>();
+                foreach (PartyMemberSpec m in members)
+                {
+                    if (m.Species != null)
+                    {
+                        petUnits.Add(BuildPetUnit(
+                            m.Species.Value, m.Name, m.BondRank, m.AiMode,
+                            m.Id, m.ControlMode, reinforced));
+                    }
+                    else
+                    {
+                        BattleUnit u = BuildHeroUnit(
+                            m.HeroClass ?? setup.HeroClass, m.Name, m.Id, m.ControlMode, reinforced);
+                        // The first hero-class member anchors the "hero" slot for
+                        // ordering; further hero-class members ride in the pet list
+                        // slot (still Party side, still a real combatant).
+                        if (hero == null) hero = u; else petUnits.Add(u);
+                    }
+                }
+                // Degenerate guard: a party of pets only — promote the first to anchor.
+                if (hero == null && petUnits.Count > 0)
+                {
+                    hero = petUnits[0];
+                    petUnits.RemoveAt(0);
+                }
+                benched = new List<PartyPetSpec>();
+            }
+            else
+            {
+                hero = BuildHeroUnit(setup, reinforced);
+                // joining pets get MAX_PARTY - 1 slots (hero takes the 8th).
+                List<PartyPetSpec> joining = setup.Pets
+                    .Where(p => p.JoinsImmediately)
+                    .Take(MAX_PARTY - 1)
+                    .ToList();
+                benched = setup.Pets
+                    .Where(p => !p.JoinsImmediately)
+                    .ToList();
+                petUnits = joining
+                    .Select((p, i) => BuildPetUnit(p, i, reinforced))
+                    .ToList();
+            }
 
             List<BattleUnit> enemyUnits = setup.Enemies
                 .Take(MAX_ENEMIES)
@@ -375,6 +456,7 @@ namespace DeNelle.BattleATB.Engine
                 Side = u.Side,
                 Name = u.Name,
                 Kind = u.Kind,
+                ControlMode = u.ControlMode,
                 Hp = u.Hp,
                 MaxHp = u.MaxHp,
                 Resource = u.Resource,
