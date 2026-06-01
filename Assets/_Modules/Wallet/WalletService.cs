@@ -18,7 +18,10 @@
 // =============================================================================
 
 using System;
+using System.Threading.Tasks;
 using Cysharp.Threading.Tasks;
+using DeNelle.Core;
+using DeNelle.Core.Web3;
 using UnityEngine;
 
 namespace DeNelle.Wallet
@@ -185,6 +188,22 @@ namespace DeNelle.Wallet
         /// Devnet only in the v2 foundation.
         /// </summary>
         UniTask<PaymentResult> SendPayment(string packSku, CurrencyKind currency, double amount, WalletNetwork network);
+
+        /// <summary>
+        /// True when this provider can ed25519-sign an arbitrary message with the
+        /// connected wallet key (the real SolanaWalletProvider). False for the
+        /// devnet stub, which has no key — the backend save-auth path skips the
+        /// auth headers when this is false (WO-121, offline-safe).
+        /// </summary>
+        bool CanSignMessages { get; }
+
+        /// <summary>
+        /// ed25519-signs the EXACT UTF-8 bytes of <paramref name="utf8Message"/> with
+        /// the connected wallet and returns the base58 signature, or null when the
+        /// provider cannot sign / no wallet is connected. Used for the backend
+        /// save-auth challenge (WO-121); the caller owns the message format.
+        /// </summary>
+        UniTask<string> SignMessageBase58(string utf8Message);
     }
 
     /// <summary>
@@ -194,7 +213,7 @@ namespace DeNelle.Wallet
     /// never on the Solana SDK. Exposes <see cref="Connect"/>, <see cref="GetBalance"/>
     /// and <see cref="Pay"/> as the spec's three required operations (Part 3).
     /// </summary>
-    public sealed class WalletService
+    public sealed class WalletService : IWalletSigner
     {
         // ── The owner-gated network constant (spec Part 10) ──────────────────
         // THIS is the single static constant the spec calls out: the v2
@@ -305,6 +324,15 @@ namespace DeNelle.Wallet
             {
                 var account = await _provider.Connect(Network);
                 SetStatus(account.IsValid ? WalletStatus.Connected : WalletStatus.Disconnected);
+
+                // WO-121: expose this connected wallet as the backend save-auth
+                // signer so GameStateService (DeNelle.Core) can sign the nonce
+                // without referencing DeNelle.Wallet. The devnet stub registers
+                // too but reports CanSign == false, so headers stay skipped until
+                // a real signer (SolanaWalletProvider) is connected.
+                if (account.IsValid)
+                    CoreServices.RegisterWalletSigner(this);
+
                 return account;
             }
             catch (Exception ex)
@@ -328,6 +356,7 @@ namespace DeNelle.Wallet
             }
             finally
             {
+                CoreServices.UnregisterWalletSigner(this); // WO-121
                 SetStatus(WalletStatus.Disconnected);
             }
         }
@@ -443,6 +472,42 @@ namespace DeNelle.Wallet
             if (Status == status) return;
             Status = status;
             StatusChanged?.Invoke(status);
+        }
+
+        // =====================================================================
+        //  IWalletSigner — backend save-auth signing seam (WO-121)
+        // =====================================================================
+
+        /// <summary>
+        /// True when the underlying provider can ed25519-sign a message AND a
+        /// wallet is connected. The devnet stub returns false, so the backend
+        /// save-auth path skips the auth headers (offline-safe).
+        /// </summary>
+        bool IWalletSigner.CanSign => IsConnected && _provider.CanSignMessages;
+
+        /// <summary>The connected wallet's base58 address (the on-chain identity = playerId).</summary>
+        string IWalletSigner.WalletAddress => _provider.Account.Address;
+
+        /// <summary>
+        /// ed25519-signs the UTF-8 message with the connected wallet and returns
+        /// the base58 signature (or null when it cannot sign). Delegates to the
+        /// provider; the caller (GameStateService) owns the canonical message
+        /// format so client + backend agree byte-for-byte.
+        /// </summary>
+        async Task<string> IWalletSigner.SignMessageBase58(string utf8Message)
+        {
+            if (!IsConnected || !_provider.CanSignMessages)
+                return null;
+
+            try
+            {
+                return await _provider.SignMessageBase58(utf8Message);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[WalletService] SignMessage failed: {ex.Message}");
+                return null;
+            }
         }
     }
 }

@@ -346,6 +346,68 @@ namespace DeNelle.Wallet
 #endif
         }
 
+        // =====================================================================
+        //  Message signing (WO-121) — backend save-auth ed25519 signature
+        // =====================================================================
+
+        /// <inheritdoc/>
+        public bool CanSignMessages
+        {
+#if SOLANA_SDK
+            // A real key is available once a wallet is connected via the SDK.
+            get => _connected && _account.IsValid;
+#else
+            get => false;
+#endif
+        }
+
+        /// <inheritdoc/>
+        public async UniTask<string> SignMessageBase58(string utf8Message)
+        {
+#if SOLANA_SDK
+            if (!_connected || !_account.IsValid)
+                return null;
+            if (string.IsNullOrEmpty(utf8Message))
+                return null;
+
+            try
+            {
+                var wallet = Web3.Wallet; // SDK-VERIFY: the active WalletBase
+                if (wallet == null)
+                {
+                    Debug.LogWarning("[SolanaWalletProvider] SignMessage: no active wallet on the SDK.");
+                    return null;
+                }
+
+                var messageBytes = System.Text.Encoding.UTF8.GetBytes(utf8Message);
+
+                // SDK-VERIFY: WalletBase.SignMessage(byte[]) → byte[] ed25519
+                // signature (64 bytes). On MWA / Seed Vault this prompts the
+                // player's wallet to sign the off-chain message. The game holds
+                // NO key — the connected wallet signs (spec Part 10).
+                var sigBytes = await wallet.SignMessage(messageBytes);
+                if (sigBytes == null || sigBytes.Length == 0)
+                {
+                    Debug.LogWarning("[SolanaWalletProvider] SignMessage returned no signature.");
+                    return null;
+                }
+
+                // The backend expects the signature base58-encoded. Use the SDK's
+                // own base58 encoder so it round-trips with bs58.decode server-side.
+                // SDK-VERIFY: Solana.Unity.Wallet.Utilities.Encoders.Base58.EncodeData.
+                return new Solana.Unity.Wallet.Utilities.Base58Encoder().EncodeData(sigBytes);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[SolanaWalletProvider] SignMessage failed: {ex.Message}");
+                return null;
+            }
+#else
+            await UniTask.CompletedTask;
+            return null; // SDK absent — cannot sign; caller skips auth headers.
+#endif
+        }
+
 #if SOLANA_SDK
         // =====================================================================
         //  SDK helpers — all behind the SOLANA_SDK guard
