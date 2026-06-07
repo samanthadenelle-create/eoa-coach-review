@@ -1,7 +1,8 @@
 # Assets/_Modules — Code Module Map
 
-All first-party gameplay code lives here. Each module folder has its own README
-with purpose + key files. **Read the module README before grepping the module.**
+**All first-party gameplay code.** This is the heart of the professional modular architecture (see `../../CORE_ARCHITECTURE_PLAN.md` for full plan, assembly rules, and how features — tower defense, dungeons, native Solana wallets, mobile, cosmetics/seasonal pass — are mapped).
+
+Each module folder has its own README with purpose + key files. **Read the module README before grepping the module.**
 
 | Module | Assembly | One-liner |
 |---|---|---|
