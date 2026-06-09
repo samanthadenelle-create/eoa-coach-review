@@ -19,7 +19,8 @@
         "DeNelle.Audio",
         "Unity.RenderPipelines.Core.Runtime",
         "Unity.RenderPipelines.Universal.Runtime",
-        "Unity.AI.Navigation"
+        "Unity.AI.Navigation",
+        "YarnSpinner.Unity"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
