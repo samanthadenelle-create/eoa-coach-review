@@ -1,4 +1,5 @@
 {
+  "git": { "deploymentEnabled": false },
   "outputDirectory": "Builds/WebGL",
   "buildCommand": null,
   "framework": null,
