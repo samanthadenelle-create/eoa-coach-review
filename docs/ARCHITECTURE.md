@@ -1,21 +1,5 @@
 # Architecture — the one authoritative overview
 
-> 2026-10-06 endpoint delta supersedes the earlier passive-only summary below:
-> Core now supplies a compile-locked test-auth scope in its existing signer/cache,
-> with primitive queue/fence contracts. Hall's existing Integration assembly owns
-> the concrete adapters; Runtime does not reference Integration. Ordinary build
-> auth paths remain unchanged under reviewed variant parity checks. Actual world
-> owner wiring, native test-artifact auth and Seeker acceptance remain outstanding.
-> Neither this auth scope nor an on-device flag enables Wallet sign-only mode.
-
-> 2026-10-06 Core addition: BackendRequestSigner owns the passive session lifetime
-> revision/invalidation event (see Core catalog). Hall consumers must reread it,
-> explicitly marshal thread-affine work and refuse negative revisions. This is
-> not a second auth owner, endpoint authority, wallet network switch or late-writer
-> cancellation mechanism. Existing credential behavior is retained. Managed
-> 54-case/four-variant checks and fresh native compile passed; Hall runtime
-> consumer installation and device verification remain incomplete.
-
 > **Read this first for architecture.** This is the single hub that orients you to how the
 > project is built. It is intentionally concise: it states the load-bearing decisions and
 > points to the per-area **deep-dive docs** rather than restating them. When a deep-dive and
@@ -110,37 +94,17 @@ OuterWorld       ├─ DungeonEntrance / portal spawner ► Dungeon_HealersCott
 Village2 (TD town / raid target) — GoVillage() = async overlay; also a hub (auto-loads OuterWorld)
 Breach (Village2/dungeon) ► GoBattle(BattleParams) ► ATBBattle ► returns to ReturnScene
 ```
-> **STALE: 2026-06-28 (combat flow above)** — the `Breach ► ATBBattle` route is superseded. V1 combat =
-> a **single-Knight real-time `BattleArena`** in the overworld; **WO-584** routes the dungeon/outpost via a
-> **RegionGate warp → resolver → Arena-skinned space → ownership flip** (the flat ATB is behind
-> **`ff.dungeonrealtime`, default ON** — corrected 2026-07-22; that flag routes fights INTO the real-time
-> Arena, set it to 0 for the legacy ATB path. There is **no `ff.atbdungeon`** flag). Current truth =
-> `docs/COMBAT_PIVOT_NORTHSTAR.md` + `WorkOrders/WORK_ORDER_584_dungeon_outpost_arena_consolidation.md`.
-> ⚠ CORRECTION 2026-07-22 (scene flow above): the home hub is now the single merged **`Main_Castle_Overworld`**
-> scene (MergedWorld ON — hall + outer world merged into one continuous scene + one navmesh, F8-24; see
-> `Assets/Editor/WorldMergeBuilder.cs`), NOT a separate `MainCastle_Hall` hub with `OuterWorld` streamed
-> additively. `MainCastle_Hall` references below are STALE.
 
-- **Home/start hub = `Main_Castle_Overworld`** (corrected 2026-09-06). ⛔ The old line here said
-  `MainCastle_Hall` flat, and that has been wrong since WO-608. `SceneRouter.Castle` is a **property,
-  not a const** — `Assets/_Modules/Core/SceneRouter.cs:151-153` resolves
-  `FeatureFlags.MergedWorld ? CastleCandidates[0] : CastleCandidates[1]`, and
-  `SceneRouter.cs:168` declares `CastleCandidates = { "Main_Castle_Overworld", "MainCastle_Hall" }` as
-  **the only place either name is spelled out**. With `MergedWorld` ON the hub is the single merged
-  `Main_Castle_Overworld` scene (castle + outer world, one continuous navmesh, no additive stream and
-  no seam warp). **`MainCastle_Hall` is the LEGACY flag-OFF fallback** — it still exists on disk
-  (`Assets/Scenes/MainCastle_Hall.unity`, verified today) which is exactly what keeps re-seeding stale
-  docs, but it is not the hub. Never re-type either name in a doc or a gate; iterate `CastleCandidates`.
-  Built by `Assets/Editor/CastleHubBuilder.cs`, owner hand-dialed + committed — **do not regen, it
-  reverts owner offsets**.
-- **`Village2`** = generated TD town / raid-target stronghold (canonical). **`Village.unity` is DELETED
-  from the tree** (verified 2026-09-06: no `Village.unity` under `Assets/`; it was abandoned and
-  corruption-cursed before removal — never resurrect it). `SceneRouter.Village = "Village2"`.
-- ⛔ **`OuterWorld.unity` IS DELETED** (verified 2026-09-06: no such file under `Assets/`). The old line
-  here said it "streams additively over any hub" via `WorldSceneLoader`; with the merged world that
-  additive stream is gone, and a seat following the retired sentence goes looking for a scene that is
-  not in the repo. `HubScenes.IsHub` remains the single source of hub truth for the loader + HUD, and
-  every load still guards `Application.CanStreamedLevelBeLoaded`.
+- **Home/start hub = `MainCastle_Hall`** (the 2026-06-08 castle-start pivot; built by
+  `Assets/Editor/CastleHubBuilder.cs`, owner hand-dialed + committed — **do not regen, it reverts
+  owner offsets**). Stale "…→ Village" prose lingers in `PetSelectController`/`SceneRouter` headers;
+  trust the code — onboarding lands in `MainCastle_Hall`.
+- **`Village2`** = generated TD town / raid-target stronghold (canonical). **`Village.unity` =
+  ABANDONED / corruption-cursed — never use or re-save it.** `SceneRouter.Village = "Village2"`,
+  `Castle = "MainCastle_Hall"`.
+- **`OuterWorld` streams additively over any hub** via `WorldSceneLoader` (`HubScenes.IsHub` is the
+  single source of hub truth, read by the loader + HUD). Every load guards
+  `Application.CanStreamedLevelBeLoaded`.
 - **Two-scene NavMesh seam reality:** a navmesh baked in one scene does **not** auto-connect to the
   neighbor's. Crossing is a **confirm-to-cross seam + WarpTo**: `SceneTransitionTrigger.WarpTo`
   disables → warps → re-enables the hero's `NavMeshAgent` across the seam (hero locomotion is
@@ -154,8 +118,7 @@ Breach (Village2/dungeon) ► GoBattle(BattleParams) ► ATBBattle ► returns t
 - **Streaming is North-Star, built lazily.** Today zones are *logical* (one OuterWorld scene,
   classified by position via `ZoneManager`); the load/unload streamer + per-zone state rehydration
   are designed but built only when zones carry real weight. **Defend-the-Tower / PatriciaLight =
-  REMOVED 2026-06-09** (module + scene); **FULLY RETIRED 2026-09-25 (WO-1986)** - the kept art under
-  `Assets/Resources/PatriciaLight/` and the dead SceneRouter route are deleted too.
+  REMOVED 2026-06-09.**
 
 ---
 
@@ -174,16 +137,6 @@ properties so you can re-skin without touching logic and re-tune without touchin
 - **~30 typed catalog classes** over JSON: abilities · weapons/armor (gear) · enemies · buildings ·
   structures (the build-mode `CatalogRegistry`/`CatalogEntry`) · quests · pets · packs · themes.
   `GearCatalog` etc. read the Resources copy through `CanonicalJson`.
-- **Orientation/grip/seat is DERIVED from bounds + name, never guessed** (Principle §4). Structures
-  bake it via `CatalogOrientationBaker` (longest axis → +Y, base→origin, `manual=true` preserved);
-  the bow via `HeroBowAttachment.NormalizeInto`. **This MUST generalize to every weapon + armor
-  (`WeaponOrientHelper`), applied at equip + dev-adjustable via DevOrient.** Binding canon +
-  algorithm: **`docs/WEAPON_ARMOR_ORIENT_LOGIC.md`** — read before any attach/placement work.
-  > ⚠ **2026-08-16 — derivation did NOT save the bow: its held rotation was 90 degrees wrong at the
-  > ATTACH SEAT** (a different failure from the grip POSITION, which measured correct).
-  > **Derivation is not self-proving; headless gates cannot see orientation.** A value can be derived
-  > correctly and still land wrong one transform up the chain — for anything the player sees pointed a
-  > direction, the screenshot is the evidence, not the gate.
 - **DataRegression harness** (`Assets/Editor/Regression/DataRegression.cs`) is the
   "**real object in → assert real response → one marker**" gate: reload through the *real* game path,
   assert the catalog mapped to non-empty rows with ids, emit `REGRESSION_OK` / `REGRESSION_FAIL`
@@ -195,15 +148,11 @@ properties so you can re-skin without touching logic and re-tune without touchin
 
 ## 5. Save system
 
-> ⚠ CURRENT 2026-08-16 — `SaveSchema.CurrentVersion` is **v38**, and the body of §5 below is stale wherever it says otherwise. Source: `Assets/_Modules/Core/State/SaveSchema.cs:41` (the const, which the file's own header names as the sole authority). Recent steps: v35 WO-773 obsidianQueue · v36 WO-834 everBuiltStructureIds · v37 WO-911 the per-job paid basket · **v38 WO-934 the army loadout bank** (`ArmyStorage.loadouts` + `activeLoadout`, `MigrateToV38` EnsureLoadouts). *(This note replaces two stacked stale corrections that said v30 and then v34 — a doc correcting its own correction and still being wrong is the pattern §15 exists to stop. Never restate the number here; read the const.)*
-> STALE: 2026-07-12 — "the backend code stays in the React repo" is wrong: the backend `api/` (trace.js, events/track.js, game/*, bug-report.js, schema.sql) lives IN THIS repo at `api/` (repo-root-relative), gitignored (see CANON_GROUND_TRUTH_2026-07-12.md)
-
 Persistence spine (deep facts in `docs/MASTER_CATALOG/core.md`):
 
 - **`GameState`** (ScriptableObject, ~41 partialized fields) is the single live state object —
   resources, region progress, hero/pet choices, `BaseLayout`, quests.
-- **`SaveSchema`** (`CurrentVersion = 38`, `SaveSchema.cs:41` — read the const, never this line) +
-  **`SaveMigrator`** (v1 → v38, top step `{ 38, MigrateToV38 }`) handle serialization and
+- **`SaveSchema`** (`CurrentVersion = 20`) + **`SaveMigrator`** (v1 → v20) handle serialization and
   forward migration. **Rule for new fields:** additive-nullable + schema bump + default-on-read
   (the v14/v18/v20 precedent) — never a breaking change. `BaseLayout` is the public contract once
   raids/Arena land, so treat its shape as a versioned API.
@@ -228,17 +177,8 @@ reconciliation + gap list + delivery plan: `docs/BUILD_MODE_ARCHITECTURE.md`.
   designer builder and a future Arena server use (the headless-replay seam is designed in).
 - **NavMesh = carving, NOT runtime bake** (the hardest-won lesson) — placed structures attach a
   `NavMeshObstacle`; a gate-clearance rule guarantees a spawn→Heart lane always exists.
-- **THE UPGRADE VERB HAS ONE DECIDER AND ONE START PATH (2026-08-16).**
-  `UpgradeFamilyResolver` is the **single** decider of a structure's upgrade family, and
-  `PlacedStructureUpgradeService` is the **single** start path for placed structures (both in
-  `Assets/_Modules/Village/Buildings/Progression/`). Multiple doorways — the Manage tab, the modeled
-  page — **one destination**. Every `maxLevel > 1` structure now reaches a truthful upgrade page with
-  a 3D preview. ⚠ The defect this closed was a **lie, not an absence**: Manage passed a bare catalog
-  id, it resolved to `UpgradeFamily.None`, and a LEVEL-1 TOWER rendered *"Fully enhanced — has reached
-  tier 0 of 0, there is nothing left to upgrade here."* **Never add a second family-resolution or
-  upgrade-start site.**
 - Gaps (the real work): fill the palette beyond towers, multi-resource cost via `ResourceLedger`,
-  wall tiers, mobile touch behind `IBuildInput`, a bounded plot, Arena snapshot.
+  the upgrade verb + wall tiers, mobile touch behind `IBuildInput`, a bounded plot, Arena snapshot.
 
 The wider ambition is a **generic typed-dispatch world engine** (`EngineDispatcher.Build(def)` over
 `WorldDef`/`IBuildHandler`, with the rampart's visual⊥navigable `NavSurface` decouple as the
