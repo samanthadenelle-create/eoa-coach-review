@@ -137,6 +137,11 @@ properties so you can re-skin without touching logic and re-tune without touchin
 - **~30 typed catalog classes** over JSON: abilities · weapons/armor (gear) · enemies · buildings ·
   structures (the build-mode `CatalogRegistry`/`CatalogEntry`) · quests · pets · packs · themes.
   `GearCatalog` etc. read the Resources copy through `CanonicalJson`.
+- **Orientation/grip/seat is DERIVED from bounds + name, never guessed** (Principle §4). Structures
+  bake it via `CatalogOrientationBaker` (longest axis → +Y, base→origin, `manual=true` preserved);
+  the bow via `HeroBowAttachment.NormalizeInto`. **This MUST generalize to every weapon + armor
+  (`WeaponOrientHelper`), applied at equip + dev-adjustable via DevOrient.** Binding canon +
+  algorithm: **`docs/WEAPON_ARMOR_ORIENT_LOGIC.md`** — read before any attach/placement work.
 - **DataRegression harness** (`Assets/Editor/Regression/DataRegression.cs`) is the
   "**real object in → assert real response → one marker**" gate: reload through the *real* game path,
   assert the catalog mapped to non-empty rows with ids, emit `REGRESSION_OK` / `REGRESSION_FAIL`

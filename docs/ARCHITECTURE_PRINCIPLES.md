@@ -197,6 +197,25 @@ deferring it is *right*, not a dressed-up shortcut.
 
 ---
 
+## 4. Derive transforms from geometry + name — never guess, never slap-on at identity
+
+**Orientation, grip, seat, and scale of any asset (weapon, armor, structure, prop, character)
+are DERIVED — from the mesh BOUNDS + the asset NAME — not guessed as a hand-typed Euler and
+not left at identity.** "The words and dimensions alone tell you one thing": the title gives the
+archetype, the bounding box gives the axes (longest → primary/up, narrowest → flat, grip/seat at
+an end). A best-estimate transform falls out of the geometry; a rare human nudge perfects it and
+**teaches** the heuristic. A `manual=true` correction is **canon and is NEVER overwritten** by the
+auto pass.
+
+This is already the law for structures (`CatalogOrientationBaker`) and the bow
+(`HeroBowAttachment.NormalizeInto`); it MUST generalize to every weapon + armor via
+`WeaponOrientHelper`, applied at equip + adjustable in dev builds through our DevOrient tooling.
+**Prior sessions ignored this and attached weapons at identity (blades laid flat / gripped by the
+blade) — that is a principle violation even though it compiles.** Full canon + algorithm:
+**`docs/WEAPON_ARMOR_ORIENT_LOGIC.md`** (read it before touching any attach/placement/orient).
+
+---
+
 ## Instances / first payments toward these principles
 
 - **WO-391** — Consolidate proximity-interaction behind ONE isolated interaction
