@@ -20,7 +20,9 @@
         "Unity.RenderPipelines.Core.Runtime",
         "Unity.RenderPipelines.Universal.Runtime",
         "Unity.AI.Navigation",
-        "YarnSpinner.Unity"
+        "YarnSpinner.Unity",
+        "Unity.Addressables",
+        "Unity.ResourceManager"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
