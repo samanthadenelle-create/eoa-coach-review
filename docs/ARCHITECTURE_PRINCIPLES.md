@@ -216,6 +216,30 @@ blade) — that is a principle violation even though it compiles.** Full canon +
 
 ---
 
+## 5. Don't assume — VERIFY. "Works on my machine" is not an answer.
+
+**A claim about behaviour is worth nothing until it's observed.** Never report a thing as working,
+fixed, or "probably fine" on faith — instrument the flow, capture the result, and read the root from
+the data. The corollaries are binding:
+
+- **"It doesn't stop the demo" / "works on my machine" / "probably just <noise>" are BANNED answers.**
+  They reclassify *"I don't understand this"* as *"this is acceptable"* and normalise shipping blind.
+  The only machine that matters is the player's — the one you'll never ship to.
+- **Instrument → capture → know.** `FlowTrace` at each branch (the "debugger") + `Guard.Try` on every
+  risky op (the "tries", no silent catch) + a WATCHDOG for async/stalls (a stall isn't a thrown
+  exception, so a watchdog turns silent-stall into a CAPTURED `FlowTrace.Fail` with state). Failures
+  must land somewhere QUERYABLE — break-log locally, WebTrace off-device — not a lost `Step`.
+- **Verify PROACTIVELY** — check a flow's state *before* you're asked, *before* you call it done. The
+  audit you run unprompted is cheaper than the bug report you wait for.
+- **Build for what you'll DO, not what you MIGHT** — instrument the bug you'll chase, flag what you'll
+  kill, map what you'll query, store what's light. The real need defines the structure; never the
+  imagination. (This is the same discipline as §2c's permission gate and §3's leverage.)
+
+This is `CLAUDE.md §12` (INSTRUMENT, don't guess) + `docs/INSTRUMENTATION_STANDARD.md`, elevated to a
+binding law because guessing feels fast and is slow (N blind cycles); instrumenting feels slow and is
+fast (one read). Owner directive, 2026-06-17, forged debugging a "TriggerWave timeout": the silence of a
+watchdog that never fired *was* the proof — the wave starts; the probe was blind. No screaming, just data.
+
 ## Instances / first payments toward these principles
 
 - **WO-391** — Consolidate proximity-interaction behind ONE isolated interaction
