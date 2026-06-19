@@ -22,6 +22,7 @@ using System.Threading.Tasks;
 using Cysharp.Threading.Tasks;
 using DeNelle.Core;
 using DeNelle.Core.Web3;
+using DeNelle.Core.Diagnostics;
 using UnityEngine;
 
 namespace DeNelle.Wallet
@@ -317,6 +318,7 @@ namespace DeNelle.Wallet
         /// </summary>
         public async UniTask<WalletAccount> Connect()
         {
+            using var _ = FlowTrace.Enter("Wallet", $"Connect (provider={ProviderName}, {NetworkLabel})");
             if (IsConnected) return Account;
 
             SetStatus(WalletStatus.Connecting);
@@ -331,13 +333,20 @@ namespace DeNelle.Wallet
                 // too but reports CanSign == false, so headers stay skipped until
                 // a real signer (SolanaWalletProvider) is connected.
                 if (account.IsValid)
+                {
                     CoreServices.RegisterWalletSigner(this);
+                    FlowTrace.Step("Wallet", $"Connect OK — {account.Address} ({account.WalletName}).");
+                }
+                else
+                {
+                    FlowTrace.Warn("Wallet", "Connect resolved an INVALID account — cancelled or refused; staying disconnected.");
+                }
 
                 return account;
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[WalletService] Connect failed: {ex.Message}");
+                FlowTrace.Fail("Wallet", $"Connect FAILED: {ex.GetType().Name}: {ex.Message} — staying disconnected.");
                 SetStatus(WalletStatus.Disconnected);
                 return default;
             }
@@ -352,7 +361,7 @@ namespace DeNelle.Wallet
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[WalletService] Disconnect failed: {ex.Message}");
+                FlowTrace.Fail("Wallet", $"Disconnect FAILED: {ex.GetType().Name}: {ex.Message}");
             }
             finally
             {
@@ -383,7 +392,7 @@ namespace DeNelle.Wallet
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[WalletService] GetBalance failed: {ex.Message}");
+                FlowTrace.Fail("Wallet", $"GetBalance FAILED: {ex.GetType().Name}: {ex.Message} — returning zero balance.");
                 return default;
             }
         }
@@ -402,23 +411,41 @@ namespace DeNelle.Wallet
         /// <param name="currency">The rail to pay in (SOL / USDC / SKR).</param>
         public async UniTask<PaymentResult> Pay(PackDef pack, CurrencyKind currency)
         {
+            using var _ = FlowTrace.Enter("Wallet", $"Pay pack='{pack?.Sku ?? "<null>"}' {currency} ({NetworkLabel})");
+
             if (pack == null)
+            {
+                FlowTrace.Fail("Wallet", "Pay: pack definition is null — payment aborted.");
                 return PaymentResult.Failure(string.Empty, currency, "Pack definition is null.");
+            }
 
             if (!IsConnected)
+            {
+                FlowTrace.Warn("Wallet", $"Pay '{pack.Sku}' ({currency}): no wallet connected — aborted (player NOT charged).");
                 return PaymentResult.Failure(pack.Sku, currency, "No wallet connected — connect a wallet first.");
+            }
 
             var amount = pack.AmountFor(currency);
             if (amount <= 0d)
+            {
+                FlowTrace.Fail("Wallet", $"Pay '{pack.Sku}': no price for {currency} (amount={amount}) — payment aborted.");
                 return PaymentResult.Failure(pack.Sku, currency, $"Pack '{pack.Sku}' has no price for {currency}.");
+            }
 
             try
             {
-                return await _provider.SendPayment(pack.Sku, currency, amount, Network);
+                var result = await _provider.SendPayment(pack.Sku, currency, amount, Network);
+                if (!result.Ok)
+                    FlowTrace.Fail("Wallet",
+                        $"Pay '{pack.Sku}' ({currency}, {amount}) FAILED at provider: {result.Error}");
+                else
+                    FlowTrace.Step("Wallet", $"Pay '{pack.Sku}' ({currency}, {amount}) confirmed — tx {result.TxSignature}.");
+                return result;
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[WalletService] Pay failed: {ex.Message}");
+                FlowTrace.Fail("Wallet",
+                    $"Pay '{pack.Sku}' ({currency}, {amount}) THREW: {ex.GetType().Name}: {ex.Message} — outcome indeterminate.");
                 return PaymentResult.Failure(pack.Sku, currency, ex.Message);
             }
         }
@@ -434,19 +461,34 @@ namespace DeNelle.Wallet
             CurrencyKind currency,
             double       amount)
         {
+            using var _ = FlowTrace.Enter("Wallet", $"PayFlat tx='{transactionId}' {currency} amount={amount} ({NetworkLabel})");
+
             if (!IsConnected)
+            {
+                FlowTrace.Warn("Wallet", $"PayFlat '{transactionId}' ({currency}): no wallet connected — aborted (player NOT charged).");
                 return PaymentResult.Failure(transactionId, currency, "No wallet connected.");
+            }
 
             if (amount <= 0d)
+            {
+                FlowTrace.Fail("Wallet", $"PayFlat '{transactionId}' ({currency}): amount must be > 0 (was {amount}) — aborted.");
                 return PaymentResult.Failure(transactionId, currency, "Amount must be > 0.");
+            }
 
             try
             {
-                return await _provider.SendPayment(transactionId, currency, amount, Network);
+                var result = await _provider.SendPayment(transactionId, currency, amount, Network);
+                if (!result.Ok)
+                    FlowTrace.Fail("Wallet",
+                        $"PayFlat '{transactionId}' ({currency}, {amount}) FAILED at provider: {result.Error}");
+                else
+                    FlowTrace.Step("Wallet", $"PayFlat '{transactionId}' ({currency}, {amount}) confirmed — tx {result.TxSignature}.");
+                return result;
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[WalletService] PayFlat failed: {ex.Message}");
+                FlowTrace.Fail("Wallet",
+                    $"PayFlat '{transactionId}' ({currency}, {amount}) THREW: {ex.GetType().Name}: {ex.Message} — outcome indeterminate.");
                 return PaymentResult.Failure(transactionId, currency, ex.Message);
             }
         }
@@ -463,7 +505,7 @@ namespace DeNelle.Wallet
         public void SetNetwork(WalletNetwork network)
         {
             if (network == WalletNetwork.Mainnet)
-                Debug.LogWarning("[WalletService] Mainnet selected — owner-gated per spec Part 10. The v2 foundation runs devnet only.");
+                FlowTrace.Warn("Wallet", "Mainnet selected — owner-gated per spec Part 10. The v2 foundation runs devnet only.");
             Network = network;
         }
 
@@ -505,7 +547,7 @@ namespace DeNelle.Wallet
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[WalletService] SignMessage failed: {ex.Message}");
+                FlowTrace.Fail("Wallet", $"SignMessage FAILED: {ex.GetType().Name}: {ex.Message} — returning null (save-auth headers skipped).");
                 return null;
             }
         }
