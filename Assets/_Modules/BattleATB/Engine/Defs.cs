@@ -468,6 +468,46 @@ namespace DeNelle.BattleATB.Engine
                         },
                     }
                 },
+                // --- Orc family (WO-481, combat-pivot V1 fight: leader + followers) ---
+                {
+                    "orc-warrior", new EnemyDef
+                    {
+                        Id = "orc-warrior", Name = "Orc Warleader", Archetype = EnemyArchetype.Grunt,
+                        BaseHp = 120, BaseAttack = 24, Speed = 1.0, Defense = 0.15,
+                        Element = ElementType.Physical,
+                        Special = new EnemySpecial
+                        {
+                            Name = "Warleader's Cleave", Damage = 30,
+                            Target = TargetMode.SingleAlly,
+                        },
+                    }
+                },
+                {
+                    "orc-tank", new EnemyDef
+                    {
+                        Id = "orc-tank", Name = "Orc Bulwark", Archetype = EnemyArchetype.Tank,
+                        BaseHp = 190, BaseAttack = 18, Speed = 0.70, Defense = 0.35,
+                        Element = ElementType.Physical,
+                        Special = new EnemySpecial
+                        {
+                            Name = "Iron Brace", Damage = 0,
+                            Target = TargetMode.Self, SelfHeal = 45,
+                        },
+                    }
+                },
+                {
+                    "orc-mage", new EnemyDef
+                    {
+                        Id = "orc-mage", Name = "Orc Spiritcaller", Archetype = EnemyArchetype.Caster,
+                        BaseHp = 85, BaseAttack = 21, Speed = 1.10, Defense = 0.08,
+                        Element = ElementType.Aether,
+                        Special = new EnemySpecial
+                        {
+                            Name = "Spirit Bolt", Damage = 20, Target = TargetMode.SingleAlly,
+                            ApplyStatus = StatusKind.Burn, StatusChance = 0.5,
+                        },
+                    }
+                },
             };
     }
 }
