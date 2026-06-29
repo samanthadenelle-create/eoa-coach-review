@@ -251,18 +251,29 @@ namespace DeNelle.Web3
         /// itself succeeded and was handed off; it does NOT mean a real on-chain
         /// swap occurred. Wire a real signer before shipping.
         /// </summary>
+        // User-supplied portion of the /swap body — serialized via JsonUtility so all
+        // string fields are correctly escaped (B-JSONINJ). quoteResponse is spliced in raw.
+        [Serializable]
+        private struct SwapRequestTail
+        {
+            public string userPublicKey;
+            public bool wrapAndUnwrapSol;
+        }
+
         public async Task<bool> ExecuteSwapAsync(SwapQuote quote, string userPublicKey)
         {
             if (quote == null || string.IsNullOrEmpty(userPublicKey)) return false;
 
-            // Build the /swap request body. quote.RoutePlan is the verbatim
-            // /quote response JSON, which is exactly the quoteResponse object the
-            // /swap endpoint expects.
-            string body = "{" +
-                          "\"quoteResponse\":" + quote.RoutePlan + "," +
-                          "\"userPublicKey\":\"" + userPublicKey + "\"," +
-                          "\"wrapAndUnwrapSol\":true" +
-                          "}";
+            // Build the /swap request body. quote.RoutePlan is the verbatim /quote
+            // response JSON (exactly the quoteResponse object the /swap endpoint expects),
+            // so it stays raw. The user-supplied fields go through a DTO + JsonUtility.ToJson
+            // so userPublicKey is PROPERLY ESCAPED (security audit B-JSONINJ — no string-concat
+            // JSON injection). We splice the serialized tail (minus its opening brace) after the
+            // raw quoteResponse.
+            var tail = new SwapRequestTail { userPublicKey = userPublicKey, wrapAndUnwrapSol = true };
+            string tailJson = JsonUtility.ToJson(tail);                  // {"userPublicKey":"...","wrapAndUnwrapSol":true}
+            string tailInner = tailJson.Substring(1, tailJson.Length - 2); // strip the wrapping braces
+            string body = "{\"quoteResponse\":" + quote.RoutePlan + "," + tailInner + "}";
 
             using var req = new UnityWebRequest(SwapUrl, "POST");
             req.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(body));
