@@ -94,6 +94,10 @@ OuterWorld       ├─ DungeonEntrance / portal spawner ► Dungeon_HealersCott
 Village2 (TD town / raid target) — GoVillage() = async overlay; also a hub (auto-loads OuterWorld)
 Breach (Village2/dungeon) ► GoBattle(BattleParams) ► ATBBattle ► returns to ReturnScene
 ```
+> **STALE: 2026-06-28 (combat flow above)** — the `Breach ► ATBBattle` route is superseded. V1 combat =
+> a **single-Knight real-time `BattleArena`** in the overworld; **WO-584** routes the dungeon/outpost via a
+> **RegionGate warp → resolver → Arena-skinned space → ownership flip** (the flat **ATB is behind
+> `ff.atbdungeon`, OFF**). Current truth = `docs/COMBAT_PIVOT_NORTHSTAR.md` + `WorkOrders/WORK_ORDER_584_dungeon_outpost_arena_consolidation.md`.
 
 - **Home/start hub = `MainCastle_Hall`** (the 2026-06-08 castle-start pivot; built by
   `Assets/Editor/CastleHubBuilder.cs`, owner hand-dialed + committed — **do not regen, it reverts
