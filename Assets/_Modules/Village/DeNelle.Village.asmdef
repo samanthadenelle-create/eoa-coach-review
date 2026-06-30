@@ -21,8 +21,7 @@
         "Unity.RenderPipelines.Universal.Runtime",
         "Unity.AI.Navigation",
         "Unity.Addressables",
-        "Unity.ResourceManager",
-        "OffsetForge.Runtime"
+        "Unity.ResourceManager"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
