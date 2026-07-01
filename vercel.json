@@ -2,5 +2,15 @@
   "git": { "deploymentEnabled": false },
   "outputDirectory": "Builds/WebGL",
   "buildCommand": null,
-  "framework": null
+  "framework": null,
+  "headers": [
+    {
+      "source": "/",
+      "headers": [{ "key": "Cache-Control", "value": "no-store, must-revalidate" }]
+    },
+    {
+      "source": "/index.html",
+      "headers": [{ "key": "Cache-Control", "value": "no-store, must-revalidate" }]
+    }
+  ]
 }
