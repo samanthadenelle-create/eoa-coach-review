@@ -472,7 +472,7 @@ namespace DeNelle.BattleATB.Engine
                 {
                     "orc-warrior", new EnemyDef
                     {
-                        Id = "orc-warrior", Name = "Orc Warleader", Archetype = EnemyArchetype.Grunt,
+                        Id = "orc-warrior", Name = "Orcish Warrior", Archetype = EnemyArchetype.Grunt,
                         BaseHp = 120, BaseAttack = 24, Speed = 1.0, Defense = 0.15,
                         Element = ElementType.Physical,
                         Special = new EnemySpecial
@@ -485,7 +485,7 @@ namespace DeNelle.BattleATB.Engine
                 {
                     "orc-tank", new EnemyDef
                     {
-                        Id = "orc-tank", Name = "Orc Bulwark", Archetype = EnemyArchetype.Tank,
+                        Id = "orc-tank", Name = "Orcish Bulwark", Archetype = EnemyArchetype.Tank,
                         BaseHp = 190, BaseAttack = 18, Speed = 0.70, Defense = 0.35,
                         Element = ElementType.Physical,
                         Special = new EnemySpecial
@@ -498,7 +498,7 @@ namespace DeNelle.BattleATB.Engine
                 {
                     "orc-mage", new EnemyDef
                     {
-                        Id = "orc-mage", Name = "Orc Spiritcaller", Archetype = EnemyArchetype.Caster,
+                        Id = "orc-mage", Name = "Orcish Mage", Archetype = EnemyArchetype.Caster,
                         BaseHp = 85, BaseAttack = 21, Speed = 1.10, Defense = 0.08,
                         Element = ElementType.Aether,
                         Special = new EnemySpecial
