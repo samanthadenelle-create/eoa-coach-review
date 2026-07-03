@@ -21,7 +21,7 @@ Each module folder has its own README with purpose + key files. **Read the modul
 | `Onboarding/` | `DeNelle.Onboarding` | Title → hero select → pet select → story intro flow |
 | `Pets/` | `DeNelle.Pets` | Pet companion runtime: deploy, leash, progression, skills |
 | `Settings/` | `DeNelle.Settings` | Settings/pause UI, audio mixer bridge |
-| `UI/` | Assembly-CSharp | `GameOverUI` only |
+| `UI/` | Assembly-CSharp | (empty — `GameOverUI` deleted 2026-07-03, dead-surface sweep) |
 | `Village/` | `DeNelle.Village` | The big one (~275 files): waves, enemies, hero, buildings, world |
 | `Wallet/` | `DeNelle.Wallet` (+Tests) | PackStore, crypto payments, wallet providers |
 | `Web3/` | `DeNelle.Web3` | Jupiter swap integration |
