@@ -131,7 +131,7 @@ namespace DeNelle.Web3
         private WalletService ResolveWallet()
         {
             if (_walletDialog == null)
-                _walletDialog = FindObjectOfType<WalletConnectDialog>(true);
+                _walletDialog = FindAnyObjectByType<WalletConnectDialog>(FindObjectsInactive.Include);
             return _walletDialog != null ? _walletDialog.Wallet : null;
         }
 
