@@ -397,6 +397,20 @@ namespace DeNelle.BattleATB.Engine
                     }
                 },
                 {
+                    "hollow-warrior", new EnemyDef
+                    {
+                        Id = "hollow-warrior", Name = "Hollow Warrior",
+                        Archetype = EnemyArchetype.Grunt,
+                        BaseHp = 110, BaseAttack = 22, Speed = 1.0, Defense = 0.18,
+                        Element = ElementType.Physical,
+                        Special = new EnemySpecial
+                        {
+                            Name = "Shield Bash", Damage = 22,
+                            Target = TargetMode.SingleAlly, ApplyStatus = StatusKind.Bleed,
+                        },
+                    }
+                },
+                {
                     "bruiser", new EnemyDef
                     {
                         Id = "bruiser", Name = "Bruiser", Archetype = EnemyArchetype.Tank,
