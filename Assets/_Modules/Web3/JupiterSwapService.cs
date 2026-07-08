@@ -33,6 +33,7 @@ using System.Text;
 using System.Threading.Tasks;
 using DeNelle.Core;
 using DeNelle.Core.Web3;
+using DeNelle.Core.Diagnostics;
 using DeNelle.Wallet;
 using UnityEngine;
 using UnityEngine.Networking;
@@ -150,8 +151,12 @@ namespace DeNelle.Web3
 
         public async Task<SwapQuote> GetQuoteAsync(SwapInputToken input, decimal inputAmount)
         {
+            FlowTrace.Step("Swap", $"GetQuoteAsync input={input} amount={inputAmount} outMint='{_skrMint}'");
+            if (_skrMint == "REPLACE_WITH_SKR_MINT_ADDRESS" || string.IsNullOrEmpty(_skrMint))
+                FlowTrace.Warn("Swap", "SKR mint is the unset placeholder — quote round-trips for UI but a real swap will fail (flag_13)");
             if (_feeConfig == null)
             {
+                FlowTrace.Warn("Swap", "SwapFeeConfig not assigned — using defaults (slippage 50, fee 20bps, no fee account)");
                 Debug.LogWarning("[JupiterSwapService] SwapFeeConfig not assigned — using defaults.");
             }
 
@@ -166,7 +171,7 @@ namespace DeNelle.Web3
 
             // Jupiter amounts are in the token's smallest unit.
             long amountUnits = (long)(inputAmount * (decimal)Math.Pow(10, decimals));
-            if (amountUnits <= 0) return null;
+            if (amountUnits <= 0) { FlowTrace.Warn("Swap", $"GetQuoteAsync aborted: amountUnits<=0 ({amountUnits}) for input {inputAmount}"); return null; }
 
             var sb = new StringBuilder(QuoteUrl);
             sb.Append("?inputMint=").Append(UnityWebRequest.EscapeURL(inputMint));
@@ -185,10 +190,12 @@ namespace DeNelle.Web3
 
             if (req.result != UnityWebRequest.Result.Success)
             {
+                FlowTrace.Warn("Swap", $"Quote request FAILED: {req.error} (mainnet Jupiter vs devnet wallet — flag_12)");
                 Debug.LogWarning($"[JupiterSwapService] Quote request failed: {req.error}");
                 return null;
             }
 
+            FlowTrace.Step("Swap", "quote HTTP ok — parsing");
             return ParseQuote(req.downloadHandler.text, inputAmount, decimals, slippageBps);
         }
 
@@ -235,6 +242,7 @@ namespace DeNelle.Web3
             }
             catch (Exception ex)
             {
+                FlowTrace.Fail("Swap", $"quote parse error (UI shows no rate): {ex.GetType().Name}: {ex.Message}");
                 Debug.LogWarning($"[JupiterSwapService] Quote parse error: {ex.Message}");
                 return null;
             }
@@ -262,7 +270,8 @@ namespace DeNelle.Web3
 
         public async Task<bool> ExecuteSwapAsync(SwapQuote quote, string userPublicKey)
         {
-            if (quote == null || string.IsNullOrEmpty(userPublicKey)) return false;
+            FlowTrace.Step("Swap", $"ExecuteSwapAsync user='{(string.IsNullOrEmpty(userPublicKey) ? "<empty>" : userPublicKey)}' hasQuote={quote != null}");
+            if (quote == null || string.IsNullOrEmpty(userPublicKey)) { FlowTrace.Warn("Swap", "ExecuteSwapAsync aborted: null quote or empty userPublicKey (no wallet connected?)"); return false; }
 
             // Build the /swap request body. quote.RoutePlan is the verbatim /quote
             // response JSON (exactly the quoteResponse object the /swap endpoint expects),
@@ -285,10 +294,12 @@ namespace DeNelle.Web3
 
             if (req.result != UnityWebRequest.Result.Success)
             {
+                FlowTrace.Warn("Swap", $"/swap request FAILED: {req.error} — no transaction to sign");
                 Debug.LogWarning($"[JupiterSwapService] Swap request failed: {req.error}");
                 return false;
             }
 
+            FlowTrace.Warn("Swap", "/swap ok — handing to WalletBridgeStub (NO real signing; stub fires a fake sig in editor/dev, hard-fails in release — flag_14)");
             // TODO(real-wallet): forward the serialised transaction to the real
             // Solana signer. The project's SolanaWalletProvider (DeNelle.Wallet,
             // behind the SOLANA_SDK define) signs SystemProgram/TokenProgram
