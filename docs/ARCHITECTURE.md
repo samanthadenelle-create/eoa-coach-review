@@ -157,6 +157,9 @@ properties so you can re-skin without touching logic and re-tune without touchin
 
 ## 5. Save system
 
+> STALE: 2026-07-12 — `SaveSchema.CurrentVersion` is now **29** (heroLevel/heroXp/heroLifetimeXp, F8-47), not 20; the migrator runs v1 → v29 (see CANON_GROUND_TRUTH_2026-07-12.md)
+> STALE: 2026-07-12 — "the backend code stays in the React repo" is wrong: the backend `api/` (trace.js, events/track.js, game/*, bug-report.js, schema.sql) lives IN THIS repo at `C:\EOA\api\`, gitignored (see CANON_GROUND_TRUTH_2026-07-12.md)
+
 Persistence spine (deep facts in `docs/MASTER_CATALOG/core.md`):
 
 - **`GameState`** (ScriptableObject, ~41 partialized fields) is the single live state object —

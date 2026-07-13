@@ -1,5 +1,7 @@
 # Assets/_Modules — Code Module Map
 
+> STALE: 2026-07-12 — the `CORE_ARCHITECTURE_PLAN.md` framing below (tower defense + native Solana wallets) is pre-pivot: V1 = single-Knight overworld + BattleArena with zero crypto shipped; base/tower-defense is V2-gated (see CANON_GROUND_TRUTH_2026-07-12.md)
+
 **All first-party gameplay code.** This is the heart of the professional modular architecture (see `../../CORE_ARCHITECTURE_PLAN.md` for full plan, assembly rules, and how features — tower defense, dungeons, native Solana wallets, mobile, cosmetics/seasonal pass — are mapped).
 
 Each module folder has its own README with purpose + key files. **Read the module README before grepping the module.**
