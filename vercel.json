@@ -3,6 +3,9 @@
   "outputDirectory": "Builds/WebGL",
   "buildCommand": null,
   "framework": null,
+  "crons": [
+    { "path": "/api/admin/cleanup", "schedule": "0 4 * * *" }
+  ],
   "headers": [
     {
       "source": "/",
