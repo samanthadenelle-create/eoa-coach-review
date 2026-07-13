@@ -25,6 +25,57 @@
       <div id="unity-loading-bar">Loading {{{ PRODUCT_NAME }}}…</div>
     </div>
     <script>
+      // --- WO-678: own the global JS error surface --------------------------------------
+      // pi-sdk.js loads in ANY browser and tracks host-channel requests by promise id with
+      // an internal 120s timeout. Outside Pi Browser the host never answers, so Pi.init
+      // spawns a promise that rejects ~120s later as a GLOBAL unhandledrejection
+      // ("Promise with id 0 timed out after 120000 ms") — long after our C# 20s/30s
+      // timeouts already settled. That class is expected/benign: suppress ONLY it, log one
+      // quiet console.info, and forward it into Unity telemetry. Unknown errors ALWAYS
+      // pass through (no blanket swallow — CLAUDE.md §5 no-silent-failure).
+      var PI_BENIGN_SIGNATURES = [
+        /promise with id \d+ timed out/i,          // the SDK's internal host-channel timeout
+        /not (running )?in (the )?pi browser/i,    // the SDK's own not-in-Pi-Browser class
+        /window\.Pi undefined/i                    // our bridge's not-in-Pi-Browser message
+      ];
+      function piIsBenign(msg) {
+        if (!msg) return false;
+        for (var i = 0; i < PI_BENIGN_SIGNATURES.length; i++) {
+          if (PI_BENIGN_SIGNATURES[i].test(msg)) return true;
+        }
+        return false;
+      }
+      function piForwardToUnity(msg) {
+        try {
+          if (window.unityInstance) {
+            window.unityInstance.SendMessage('PiBridge', 'OnPiCallback', JSON.stringify({
+              type: 'error', paymentId: '',
+              data: { where: 'sdk-global', message: '' + msg }
+            }));
+          }
+        } catch (e) { /* Unity not ready — the console.info at the call site is the record */ }
+      }
+      window.addEventListener('unhandledrejection', function (event) {
+        var reason = event && event.reason;
+        var msg = '' + ((reason && (reason.message || reason)) || '');
+        if (piIsBenign(msg)) {
+          event.preventDefault();
+          console.info('[Pi] SDK host-channel timeout (expected outside Pi Browser) — suppressed: ' + msg);
+          piForwardToUnity(msg);
+        }
+        // Anything else stays unhandled → surfaces normally (never blanket-swallow).
+      });
+      window.onerror = function (message, source, lineno, colno, error) {
+        var msg = '' + (message || (error && error.message) || '');
+        if (piIsBenign(msg)) {
+          console.info('[Pi] SDK error (expected outside Pi Browser) — suppressed: ' + msg);
+          piForwardToUnity(msg);
+          return true; // suppress ONLY the known-benign Pi class
+        }
+        return false; // unknown errors surface normally
+      };
+      // -----------------------------------------------------------------------------------
+
       var buildUrl = "Build";
       var loaderUrl = buildUrl + "/{{{ LOADER_FILENAME }}}";
       var config = {
@@ -35,6 +86,21 @@
         companyName: "{{{ COMPANY_NAME }}}",
         productName: "{{{ PRODUCT_NAME }}}",
         productVersion: "{{{ PRODUCT_VERSION }}}",
+        // WO-678: own the loader's message surface — never a raw alert()/default banner.
+        // Genuine loader ERRORS go to console.error + the loading-bar element; warnings and
+        // the benign Pi timeout class route to console only.
+        showBanner: function (msg, type) {
+          var text = '' + msg;
+          if (type === 'error' && !piIsBenign(text)) {
+            console.error('[Loader] ' + text);
+            if (loadingBar) {
+              loadingBar.style.display = 'block';
+              loadingBar.textContent = 'Load error: ' + text;
+            }
+          } else {
+            console.warn('[Loader] ' + text);
+          }
+        },
       };
 
       var loadingBar = document.querySelector("#unity-loading-bar");
