@@ -13,9 +13,16 @@
     <link rel="shortcut icon" href="TemplateData/favicon.ico" />
     <link rel="stylesheet" href="TemplateData/style.css" />
     <style>
-      html, body { margin: 0; padding: 0; height: 100%; background: #0d0a14; }
+      html, body { margin: 0; padding: 0; height: 100%; background: #0d0a14;
+        /* The browser must NOT claim pan/pinch/scroll gestures over the game — else build-mode
+           camera drag/pinch is dead on mobile web while it works in the native APK (RCA 2026-07-16). */
+        touch-action: none; overscroll-behavior: none; overflow: hidden;
+        -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
       #unity-container { position: absolute; width: 100%; height: 100%; }
-      #unity-canvas { width: 100%; height: 100%; background: #0d0a14; display: block; }
+      /* touch-action:none on the canvas itself is the load-bearing line: without it a mobile
+         browser eats multi-finger gestures before Unity's canvas receives them. */
+      #unity-canvas { width: 100%; height: 100%; background: #0d0a14; display: block;
+        touch-action: none; -ms-touch-action: none; }
       #unity-loading-bar { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); color: #b39ddb; font-family: sans-serif; }
     </style>
   </head>
@@ -75,6 +82,16 @@
         return false; // unknown errors surface normally
       };
       // -----------------------------------------------------------------------------------
+
+      // iOS Safari ignores CSS touch-action for PAGE pinch-zoom; block the page-level gesture so
+      // two-finger input reaches Unity's build-mode camera instead of zooming the browser. The
+      // canvas keeps its own touches (touch-action:none above); we only kill the page gesture.
+      ['gesturestart', 'gesturechange', 'gestureend'].forEach(function (g) {
+        document.addEventListener(g, function (e) { e.preventDefault(); }, { passive: false });
+      });
+      document.addEventListener('touchmove', function (e) {
+        if (e.touches && e.touches.length > 1) e.preventDefault();  // multi-finger = game gesture, not page scroll
+      }, { passive: false });
 
       var buildUrl = "Build";
       var loaderUrl = buildUrl + "/{{{ LOADER_FILENAME }}}";
