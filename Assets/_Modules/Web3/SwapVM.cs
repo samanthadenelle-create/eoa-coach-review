@@ -19,12 +19,6 @@
 // The try/catch lives INSIDE ConfirmAsync so the View's async-void handler can
 // never crash the frame on an unhandled throw (the original guarantee).
 //
-// WO-1948 (2026-09-22): the input token is no longer a hardcoded SwapInputToken.USDC.
-// DebounceQuote reads the wallet's balances through the backend seam and runs the
-// ONE SwapFundingSelector (DeNelle.Wallet) - the same arithmetic the store top-up
-// uses - so a SOL-only wallet quotes SOL, a wallet that covers neither is refused
-// with a per-token shortfall BEFORE any quote or sign, and confirm stays disabled.
-//
 // The VM talks to the wallet/quote backend through the narrow <see cref="ISwapBackend"/>
 // seam so it is unit-testable with a fake (a real Jupiter swap cannot be exercised
 // in EditMode). Production wraps JupiterSwapService via JupiterSwapBackendAdapter —
@@ -34,10 +28,8 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
-using DeNelle.Core.Backend;
+using DeNelle.Core.Web3;
 using DeNelle.Core.Diagnostics;
-using DeNelle.Core.UI;   // LocalizedText - WO-1857; every swap status line already had a swap.* row
-using DeNelle.Wallet;    // WO-1948: SwapFundingSelector (the ONE input-token decision) + the SOL reserve
 
 namespace DeNelle.Web3
 {
@@ -50,11 +42,6 @@ namespace DeNelle.Web3
         string ConnectedWalletKey { get; }
         /// <summary>Fetches a live quote. Returns null on network error.</summary>
         Task<SwapQuote> GetQuoteAsync(SwapInputToken input, decimal inputAmount);
-        /// <summary>WO-1948: the connected wallet's SOL / USDC / SKR (whole units). <c>known</c> is
-        /// false when the read did not happen (no wallet / provider threw) - the VM then refuses
-        /// rather than treating zeros as a balance. The VM feeds these to the ONE
-        /// SwapFundingSelector so the manual panel and the store top-up decide the same way.</summary>
-        Task<(decimal sol, decimal usdc, decimal skr, bool known)> ReadBalancesAsync();
         /// <summary>Requests + hands off the swap transaction. Returns whether the /swap
         /// request succeeded and was handed off (NOT that a real on-chain swap occurred).</summary>
         Task<bool> ExecuteSwapAsync(SwapQuote quote, string userPublicKey);
@@ -72,8 +59,6 @@ namespace DeNelle.Web3
         public string ConnectedWalletKey => _service != null ? _service.ConnectedWalletKey : string.Empty;
         public Task<SwapQuote> GetQuoteAsync(SwapInputToken input, decimal inputAmount) =>
             _service.GetQuoteAsync(input, inputAmount);
-        public Task<(decimal sol, decimal usdc, decimal skr, bool known)> ReadBalancesAsync() =>
-            _service != null ? _service.ReadBalancesAsync() : Task.FromResult((0m, 0m, 0m, false));
         public Task<bool> ExecuteSwapAsync(SwapQuote quote, string userPublicKey) =>
             _service.ExecuteSwapAsync(quote, userPublicKey);
         public void CloseSwapPanel() { if (_service != null) _service.CloseSwapPanel(); }
@@ -146,7 +131,7 @@ namespace DeNelle.Web3
         public void ApplyInitialiseBaseline()
         {
             ClearQuoteDisplay();
-            SetStatus(new LocalizedText("swap.statusEnter").Resolve(), isError: false);
+            SetStatus("Enter an amount to see the rate.", isError: false);
             SetConfirmEnabled(false);
         }
 
@@ -161,12 +146,12 @@ namespace DeNelle.Web3
 
             if (!decimal.TryParse(newValue, out decimal amount) || amount <= 0)
             {
-                SetStatus(new LocalizedText("swap.status_invalid_amount").Resolve(), isError: false);
+                SetStatus("Enter a valid amount.", isError: false);
                 return;
             }
 
             _currentInput = amount;
-            SetStatus(new LocalizedText("swap.statusLoading").Resolve(), isError: false);
+            SetStatus("Getting rate...", isError: false);
 
             // Cancel any in-flight debounce and start a new one.
             if (_debounceCts != null)
@@ -191,70 +176,16 @@ namespace DeNelle.Web3
 
             if (ct.IsCancellationRequested) return;
 
-            // ── WO-1948: the input token comes from the ONE selector over live balances, never a
-            //    hardcoded USDC. The typed amount is an ExactIn spend, so each candidate's cost IS
-            //    that amount in its own token; SOL keeps the rent/fee reserve back. With no wallet
-            //    connected there is nothing to select over: quote USDC for the rate display only
-            //    (confirm stays disabled by the connect guard below, exactly as before).
-            SwapInputToken inputToken = SwapInputToken.USDC;
-            bool walletPresent = !string.IsNullOrEmpty(_backend.ConnectedWalletKey);
-            if (walletPresent)
-            {
-                var balances = await _backend.ReadBalancesAsync();
-                if (ct.IsCancellationRequested) return;
-                if (!balances.known)
-                {
-                    // An UNREAD wallet is neither rich nor empty (WO-1948 review add-on 3): no quote,
-                    // no sign, the existing error status, confirm stays disabled.
-                    FlowTrace.Warn("Swap", "DebounceQuote: wallet balance UNKNOWN (read failed) - refusing before any quote (player NOT charged).");
-                    SetStatus(new LocalizedText("swap.statusError").Resolve(), isError: true);
-                    return;
-                }
-                var decision = SwapFundingSelector.Select(new[]
-                {
-                    new SwapFundingCandidate { Token = SwapInputToken.SOL,  Symbol = "SOL",  Balance = balances.sol,
-                                               Reserve = WalletEndpoints.SolReserveForRentAndFees, Cost = _currentInput, Quoted = true },
-                    new SwapFundingCandidate { Token = SwapInputToken.USDC, Symbol = "USDC", Balance = balances.usdc,
-                                               Reserve = 0m, Cost = _currentInput, Quoted = true }
-                });
-                FlowTrace.Step("Swap", "DebounceQuote balances: sol=" + SwapFundingSelector.F(balances.sol) +
-                                       " usdc=" + SwapFundingSelector.F(balances.usdc) +
-                                       " skr=" + SwapFundingSelector.F(balances.skr) +
-                                       " amount=" + SwapFundingSelector.F(_currentInput) +
-                                       " -> " + decision.Outcome + " - " + decision.Why);
-                if (decision.Outcome == SwapFundingOutcome.Refused)
-                {
-                    // Never quote-then-sign a spend the wallet cannot make: refuse here, with the
-                    // per-token shortfall, and keep confirm disabled.
-                    FlowTrace.Warn("Swap", "DebounceQuote: no token covers " + SwapFundingSelector.F(_currentInput) +
-                                           " - refusing before any quote/sign. " +
-                                           SwapFundingSelector.ShortfallSummary(decision.Considered));
-                    SetStatus(ShortfallStatus(decision), isError: true);
-                    return;
-                }
-                // WO-1970: SOL-primary Auto. Selector returns Auto with Chosen = first eligible
-                // (SOL when it covers; USDC only as fallback). Never default to USDC when both cover.
-                if (decision.Outcome != SwapFundingOutcome.Auto)
-                {
-                    FlowTrace.Warn("Swap", "DebounceQuote: unexpected funding outcome " + decision.Outcome +
-                                           " after non-Refused path - refusing before quote (player NOT charged).");
-                    SetStatus(ShortfallStatus(decision), isError: true);
-                    return;
-                }
-                inputToken = decision.Chosen.Token;
-                FlowTrace.Step("Swap", "DebounceQuote input token selected: " + inputToken + " (WO-1970 SOL-primary auto)");
-            }
-
             _quoteLoading = true;
-            SwapQuote quote = await _backend.GetQuoteAsync(inputToken, _currentInput);
+            SwapQuote quote = await _backend.GetQuoteAsync(SwapInputToken.USDC, _currentInput);
             _quoteLoading = false;
 
             if (ct.IsCancellationRequested) return;
 
             if (quote == null)
             {
-                FlowTrace.Warn("Swap", $"DebounceQuote: GetQuoteAsync returned null for {_currentInput} {inputToken} — rate unavailable.");
-                SetStatus(new LocalizedText("swap.statusError").Resolve(), isError: true);
+                FlowTrace.Warn("Swap", $"DebounceQuote: GetQuoteAsync returned null for {_currentInput} USDC — rate unavailable.");
+                SetStatus("Could not fetch rate. Check connection.", isError: true);
                 return;
             }
 
@@ -263,9 +194,7 @@ namespace DeNelle.Web3
 
             bool walletConnected = !string.IsNullOrEmpty(_backend.ConnectedWalletKey);
             SetConfirmEnabled(walletConnected);
-            SetStatus(walletConnected
-                ? string.Empty
-                : new LocalizedText("swap.statusConnect").Resolve(), isError: false);
+            SetStatus(walletConnected ? string.Empty : "Connect your wallet to swap.", isError: false);
         }
 
         // ── Confirm — the MONEY PATH (guards preserved VERBATIM) ─────────────
@@ -289,12 +218,12 @@ namespace DeNelle.Web3
             if (string.IsNullOrEmpty(walletKey))
             {
                 FlowTrace.Warn("Swap", "OnConfirmTapped: no connected wallet — swap blocked (player NOT charged).");
-                SetStatus(new LocalizedText("swap.statusConnect").Resolve(), isError: true);
+                SetStatus("Connect your wallet to swap.", isError: true);
                 return;
             }
 
             SetConfirmEnabled(false);
-            SetStatus(new LocalizedText("swap.statusSigning").Resolve(), isError: false);
+            SetStatus("Sending to wallet for approval...", isError: false);
 
             bool ok;
             try
@@ -307,7 +236,7 @@ namespace DeNelle.Web3
                 // Fail loudly (outcome indeterminate = possible partial/charged swap), and re-enable.
                 FlowTrace.Fail("Swap",
                     $"OnConfirmTapped: ExecuteSwapAsync THREW: {ex.GetType().Name}: {ex.Message} — swap outcome indeterminate.");
-                SetStatus(new LocalizedText("swap.statusFailed").Resolve(), isError: true);
+                SetStatus("Swap failed. Please try again.", isError: true);
                 SetConfirmEnabled(true);
                 return;
             }
@@ -315,7 +244,7 @@ namespace DeNelle.Web3
             if (!ok)
             {
                 FlowTrace.Fail("Swap", "OnConfirmTapped: ExecuteSwapAsync returned FALSE — swap failed.");
-                SetStatus(new LocalizedText("swap.statusFailed").Resolve(), isError: true);
+                SetStatus("Swap failed. Please try again.", isError: true);
                 SetConfirmEnabled(true);
             }
             else
@@ -331,32 +260,12 @@ namespace DeNelle.Web3
 
         private void RefreshQuoteDisplay(SwapQuote q)
         {
-            // WO-1948: the symbol is the quote's own input token, not a fixed USDC.
-            string sym = q.InputToken == SwapInputToken.SOL ? "SOL" : "USDC";
             SkrOutText = $"~ {q.SkrOut:F2} SKR";
-            RateText = $"1 {sym} = {q.Rate:F4} SKR";
+            RateText = $"1 USDC = {q.Rate:F4} SKR";
             decimal feePct = _platformFeeBps / 100m;
-            PlatformFeeText = $"{q.PlatformFee:F4} {sym} ({feePct:F1}%)";
+            PlatformFeeText = $"{q.PlatformFee:F4} USDC ({feePct:F1}%)";
             NetworkFeeText = $"~{q.NetworkFee:F6} SOL";
             Raise();
-        }
-
-        /// <summary>"{shortfallHeader} {token}: need {needed}, have {have}; ..." from the swap.* keys.</summary>
-        private static string ShortfallStatus(SwapFundingDecision decision)
-        {
-            var sb = new System.Text.StringBuilder(new LocalizedText("swap.shortfallHeader").Resolve());
-            var line = new LocalizedText<object>("swap.shortfallLine");
-            for (int i = 0; i < decision.Considered.Count; i++)
-            {
-                var c = decision.Considered[i];
-                sb.Append(' ').Append(line.Resolve(new
-                {
-                    token = c.Symbol,
-                    needed = SwapFundingSelector.F(c.Cost),
-                    have = SwapFundingSelector.F(c.Spendable)
-                }));
-            }
-            return sb.ToString();
         }
 
         /// <summary>Blanks the quote readout to "-". Public: the View re-clears it on
