@@ -96,8 +96,14 @@ Breach (Village2/dungeon) ► GoBattle(BattleParams) ► ATBBattle ► returns t
 ```
 > **STALE: 2026-06-28 (combat flow above)** — the `Breach ► ATBBattle` route is superseded. V1 combat =
 > a **single-Knight real-time `BattleArena`** in the overworld; **WO-584** routes the dungeon/outpost via a
-> **RegionGate warp → resolver → Arena-skinned space → ownership flip** (the flat **ATB is behind
-> `ff.atbdungeon`, OFF**). Current truth = `docs/COMBAT_PIVOT_NORTHSTAR.md` + `WorkOrders/WORK_ORDER_584_dungeon_outpost_arena_consolidation.md`.
+> **RegionGate warp → resolver → Arena-skinned space → ownership flip** (the flat ATB is behind
+> **`ff.dungeonrealtime`, default ON** — corrected 2026-07-22; that flag routes fights INTO the real-time
+> Arena, set it to 0 for the legacy ATB path. There is **no `ff.atbdungeon`** flag). Current truth =
+> `docs/COMBAT_PIVOT_NORTHSTAR.md` + `WorkOrders/WORK_ORDER_584_dungeon_outpost_arena_consolidation.md`.
+> ⚠ CORRECTION 2026-07-22 (scene flow above): the home hub is now the single merged **`Main_Castle_Overworld`**
+> scene (MergedWorld ON — hall + outer world merged into one continuous scene + one navmesh, F8-24; see
+> `Assets/Editor/WorldMergeBuilder.cs`), NOT a separate `MainCastle_Hall` hub with `OuterWorld` streamed
+> additively. `MainCastle_Hall` references below are STALE.
 
 - **Home/start hub = `MainCastle_Hall`** (the 2026-06-08 castle-start pivot; built by
   `Assets/Editor/CastleHubBuilder.cs`, owner hand-dialed + committed — **do not regen, it reverts
@@ -158,6 +164,7 @@ properties so you can re-skin without touching logic and re-tune without touchin
 ## 5. Save system
 
 > STALE: 2026-07-12 — `SaveSchema.CurrentVersion` is now **v30** (v29 heroLevel/heroXp/heroLifetimeXp F8-47; v30 strategicPlacementMigrated WO-673), not 20; the migrator runs v1 → v29 (see CANON_GROUND_TRUTH_2026-07-12.md)
+> ⚠ CORRECTION 2026-07-22 — `SaveSchema.CurrentVersion` is now **v34** (v31 echoLanes, v32 freeBuildsUsed, v33 echoLanes lane:level grammar, v34 tribes/wards/arena/petActiveSlots persistence gaps closed); the v30 note above is itself stale. Source: `Assets/_Modules/Core/State/SaveSchema.cs`.
 > STALE: 2026-07-12 — "the backend code stays in the React repo" is wrong: the backend `api/` (trace.js, events/track.js, game/*, bug-report.js, schema.sql) lives IN THIS repo at `C:\EOA\api\`, gitignored (see CANON_GROUND_TRUTH_2026-07-12.md)
 
 Persistence spine (deep facts in `docs/MASTER_CATALOG/core.md`):
