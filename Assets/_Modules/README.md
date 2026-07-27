@@ -1,8 +1,11 @@
 # Assets/_Modules — Code Module Map
 
-> STALE: 2026-07-12 — the `CORE_ARCHITECTURE_PLAN.md` framing below (tower defense + native Solana wallets) is pre-pivot: V1 = single-Knight overworld + BattleArena with zero crypto shipped; base/tower-defense is V2-gated (see CANON_GROUND_TRUTH_2026-07-12.md)
-
-**All first-party gameplay code.** This is the heart of the professional modular architecture (see `../../CORE_ARCHITECTURE_PLAN.md` for full plan, assembly rules, and how features — tower defense, dungeons, native Solana wallets, mobile, cosmetics/seasonal pass — are mapped).
+**All first-party gameplay code.** The authoritative architecture reference is
+`../../docs/ARCHITECTURE.md` (the HP B2B hub — assembly map, world/scene model, save,
+build mode). The older root `CORE_ARCHITECTURE_PLAN.md` is a **historical pre-pivot plan**
+(tower-defense + native Solana framing) — read it for intent only, not current state:
+V1 ships as a single-Knight overworld + BattleArena + dungeons + raid, with base/tower-defense
+V2-gated (`ff.basebuilding`) and zero crypto in the V1 path.
 
 Each module folder has its own README with purpose + key files. **Read the module README before grepping the module.**
 
@@ -11,7 +14,8 @@ Each module folder has its own README with purpose + key files. **Read the modul
 | `ATB/` | — (empty) | Legacy placeholder, no code. ATB lives in `BattleATB/` |
 | `Audio/` | `DeNelle.Audio` | AudioService, SFX library, music selection, WebGL unlock |
 | `BattleATB/` | `DeNelle.BattleATB` (+Tests) | ATB combat: pure-C# engine + Unity controllers |
-| `Core/` | `DeNelle.Core`, `DeNelle.AI` (+Tests) | Interfaces, enums, save/state, services, behavior-tree AI |
+| `Characters/` | — (empty) | Reserved slot, no code/asmdef yet. Character code lives in `Village/` + `Editor/` |
+| `Core/` | `DeNelle.Core`, `DeNelle.AI` (+Tests) | Interfaces, enums, save/state, services, behavior-tree AI. **Owns `Core/Jobs/`** — the shared "Obsidian" multi-channel work queue (WO-773, `ObsidianQueueEngine`/`ObsidianQueueState`; save v35) |
 | `Cosmetics/` | `DeNelle.Cosmetics` | Battle pass, cosmetic catalog, Glimmer currency |
 | `Data/` | Assembly-CSharp | `MasterAssetCatalog` only |
 | `DevTools/` | `DeNelle.DevTools` | Dev panel, wallet probe |
@@ -24,7 +28,7 @@ Each module folder has its own README with purpose + key files. **Read the modul
 | `Pets/` | `DeNelle.Pets` | Pet companion runtime: deploy, leash, progression, skills |
 | `Settings/` | `DeNelle.Settings` | Settings/pause UI, audio mixer bridge |
 | `UI/` | Assembly-CSharp | (empty — `GameOverUI` deleted 2026-07-03, dead-surface sweep) |
-| `Village/` | `DeNelle.Village` | The big one (~275 files): waves, enemies, hero, buildings, world |
+| `Village/` | `DeNelle.Village` | The big one (~275+ files): waves, enemies, hero, buildings, world. **Owns `Village/Troops/`** — the COC-style Teleport/Deploy raid V1 spine + barracks (WO-771/772: `RaidDeployController`, `TroopFactory`, `BarracksService`, `RaidScoring`, shared enemy classes/families) |
 | `Wallet/` | `DeNelle.Wallet` (+Tests) | PackStore, crypto payments, wallet providers |
 | `Web3/` | `DeNelle.Web3` | Jupiter swap integration |
 
