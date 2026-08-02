@@ -36,22 +36,49 @@
 // Solana Unity SDK and are FLAGGED in docs/port-notes/week7-wallet.md. Each
 // uncertain call is marked `// SDK-VERIFY:` inline. If a name differs in the
 // resolved SDK version, the fix is local to this file's #if block.
+//
+// WO-766 SWEEP (2026-08-02): every marker was re-checked statically against
+// the PINNED package (magicblock-labs/Solana.Unity-SDK v1.2.9; see
+// Packages/manifest.json) by reading the SDK sources (Web3.cs, WalletBase.cs).
+// Items now annotated "VERIFIED (v1.2.9)" are confirmed; drift found and FIXED:
+//   * LoginPhantom() does not exist in v1.2.9 - desktop branch removed
+//     (desktop/editor stay on StubWalletProvider; SOLANA_SDK is Android-only).
+//   * Web3.Logout() is synchronous void, not awaitable.
+//   * Web3.Instance is a scene MonoBehaviour singleton nothing created -
+//     EnsureWeb3Host() now lazily creates + configures it before login.
+//   * Tx build switched from TransactionBuilder.Build(empty)+Deserialize to
+//     the SDK-documented Transaction-model + SignAndSendTransaction pattern.
+// Markers that remain SDK-VERIFY could not be confirmed without a package
+// resolve - the orchestrator's compile gate surfaces any residue there.
+//
+// WO-766 SAFETY INVARIANT (spec s3): this provider is used for IDENTITY +
+// cloud-save MESSAGE-signing only. The only transfer-constructing code in the
+// wallet module is SendPayment below, and it is UNREACHABLE in release:
+// PackStore.Purchase refuses when FeatureFlags.RealmStorePurchase is OFF (the
+// release default) before anything can reach WalletService.Pay/PayFlat.
+// Connect + SignMessage are gasless and move no funds.
 // =============================================================================
 
 using System;
+using System.Collections.Generic;
 using Cysharp.Threading.Tasks;
+using DeNelle.Core.Diagnostics;
 using UnityEngine;
 
 #if SOLANA_SDK
-// SDK-VERIFY: namespaces of the Solana Unity SDK (magicblock-labs/Solana.Unity-SDK).
-// Confirmed-stable across recent versions: Solana.Unity.Wallet, Solana.Unity.Rpc,
-// Solana.Unity.Programs, Solana.Unity.SDK (the Web3 MonoBehaviour + adapters).
+// VERIFIED (v1.2.9): Solana.Unity.SDK (Web3 facade), Solana.Unity.Wallet
+// (Account, PublicKey, WalletBase), Solana.Unity.Rpc (IRpcClient,
+// ClientFactory). Solana.Unity.Rpc.Models carries Transaction /
+// TransactionInstruction / SignaturePubKeyPair for the SDK-documented
+// sign-and-send pattern (replaces the old Rpc.Builders TransactionBuilder use).
+// SDK-VERIFY: Solana.Unity.Programs member signatures (SystemProgram /
+// TokenProgram / AssociatedTokenAccountProgram) - see markers in SendPayment.
 using Solana.Unity.SDK;
 using Solana.Unity.Wallet;
 using Solana.Unity.Rpc;
 using Solana.Unity.Rpc.Types;
+using Solana.Unity.Rpc.Models;
 using Solana.Unity.Programs;
-using Solana.Unity.Rpc.Builders;
 #endif
 
 namespace DeNelle.Wallet
@@ -98,32 +125,35 @@ namespace DeNelle.Wallet
         public async UniTask<WalletAccount> Connect(WalletNetwork network)
         {
 #if SOLANA_SDK
-            // ── Real SDK path ────────────────────────────────────────────────
-            // The Solana Unity SDK exposes a Web3 MonoBehaviour singleton that
-            // owns the active wallet + RpcClient. Two login routes:
-            //   * Android / Seeker  → Mobile Wallet Adapter (Seed Vault signs).
-            //   * Desktop / iOS     → Phantom deep-link.
-            // SDK-VERIFY: the Web3 facade + LoginWalletAdapter / LoginPhantom
-            // method names. Recent SDK versions expose Web3.Instance and
-            // Web3.LoginWalletAdapter() / Web3.LoginPhantom(). Confirm in the
-            // resolved package; adjust here only.
+            // -- Real SDK path (Android / Mobile Wallet Adapter ONLY, WO-766) --
+            // VERIFIED (v1.2.9 Web3.cs): Web3.Instance is the facade singleton;
+            // Task<Account> LoginWalletAdapter() is the MWA entry point (Seed
+            // Vault / Phantom / Solflare on-device). LoginPhantom() does NOT
+            // exist in v1.2.9 - the old desktop deep-link branch was drift and
+            // is removed; desktop + editor stay on StubWalletProvider (the
+            // SOLANA_SDK define is set for the Android target group only, and
+            // WalletService keeps the stub in the Editor).
             try
             {
-                Account web3Account;
-
 #if UNITY_ANDROID && !UNITY_EDITOR
-                // Mobile Wallet Adapter — the Seeker's Seed Vault signs.
-                // SDK-VERIFY: LoginWalletAdapter() is the MWA entry point.
-                web3Account = await Web3.Instance.LoginWalletAdapter();
-#else
-                // Desktop / iOS — Phantom deep-link fallback.
-                // SDK-VERIFY: LoginPhantom() is the deep-link entry point.
-                web3Account = await Web3.Instance.LoginPhantom();
-#endif
+                // The Web3 facade is a scene MonoBehaviour - ensure it exists
+                // and is pointed at the right cluster BEFORE the login call
+                // (nothing in the project authored one; Web3.Instance would be
+                // null and the login would NRE).
+                EnsureWeb3Host(network);
+
+                // Mobile Wallet Adapter - the wallet app / Seed Vault signs.
+                // VERIFIED (v1.2.9): Web3.Instance.LoginWalletAdapter().
+                // (`var` deliberately: avoids any Account-type name collision
+                // between Solana.Unity.Wallet and Solana.Unity.Rpc.Models.)
+                var web3Account = await Web3.Instance.LoginWalletAdapter();
+
                 if (web3Account == null || web3Account.PublicKey == null)
                 {
                     _connected = false;
                     _account = default;
+                    FlowTrace.Warn("Wallet",
+                        "MWA login returned no account - user cancelled or no wallet app responded.");
                     return default;
                 }
 
@@ -133,14 +163,28 @@ namespace DeNelle.Wallet
                     WalletName = ProviderName,
                 };
                 _connected = true;
-                Debug.Log($"[SolanaWalletProvider] Connected ({network}) — {_account.ShortAddress}.");
+                FlowTrace.Step("Wallet",
+                    $"SolanaWalletProvider connected ({network}) - {_account.ShortAddress}.");
                 return _account;
+#else
+                // SDK compiled in but not an Android device build (this is the
+                // Editor with the Android target active, or a future target
+                // that sets SOLANA_SDK). v1.2.9 has no desktop deep-link API
+                // and MWA needs a device - fail loudly instead of calling an
+                // API that does not exist. WalletService never selects this
+                // provider off-device, so this is defense in depth.
+                await UniTask.CompletedTask;
+                throw new NotSupportedException(
+                    "SolanaWalletProvider supports Android Mobile Wallet Adapter only (WO-766). " +
+                    "Editor/desktop use StubWalletProvider.");
+#endif
             }
             catch (Exception ex)
             {
                 _connected = false;
                 _account = default;
-                Debug.LogError($"[SolanaWalletProvider] Connect failed: {ex.Message}");
+                FlowTrace.Fail("Wallet",
+                    $"SolanaWalletProvider.Connect FAILED: {ex.GetType().Name}: {ex.Message}");
                 throw;
             }
 #else
@@ -160,14 +204,19 @@ namespace DeNelle.Wallet
 #if SOLANA_SDK
             try
             {
-                // SDK-VERIFY: Web3.Instance.Logout() is the disconnect call.
+                // VERIFIED (v1.2.9 Web3.cs): Logout() is a SYNCHRONOUS void
+                // method - the old `await Web3.Instance.Logout()` was drift.
+                // (An async Task DisconnectWalletAdapter() also exists; plain
+                // Logout() covers the session teardown this seam needs.)
                 if (Web3.Instance != null)
-                    await Web3.Instance.Logout();
+                    Web3.Instance.Logout();
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[SolanaWalletProvider] Disconnect failed: {ex.Message}");
+                FlowTrace.Fail("Wallet",
+                    $"SolanaWalletProvider.Disconnect FAILED: {ex.GetType().Name}: {ex.Message}");
             }
+            await UniTask.CompletedTask;
 #else
             await UniTask.CompletedTask;
 #endif
@@ -247,9 +296,14 @@ namespace DeNelle.Wallet
             if (string.IsNullOrEmpty(recipient))
                 return PaymentResult.Failure(packSku, currency, "No devnet purchase recipient configured.");
 
+            // WO-766 SAFETY: this is the ONLY transfer-constructing code in the
+            // wallet module, and it is UNREACHABLE in release builds -
+            // PackStore.Purchase refuses when FeatureFlags.RealmStorePurchase
+            // is OFF (release default) before anything can reach
+            // WalletService.Pay/PayFlat. Kept compiled for the later payments WO.
             try
             {
-                var wallet = Web3.Wallet; // SDK-VERIFY: the active WalletBase
+                var wallet = Web3.Wallet; // VERIFIED (v1.2.9): static WalletBase
                 if (wallet == null)
                     return PaymentResult.Failure(packSku, currency, "No active wallet on the SDK.");
 
@@ -257,24 +311,37 @@ namespace DeNelle.Wallet
                 var from = new PublicKey(_account.Address);
                 var to = new PublicKey(recipient);
 
-                // SDK-VERIFY: GetLatestBlockHashAsync → Result.Value.Blockhash.
+                // SDK-VERIFY: GetLatestBlockHashAsync -> Result.Value.Blockhash.
                 var blockHash = await rpc.GetLatestBlockHashAsync();
                 if (blockHash == null || !blockHash.WasSuccessful || blockHash.Result == null)
                     return PaymentResult.Failure(packSku, currency, "Could not fetch a recent blockhash.");
                 var recentBlockhash = blockHash.Result.Value.Blockhash;
 
-                byte[] txBytes;
+                // WO-766: build the UNSIGNED transaction with the SDK-documented
+                // pattern - a Solana.Unity.Rpc.Models.Transaction with an
+                // Instructions list, handed to WalletBase.SignAndSendTransaction
+                // (VERIFIED v1.2.9: Task<RequestResult<string>>
+                // SignAndSendTransaction(Transaction, bool skipPreflight,
+                // Commitment)). This replaces the old
+                // TransactionBuilder.Build(empty signers) + Deserialize hack,
+                // which produced a zero-signature serialization the SDK never
+                // documents round-tripping.
+                // SDK-VERIFY: Transaction model property names
+                // (RecentBlockHash / FeePayer / Instructions / Signatures).
+                var tx = new Transaction
+                {
+                    RecentBlockHash = recentBlockhash,
+                    FeePayer = from,
+                    Instructions = new List<TransactionInstruction>(),
+                    Signatures = new List<SignaturePubKeyPair>(),
+                };
 
                 if (currency == CurrencyKind.Sol)
                 {
                     // ── Native SOL transfer ──────────────────────────────────
                     var lamports = UiToBaseUnits(amount, WalletEndpoints.SolDecimals);
-                    // SDK-VERIFY: TransactionBuilder + SystemProgram.Transfer.
-                    txBytes = new TransactionBuilder()
-                        .SetRecentBlockHash(recentBlockhash)
-                        .SetFeePayer(from)
-                        .AddInstruction(SystemProgram.Transfer(from, to, lamports))
-                        .Build(Array.Empty<Account>()); // unsigned — wallet signs below
+                    // SDK-VERIFY: SystemProgram.Transfer(PublicKey, PublicKey, ulong).
+                    tx.Instructions.Add(SystemProgram.Transfer(from, to, lamports));
                 }
                 else
                 {
@@ -293,29 +360,20 @@ namespace DeNelle.Wallet
                     var fromAta = AssociatedTokenAccountProgram.DeriveAssociatedTokenAccount(from, mint);
                     var toAta = AssociatedTokenAccountProgram.DeriveAssociatedTokenAccount(to, mint);
 
-                    var builder = new TransactionBuilder()
-                        .SetRecentBlockHash(recentBlockhash)
-                        .SetFeePayer(from);
-
                     // If the recipient has no ATA for this mint yet, create it
                     // (payer = sender). Harmless to always include on devnet QA.
-                    // SDK-VERIFY: CreateAssociatedTokenAccount signature.
-                    builder.AddInstruction(
+                    // SDK-VERIFY: CreateAssociatedTokenAccount(payer, owner, mint).
+                    tx.Instructions.Add(
                         AssociatedTokenAccountProgram.CreateAssociatedTokenAccount(from, to, mint));
 
                     // SDK-VERIFY: TokenProgram.Transfer(source, dest, amount, owner).
-                    builder.AddInstruction(
+                    tx.Instructions.Add(
                         TokenProgram.Transfer(fromAta, toAta, baseUnits, from));
-
-                    txBytes = builder.Build(Array.Empty<Account>());
                 }
 
                 // ── Sign + send through the connected wallet ─────────────────
                 // The player's wallet (Phantom / Seeker Seed Vault) signs — the
-                // game holds NO key. SDK-VERIFY: WalletBase.SignAndSendTransaction
-                // accepts a Transaction; if it needs a Transaction object rather
-                // than raw bytes, deserialize with Transaction.Deserialize(txBytes).
-                var tx = Transaction.Deserialize(txBytes);
+                // game holds NO key.
                 var sendResult = await wallet.SignAndSendTransaction(tx);
 
                 if (sendResult == null || !sendResult.WasSuccessful || string.IsNullOrEmpty(sendResult.Result))
@@ -372,7 +430,7 @@ namespace DeNelle.Wallet
 
             try
             {
-                var wallet = Web3.Wallet; // SDK-VERIFY: the active WalletBase
+                var wallet = Web3.Wallet; // VERIFIED (v1.2.9): static WalletBase
                 if (wallet == null)
                 {
                     Debug.LogWarning("[SolanaWalletProvider] SignMessage: no active wallet on the SDK.");
@@ -381,10 +439,12 @@ namespace DeNelle.Wallet
 
                 var messageBytes = System.Text.Encoding.UTF8.GetBytes(utf8Message);
 
-                // SDK-VERIFY: WalletBase.SignMessage(byte[]) → byte[] ed25519
-                // signature (64 bytes). On MWA / Seed Vault this prompts the
-                // player's wallet to sign the off-chain message. The game holds
-                // NO key — the connected wallet signs (spec Part 10).
+                // VERIFIED (v1.2.9 WalletBase.cs): abstract Task<byte[]>
+                // SignMessage(byte[] message) - the 64-byte ed25519 signature.
+                // On MWA / Seed Vault this prompts the player's wallet to sign
+                // the off-chain message. The game holds NO key - the connected
+                // wallet signs (spec Part 10). This is the WO-766 identity/save
+                // auth path (dotr-save:v1 challenge, GameStateService).
                 var sigBytes = await wallet.SignMessage(messageBytes);
                 if (sigBytes == null || sigBytes.Length == 0)
                 {
@@ -414,9 +474,39 @@ namespace DeNelle.Wallet
         // =====================================================================
 
         /// <summary>
+        /// WO-766: the SDK's Web3 facade is a MonoBehaviour singleton that must
+        /// exist in a scene BEFORE any Login* call - nothing in this project
+        /// authored one, so <c>Web3.Instance</c> would be null and the MWA login
+        /// would NRE. Creates + configures a persistent host lazily.
+        /// VERIFIED (v1.2.9 Web3.cs): serialized fields rpcCluster / customRpc /
+        /// webSocketsRpc / autoConnectOnStartup exist with these names.
+        /// SDK-VERIFY: their accessibility (public vs [SerializeField] private) -
+        /// if the gate flags access, configure via a Resources prefab instead
+        /// and keep only the existence check here. NO reflection (CLAUDE.md s10).
+        /// SDK-VERIFY: RpcCluster member names (DevNet / MainNet).
+        /// </summary>
+        private static void EnsureWeb3Host(WalletNetwork network)
+        {
+            if (Web3.Instance != null) return;
+
+            var host = new GameObject("Web3 (WO-766 SolanaWalletProvider)");
+            UnityEngine.Object.DontDestroyOnLoad(host);
+            var web3 = host.AddComponent<Web3>();
+
+            web3.rpcCluster = network == WalletNetwork.Mainnet ? RpcCluster.MainNet : RpcCluster.DevNet;
+            web3.customRpc = WalletEndpoints.RpcUrl(network);
+            web3.webSocketsRpc = WalletEndpoints.WsUrl(network);
+            web3.autoConnectOnStartup = false;
+
+            FlowTrace.Step("Wallet",
+                $"Web3 host created for {network} (rpc={WalletEndpoints.RpcUrl(network)}).");
+        }
+
+        /// <summary>
         /// Resolves an RpcClient for the network. Prefers the SDK's already-live
         /// client when it matches; otherwise builds one for the right cluster.
-        /// SDK-VERIFY: ClientFactory.GetClient(string url) + Web3.Rpc.
+        /// VERIFIED (v1.2.9): Web3.Rpc is a static IRpcClient.
+        /// SDK-VERIFY: ClientFactory.GetClient(string url) overload.
         /// </summary>
         private static IRpcClient ResolveRpc(WalletNetwork network)
         {
@@ -449,9 +539,12 @@ namespace DeNelle.Wallet
                 {
                     var amt = acc.Account.Data.Parsed.Info.TokenAmount;
                     if (amt == null) continue;
-                    // UiAmount is the human-readable double; fall back to raw / 10^decimals.
+                    // UiAmount is the human-readable amount; the explicit cast
+                    // compiles whether the SDK types it double? or decimal?
+                    // (SDK-VERIFY: TokenBalance.UiAmount numeric type).
+                    // Fall back to raw / 10^decimals.
                     if (amt.UiAmount.HasValue)
-                        total += amt.UiAmount.Value;
+                        total += (double)amt.UiAmount.Value;
                     else if (ulong.TryParse(amt.Amount, out var raw))
                         total += LamportsToUi(raw, decimals);
                 }

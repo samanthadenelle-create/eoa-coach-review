@@ -281,15 +281,29 @@ namespace DeNelle.Wallet
         /// </summary>
         public WalletService()
         {
-            if (SolanaWalletProvider.IsSdkAvailable)
+            // WO-766: the real provider is selected only when the SDK is
+            // compiled in (SOLANA_SDK - set for the ANDROID target group only)
+            // AND we are on-device. In the Editor the Android target group's
+            // defines apply too, but Mobile Wallet Adapter needs a device, so
+            // play mode deliberately keeps the stub.
+            if (SolanaWalletProvider.IsSdkAvailable && !Application.isEditor)
             {
                 _provider = new SolanaWalletProvider();
-                Debug.Log("[WalletService] Using SolanaWalletProvider (Solana Unity SDK detected).");
+                // WO-766 safety invariant (spec s3), traced once per session:
+                // the real wallet is IDENTITY + cloud-save message-signing only.
+                // FeatureFlags.RealmStorePurchase stays release-gated OFF, so no
+                // transfer transaction is ever constructed with purchases off.
+                FlowTrace.Once("Wallet", "wo766-real-provider",
+                    "SolanaWalletProvider selected - identity/save mode, purchases off " +
+                    "(RealmStorePurchase release-gated; no transfer path reachable).");
+                Debug.Log("[WalletService] Using SolanaWalletProvider (Solana Unity SDK compiled in).");
             }
             else
             {
                 _provider = new StubWalletProvider();
-                Debug.Log("[WalletService] Using StubWalletProvider (Solana Unity SDK absent — devnet mock).");
+                Debug.Log(SolanaWalletProvider.IsSdkAvailable
+                    ? "[WalletService] Using StubWalletProvider (Editor session - MWA needs a device; SDK present)."
+                    : "[WalletService] Using StubWalletProvider (Solana Unity SDK absent — devnet mock).");
             }
         }
 
