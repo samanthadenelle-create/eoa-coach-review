@@ -15,7 +15,7 @@ Each module folder has its own README with purpose + key files. **Read the modul
 | `Audio/` | `DeNelle.Audio` | AudioService, SFX library, music selection, WebGL unlock |
 | `BattleATB/` | `DeNelle.BattleATB` (+Tests) | ATB combat: pure-C# engine + Unity controllers |
 | `Characters/` | — (empty) | Reserved slot, no code/asmdef yet. Character code lives in `Village/` + `Editor/` |
-| `Core/` | `DeNelle.Core`, `DeNelle.AI` (+Tests) | Interfaces, enums, save/state, services, behavior-tree AI. **Owns `Core/Jobs/`** — the shared "Obsidian" multi-channel work queue (WO-773, `ObsidianQueueEngine`/`ObsidianQueueState`; save v35) |
+| `Core/` | `DeNelle.Core`, `DeNelle.AI` (+Tests) | Interfaces, enums, save/state, services, behavior-tree AI. **Owns `Core/Jobs/`** — the shared "Obsidian" multi-channel work queue (WO-773, `ObsidianQueueEngine`/`ObsidianQueueState`; landed at save v35 — live schema is now **v36**) |
 | `Cosmetics/` | `DeNelle.Cosmetics` | Battle pass, cosmetic catalog, Glimmer currency |
 | `Data/` | Assembly-CSharp | `MasterAssetCatalog` only |
 | `DevTools/` | `DeNelle.DevTools` | Dev panel, wallet probe |
