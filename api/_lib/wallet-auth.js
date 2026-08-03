@@ -1,59 +1,136 @@
 // =============================================================================
-// api/_lib/wallet-auth.js — shared wallet-signature auth helpers (WO-120 §D)
+// api/_lib/wallet-auth.js — the auth gate for /api/game/save + /api/game/load
 // -----------------------------------------------------------------------------
-// Challenge–response auth so a public wallet address alone can no longer
-// overwrite/read another player's save. Used by:
-//   • api/auth/nonce.js  — issues a one-time nonce (issueNonce)
-//   • api/game/save.js   — verifies a signature + burns the nonce (verifyAndConsume)
-//   • api/game/load.js   — same verify path (read protection)
+// TWO RAILS, chosen by the SHAPE OF THE PLAYER ID being touched — never by what
+// headers the caller happens to send:
 //
-// WALLET SCHEME (ASSUMPTION — FLAGGED): Solana / ed25519.
-//   The entire client is Solana (WalletService exposes a base58 address as the
-//   on-chain identity = player_id; tower-swap logs Solana tx signatures; Solana
-//   Pay). So we verify an ed25519 signature with tweetnacl over the base58-
-//   decoded wallet public key. If the chain were ever EVM, replace verifySignature
-//   with an ecrecover check — the nonce table + flow are scheme-agnostic.
+//   WALLET RAIL  playerId matches ^[1-9A-HJ-NP-Za-km-z]{32,44}$ (base58 Solana
+//                address). Requires X-Wallet + X-Nonce + X-Signature: an ed25519
+//                signature over the exact canonical message, plus a single-use,
+//                5-minute, wallet-bound nonce that is atomically burned. This is
+//                the REAL-VALUE rail and its verification is UNCHANGED and
+//                UNWEAKENED by the guest work below.
 //
-// DEPENDENCIES (add to the Vercel project's package.json — see DB_SETUP.md §1):
-//   npm install tweetnacl bs58
-// Both are tiny, dependency-light, and the de-facto standard for Solana message
-// verification server-side.
+//   GUEST RAIL   playerId matches ^guest-local-[0-9a-f]{64}$ — the id the Unity
+//                client already mints (GameStateService.EnsureAccount:
+//                "guest-local-" + sha256(deviceId + salt)). Requires X-Guest-Id
+//                to equal that playerId, and nothing else. See the honesty note
+//                on verifyGuest: this is BEARER-TOKEN trust, deliberately and
+//                explicitly second-class.
+//
+// The two id shapes are lexically DISJOINT (a guest id is 76 chars, contains '-'
+// and hex '0', all of which fail base58), so no value can ever be routed to the
+// wrong rail, and no guest header can influence a wallet-keyed row.
+//
+// EVERY failure returns a STABLE MACHINE CODE (AuthCode). Before this, all nine
+// distinct ways to fail collapsed into one opaque 401 with a prose "reason" sent
+// to the PLAYER and nothing kept server-side — you could not tell no-header from
+// bad-signature from replayed-nonce from expired-nonce. Now the code goes in the
+// (minimal) response and the full context goes in the db (_lib/audit.js).
 //
 // MESSAGE FORMAT (canonical — the client MUST sign the identical bytes):
 //   `dotr-save:v1:<wallet>:<nonce>:<sha256-hex-of-payload-bytes>`
-//   UTF-8 encoded. Binding the payload hash means a captured signature can't be
-//   replayed against a DIFFERENT save body, and binding the nonce means it can't
-//   be replayed at all (single-use). For a GET (load) there is no body, so the
-//   payload-hash segment is the literal string "load".
+//   UTF-8. Binding the payload hash stops a captured signature being replayed
+//   against a DIFFERENT body; binding the nonce stops it being replayed at all.
+//   A GET (load) has no body, so the payload segment is the literal "load".
+//
+// DEPENDENCIES: tweetnacl + bs58 (both in package.json).
 // =============================================================================
 
 const crypto = require('crypto');
 
-// Lazy-require the crypto libs so a missing dependency surfaces as a clear 500
-// at call time (with a helpful message) rather than a module-load crash that
-// takes down unrelated routes.
+// Lazy-require the crypto libs so a missing dependency surfaces as a clear coded
+// failure at call time rather than a module-load crash that takes down unrelated
+// routes.
 let nacl = null;
 let bs58 = null;
+let cryptoLoadError = null;
 function loadCrypto() {
-    if (nacl && bs58) return;
-    // eslint-disable-next-line global-require
-    nacl = require('tweetnacl');
-    // eslint-disable-next-line global-require
-    bs58 = require('bs58');
-    // bs58 v6 exports under .default when require'd from CJS in some setups.
-    if (bs58 && typeof bs58.decode !== 'function' && bs58.default) bs58 = bs58.default;
+    if (nacl && bs58) return true;
+    try {
+        // eslint-disable-next-line global-require
+        nacl = require('tweetnacl');
+        // eslint-disable-next-line global-require
+        bs58 = require('bs58');
+        // bs58 v6 exports under .default when require'd from CJS in some setups.
+        if (bs58 && typeof bs58.decode !== 'function' && bs58.default) bs58 = bs58.default;
+        return !!(nacl && bs58 && typeof bs58.decode === 'function');
+    } catch (err) {
+        cryptoLoadError = err && err.message ? err.message : String(err);
+        return false;
+    }
 }
 
-// How long an issued nonce stays valid. Short by design (challenge → sign →
-// send happens in one user action).
+// How long an issued nonce stays valid. Short by design (challenge → sign → send
+// happens inside one user action).
 const NONCE_TTL_SECONDS = 300; // 5 minutes
+
+// ── Identity shapes ──────────────────────────────────────────────────────────
+// The wallet regex is deliberately IDENTICAL to the one api/auth/nonce.js applies
+// and to the client's GameStateService.IsCloudIdentityShaped — three copies of
+// one rule is how a player gets a nonce they can never spend.
+const WALLET_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+// Mirrors the client EXACTLY: GuestWalletPrefix ("guest-local-") + Sha256Hex(...)
+// = 12 + 64 chars, lowercase hex.
+const GUEST_RE = /^guest-local-[0-9a-f]{64}$/;
+
+function isWalletId(id) { return typeof id === 'string' && WALLET_RE.test(id); }
+function isGuestId(id) { return typeof id === 'string' && GUEST_RE.test(id); }
+
+// ── Stable failure codes ─────────────────────────────────────────────────────
+// Non-secret by construction: a code names a CLASS of failure and never reveals
+// which wallet, which nonce, or what the server knows about either.
+const AuthCode = {
+    PLAYER_ID_MISSING:      'PLAYER_ID_MISSING',        // no playerId in body/query at all
+    PLAYER_ID_BAD_SHAPE:    'PLAYER_ID_BAD_SHAPE',      // neither a base58 wallet nor a guest-local id
+
+    WALLET_HEADERS_MISSING: 'AUTH_HEADERS_MISSING',     // wallet rail, but X-Wallet/X-Nonce/X-Signature absent
+    WALLET_MALFORMED:       'AUTH_WALLET_MALFORMED',    // X-Wallet is not a base58 32–44 address
+    WALLET_MISMATCH:        'AUTH_WALLET_MISMATCH',     // X-Wallet != the playerId being touched
+    BAD_SIGNATURE:          'AUTH_BAD_SIGNATURE',       // ed25519 verify failed over the canonical message
+    CRYPTO_UNAVAILABLE:     'AUTH_CRYPTO_UNAVAILABLE',  // tweetnacl/bs58 missing on the deployment
+
+    NONCE_UNKNOWN:          'AUTH_NONCE_UNKNOWN',       // no such nonce row (never issued, or already swept)
+    NONCE_WRONG_WALLET:     'AUTH_NONCE_WRONG_WALLET',  // nonce exists but was issued to another wallet
+    NONCE_REPLAYED:         'AUTH_NONCE_REPLAYED',      // nonce exists, already burned  ← the replay case
+    NONCE_EXPIRED:          'AUTH_NONCE_EXPIRED',       // nonce exists, past its 5-minute TTL
+
+    GUEST_HEADER_MISSING:   'GUEST_HEADER_MISSING',     // guest rail, no X-Guest-Id
+    GUEST_MISMATCH:         'GUEST_MISMATCH',           // X-Guest-Id != the guest playerId
+    GUEST_RATE_LIMITED:     'GUEST_RATE_LIMITED',       // guest exceeded its window budget
+    GUEST_DISABLED:         'GUEST_DISABLED',           // guest rail switched off by env
+
+    PAYLOAD_TOO_LARGE:      'PAYLOAD_TOO_LARGE',
+    BAD_PAYLOAD:            'BAD_PAYLOAD',
+    METHOD_NOT_ALLOWED:     'METHOD_NOT_ALLOWED',
+    SERVER_ERROR:           'SERVER_ERROR',
+};
+
+// ── Guest rail policy ────────────────────────────────────────────────────────
+// A guest is UNVERIFIED by definition, so it gets a budget instead of trust.
+// Window is per guest id and shared by save+load (a bounded total, not two
+// budgets to spend). Generous enough that no honest tester ever sees it: the
+// client's own MinSyncDelay is 8s ⇒ ~7 syncs/minute at full tilt.
+const GUEST_WINDOW_SECONDS = 60;
+const GUEST_MAX_PER_WINDOW = 30;
+// Hard ceiling on a guest save body. The wallet rail gets more room because it
+// is a proven identity; a guest is a stranger with a device hash.
+const GUEST_MAX_BODY_BYTES  = 256 * 1024;
+const WALLET_MAX_BODY_BYTES = 1024 * 1024;
+
+/** Guests can be switched off entirely with GUEST_SAVE_ENABLED=false (no redeploy of logic). */
+function guestEnabled() {
+    const v = process.env.GUEST_SAVE_ENABLED;
+    if (v == null || v === '') return true;             // default ON
+    return !/^(0|false|off|no)$/i.test(String(v).trim());
+}
 
 /**
  * The canonical message the client signs and the server reconstructs.
- * @param {string} wallet       base58 wallet address (the claimed identity)
- * @param {string} nonce        the issued one-time nonce
+ * @param {string} wallet        base58 wallet address (the claimed identity)
+ * @param {string} nonce         the issued one-time nonce
  * @param {Buffer|null} payload  raw request body bytes (null/empty for GET/load)
- * @returns {string} the exact UTF-8 message both sides hash a signature over
+ * @returns {string} the exact UTF-8 message both sides sign/verify
  */
 function buildSignedMessage(wallet, nonce, payload) {
     let payloadTag;
@@ -72,12 +149,12 @@ function buildSignedMessage(wallet, nonce, payload) {
  * @returns {Promise<{nonce:string, expiresAt:string, ttlSeconds:number}>}
  */
 async function issueNonce(sql, wallet) {
-    // 32 random bytes → URL-safe base64. Unpredictable, collision-proof for our
-    // volume, and safe to put in a header/query string.
+    // 32 random bytes → URL-safe base64. Unpredictable, collision-proof at our
+    // volume, safe in a header or query string.
     const nonce = crypto.randomBytes(32).toString('base64url');
 
-    // Best-effort prune of this wallet's stale/used challenges so the table
-    // doesn't grow unbounded. Cheap (indexed on wallet); ignore failures.
+    // Best-effort prune of this wallet's stale/used challenges so the table does
+    // not grow unbounded between cron sweeps. Cheap (indexed on wallet).
     try {
         await sql`
             DELETE FROM auth_nonces
@@ -105,62 +182,47 @@ async function issueNonce(sql, wallet) {
 /**
  * Verify an ed25519 signature over buildSignedMessage(wallet, nonce, payload).
  * Pure crypto — does NOT touch the DB.
- * @returns {boolean} true iff the signature is valid for the wallet pubkey
+ * @returns {{ok:boolean, code?:string}} ok, or the precise reason it failed.
  */
-function verifySignature(wallet, nonce, payload, signatureBase58) {
-    loadCrypto();
+function verifySignatureDetailed(wallet, nonce, payload, signatureBase58) {
+    if (!loadCrypto()) {
+        return { ok: false, code: AuthCode.CRYPTO_UNAVAILABLE, detail: { require: cryptoLoadError } };
+    }
     try {
         const message = Buffer.from(buildSignedMessage(wallet, nonce, payload), 'utf8');
         const pubkey = bs58.decode(wallet);           // 32-byte ed25519 pubkey
         const sig = bs58.decode(signatureBase58);     // 64-byte signature
-        if (pubkey.length !== 32 || sig.length !== 64) return false;
-        return nacl.sign.detached.verify(
+        if (pubkey.length !== 32 || sig.length !== 64) {
+            return { ok: false, code: AuthCode.BAD_SIGNATURE, detail: { pubkeyLen: pubkey.length, sigLen: sig.length } };
+        }
+        const ok = nacl.sign.detached.verify(
             new Uint8Array(message),
             new Uint8Array(sig),
             new Uint8Array(pubkey),
         );
-    } catch (_) {
-        return false; // malformed base58 / wrong lengths → auth fail, never throw
+        return ok ? { ok: true } : { ok: false, code: AuthCode.BAD_SIGNATURE, detail: { verified: false } };
+    } catch (err) {
+        // malformed base58 / wrong lengths → auth fail, never throw
+        return { ok: false, code: AuthCode.BAD_SIGNATURE, detail: { threw: true } };
     }
 }
 
+/** Back-compat boolean wrapper (unchanged semantics for any existing caller). */
+function verifySignature(wallet, nonce, payload, signatureBase58) {
+    return verifySignatureDetailed(wallet, nonce, payload, signatureBase58).ok === true;
+}
+
 /**
- * Full auth gate for the save/load path: pull the wallet/nonce/signature from
- * headers, verify the signature, then ATOMICALLY consume the nonce (so it can
- * never be replayed). All failures collapse to a single { ok:false, reason }.
+ * Burn a nonce ATOMICALLY, and — only when that fails — spend one extra read to
+ * say WHY. The happy path is still exactly one UPDATE; the diagnostic SELECT is
+ * paid for solely by failures, which is the whole point of making them legible.
  *
- * Header contract (client sets these — see GameStateService):
- *   X-Wallet     base58 wallet address (must equal the payload's playerId)
- *   X-Nonce      the nonce issued by GET /api/auth/nonce
- *   X-Signature  base58 ed25519 signature over buildSignedMessage(...)
+ * The UPDATE remains the sole authority (exists ∧ this wallet ∧ unused ∧
+ * unexpired). The classify step never grants access, it only labels the refusal.
  *
- * @param {Function} sql       neon(...) client
- * @param {object}  headers    req.headers (lower-cased by Node)
- * @param {Buffer|null} payload raw body bytes (null for GET/load)
- * @param {string}  claimedPlayerId  the playerId the request is acting on
- * @returns {Promise<{ok:boolean, wallet?:string, reason?:string}>}
+ * @returns {Promise<{ok:boolean, code?:string, detail?:object}>}
  */
-async function verifyAndConsume(sql, headers, payload, claimedPlayerId) {
-    const wallet = headers['x-wallet'];
-    const nonce = headers['x-nonce'];
-    const signature = headers['x-signature'];
-
-    if (!wallet || !nonce || !signature) {
-        return { ok: false, reason: 'missing_auth_headers' };
-    }
-
-    // The signed wallet MUST be the player whose save is being touched.
-    if (claimedPlayerId != null && String(claimedPlayerId) !== String(wallet)) {
-        return { ok: false, reason: 'wallet_player_mismatch' };
-    }
-
-    // 1. Cryptographic check (cheap, no DB) — reject bad signatures first.
-    if (!verifySignature(wallet, nonce, payload, signature)) {
-        return { ok: false, reason: 'bad_signature' };
-    }
-
-    // 2. Atomically burn the nonce. The WHERE clause enforces: exists, issued to
-    //    THIS wallet, not yet used, not expired. Zero rows ⇒ replay/expired/forged.
+async function consumeNonce(sql, nonce, wallet) {
     const consumed = await sql`
         UPDATE auth_nonces
         SET used = TRUE
@@ -170,17 +232,245 @@ async function verifyAndConsume(sql, headers, payload, claimedPlayerId) {
           AND expires_at > NOW()
         RETURNING nonce
     `;
-    if (consumed.length === 0) {
-        return { ok: false, reason: 'nonce_invalid_or_used' };
+    if (consumed.length > 0) return { ok: true };
+
+    // Zero rows — classify. Any of: never issued, issued to someone else, already
+    // spent (REPLAY), or expired.
+    let rows = [];
+    try {
+        rows = await sql`
+            SELECT wallet, used,
+                   (expires_at <= NOW())                              AS expired,
+                   EXTRACT(EPOCH FROM (NOW() - created_at))::int      AS age_seconds
+            FROM auth_nonces
+            WHERE nonce = ${nonce}
+            LIMIT 1
+        `;
+    } catch (_) { /* classification is best-effort; fall through to UNKNOWN */ }
+
+    if (!rows || rows.length === 0) {
+        // Not in the table at all. Note the ambiguity honestly: the cleanup cron
+        // deletes used/expired nonces, so a very old replay can also land here.
+        return { ok: false, code: AuthCode.NONCE_UNKNOWN, detail: { swept_or_never_issued: true } };
+    }
+    const row = rows[0];
+    if (String(row.wallet) !== String(wallet)) {
+        return { ok: false, code: AuthCode.NONCE_WRONG_WALLET, detail: { ageSeconds: row.age_seconds } };
+    }
+    if (row.used === true) {
+        return { ok: false, code: AuthCode.NONCE_REPLAYED, detail: { ageSeconds: row.age_seconds } };
+    }
+    if (row.expired === true) {
+        return { ok: false, code: AuthCode.NONCE_EXPIRED, detail: { ageSeconds: row.age_seconds, ttl: NONCE_TTL_SECONDS } };
+    }
+    // Should be unreachable (the UPDATE's predicate is the conjunction of the
+    // three above) — keep a distinct label rather than lying about the cause.
+    return { ok: false, code: AuthCode.NONCE_UNKNOWN, detail: { unclassified: true } };
+}
+
+/**
+ * Full WALLET-rail gate: headers → signature → atomic nonce burn.
+ * UNCHANGED in strictness from the original verifyAndConsume; only the failure
+ * labels got precise.
+ *
+ * Header contract:
+ *   X-Wallet     base58 wallet address (must equal the playerId being touched)
+ *   X-Nonce      the nonce issued by GET /api/auth/nonce
+ *   X-Signature  base58 ed25519 signature over buildSignedMessage(...)
+ *
+ * @returns {Promise<{ok:boolean, wallet?:string, code?:string, detail?:object}>}
+ */
+async function verifyWallet(sql, headers, payload, claimedPlayerId) {
+    const wallet = headers['x-wallet'];
+    const nonce = headers['x-nonce'];
+    const signature = headers['x-signature'];
+
+    if (!wallet || !nonce || !signature) {
+        return {
+            ok: false,
+            code: AuthCode.WALLET_HEADERS_MISSING,
+            detail: { wallet: !!wallet, nonce: !!nonce, signature: !!signature },
+        };
     }
 
-    return { ok: true, wallet };
+    if (!isWalletId(wallet)) {
+        return { ok: false, code: AuthCode.WALLET_MALFORMED, detail: { len: String(wallet).length } };
+    }
+
+    // The signing wallet MUST be the player whose save is being touched.
+    if (claimedPlayerId != null && String(claimedPlayerId) !== String(wallet)) {
+        return { ok: false, code: AuthCode.WALLET_MISMATCH, detail: { claimedLen: String(claimedPlayerId).length } };
+    }
+
+    // 1. Cryptographic check (cheap, no DB) — reject bad signatures before we
+    //    touch the nonce table. A bad signature deliberately does NOT burn the
+    //    nonce: burning it would let anyone holding a leaked nonce grief the
+    //    owner's own sync by spending it with garbage.
+    const sig = verifySignatureDetailed(wallet, nonce, payload, signature);
+    if (!sig.ok) return { ok: false, code: sig.code, detail: sig.detail };
+
+    // 2. Atomically burn the nonce (single-use, replay-proof).
+    const burn = await consumeNonce(sql, nonce, wallet);
+    if (!burn.ok) return { ok: false, code: burn.code, detail: burn.detail };
+
+    return { ok: true, wallet: wallet, mode: 'wallet' };
+}
+
+/**
+ * BACK-COMPAT shim for the original boolean-ish contract
+ * ({ok, wallet, reason}). Kept so nothing outside this lane breaks; new code
+ * should call authenticate().
+ */
+async function verifyAndConsume(sql, headers, payload, claimedPlayerId) {
+    const r = await verifyWallet(sql, headers, payload, claimedPlayerId);
+    return r.ok ? { ok: true, wallet: r.wallet } : { ok: false, reason: r.code, code: r.code, detail: r.detail };
+}
+
+/**
+ * GUEST-rail gate.
+ *
+ * ── HONESTY NOTE (read this before trusting anything here) ───────────────────
+ * This is BEARER-TOKEN trust, not proof of identity. The only secret is the guest
+ * id itself: sha256(deviceUniqueIdentifier + salt), a 256-bit value the device
+ * keeps and nobody else can guess. Whoever presents it gets that row — exactly
+ * like an unguessable URL. It cannot be revoked, it cannot be transferred to a
+ * new device, and it is worth precisely one throwaway tester save.
+ *
+ * What that buys, and what it must NEVER buy, is enforced structurally, not by
+ * convention: a guest id can never satisfy the wallet regex, so it can never key
+ * a wallet row, and the wallet rail never consults a guest header. Real-value
+ * paths (leaderboard, entitlements, anything on-chain) key off the wallet and are
+ * untouched by this function.
+ *
+ * @returns {Promise<{ok:boolean, guestId?:string, code?:string, detail?:object}>}
+ */
+async function verifyGuest(sql, headers, claimedPlayerId) {
+    if (!guestEnabled()) {
+        return { ok: false, code: AuthCode.GUEST_DISABLED, detail: {} };
+    }
+
+    const given = headers['x-guest-id'];
+    if (!given) {
+        return { ok: false, code: AuthCode.GUEST_HEADER_MISSING, detail: {} };
+    }
+    if (!isGuestId(given)) {
+        return { ok: false, code: AuthCode.GUEST_MISMATCH, detail: { shape: 'header_not_guest_shaped', len: String(given).length } };
+    }
+    if (String(given) !== String(claimedPlayerId)) {
+        return { ok: false, code: AuthCode.GUEST_MISMATCH, detail: { shape: 'header_ne_playerid' } };
+    }
+
+    const rate = await touchGuestRate(sql, given);
+    if (!rate.ok) return { ok: false, code: rate.code, detail: rate.detail };
+
+    return { ok: true, guestId: given, mode: 'guest', hits: rate.hits };
+}
+
+/**
+ * Sliding-window counter for one guest id, in a single atomic UPSERT.
+ *
+ * FAIL-OPEN, DELIBERATELY: if guest_rate_limit is missing (schema not applied
+ * yet) the rate check is skipped and the fact is reported, rather than 500-ing
+ * every guest save on a deploy-order mistake. Rate limiting is abuse control on a
+ * zero-value rail — it is not the thing keeping anyone's money safe, so a missing
+ * table must degrade, not deny. (The wallet rail has no such escape hatch.)
+ */
+async function touchGuestRate(sql, guestId) {
+    try {
+        const rows = await sql`
+            INSERT INTO guest_rate_limit (guest_id, window_started_at, hits, last_seen, total_hits)
+            VALUES (${guestId}, NOW(), 1, NOW(), 1)
+            ON CONFLICT (guest_id) DO UPDATE SET
+                window_started_at = CASE
+                    WHEN guest_rate_limit.window_started_at < NOW() - (${GUEST_WINDOW_SECONDS} * INTERVAL '1 second')
+                    THEN NOW() ELSE guest_rate_limit.window_started_at END,
+                hits = CASE
+                    WHEN guest_rate_limit.window_started_at < NOW() - (${GUEST_WINDOW_SECONDS} * INTERVAL '1 second')
+                    THEN 1 ELSE guest_rate_limit.hits + 1 END,
+                last_seen = NOW(),
+                total_hits = guest_rate_limit.total_hits + 1
+            RETURNING hits, total_hits
+        `;
+        const hits = rows && rows[0] ? Number(rows[0].hits) : 1;
+        if (hits > GUEST_MAX_PER_WINDOW) {
+            return {
+                ok: false,
+                code: AuthCode.GUEST_RATE_LIMITED,
+                detail: { hits: hits, max: GUEST_MAX_PER_WINDOW, windowSeconds: GUEST_WINDOW_SECONDS },
+            };
+        }
+        return { ok: true, hits: hits };
+    } catch (err) {
+        console.warn('[wallet-auth] guest rate table unavailable — allowing (fail-open):', err.message);
+        return { ok: true, hits: -1, degraded: true };
+    }
+}
+
+/**
+ * THE ONE ENTRY POINT save.js/load.js call.
+ *
+ * Routes by the SHAPE of the player id being acted on, so the caller cannot pick
+ * the weaker rail for a wallet-keyed row: a base58 id ALWAYS demands a signature.
+ *
+ * @param {Function} sql              neon(...) client
+ * @param {object}   req              the request (headers, method, url)
+ * @param {Buffer|null} payload       raw body bytes (null for GET)
+ * @param {string}   claimedPlayerId  the id the request acts on
+ * @returns {Promise<{ok:boolean, mode:string, identity?:string, code?:string, detail?:object}>}
+ */
+async function authenticate(sql, req, payload, claimedPlayerId) {
+    const headers = req.headers || {};
+
+    if (claimedPlayerId == null || String(claimedPlayerId).trim() === '') {
+        return { ok: false, mode: 'none', code: AuthCode.PLAYER_ID_MISSING, detail: {} };
+    }
+    const id = String(claimedPlayerId).trim();
+
+    if (isWalletId(id)) {
+        const r = await verifyWallet(sql, headers, payload, id);
+        return r.ok
+            ? { ok: true, mode: 'wallet', identity: r.wallet }
+            : { ok: false, mode: 'wallet', identity: id, code: r.code, detail: r.detail };
+    }
+
+    if (isGuestId(id)) {
+        const r = await verifyGuest(sql, headers, id);
+        return r.ok
+            ? { ok: true, mode: 'guest', identity: r.guestId, degraded: true }
+            : { ok: false, mode: 'guest', identity: id, code: r.code, detail: r.detail };
+    }
+
+    // Neither shape. This is the Firebase-UID case the client's RetireLegacyIdentity
+    // describes (a 28-char UID that could never satisfy the wallet regex) and every
+    // debug string — name it precisely instead of pretending the signature failed.
+    return {
+        ok: false,
+        mode: 'none',
+        identity: id,
+        code: AuthCode.PLAYER_ID_BAD_SHAPE,
+        detail: { len: id.length },
+    };
 }
 
 module.exports = {
     NONCE_TTL_SECONDS,
+    GUEST_WINDOW_SECONDS,
+    GUEST_MAX_PER_WINDOW,
+    GUEST_MAX_BODY_BYTES,
+    WALLET_MAX_BODY_BYTES,
+    AuthCode,
+    WALLET_RE,
+    GUEST_RE,
+    isWalletId,
+    isGuestId,
+    guestEnabled,
     buildSignedMessage,
     issueNonce,
     verifySignature,
-    verifyAndConsume,
+    verifySignatureDetailed,
+    consumeNonce,
+    verifyWallet,
+    verifyGuest,
+    verifyAndConsume,   // back-compat
+    authenticate,       // ← use this
 };

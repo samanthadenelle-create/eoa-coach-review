@@ -1,45 +1,66 @@
 // =============================================================================
-// api/auth/nonce.js — Vercel Serverless Function (WO-120 §D security gate)
+// api/auth/nonce.js — Vercel Serverless Function (the wallet-rail challenge)
 // -----------------------------------------------------------------------------
-// Issues a single-use, short-TTL nonce bound to a wallet. The client fetches one
-// of these BEFORE a save/load, signs a message embedding it (see
+// Issues a single-use, 5-minute nonce bound to a wallet. The client fetches one
+// BEFORE a save/load, signs a message embedding it (see
 // _lib/wallet-auth.buildSignedMessage), and presents the signature on the
-// save/load call. The save/load endpoint then verifies + burns the nonce.
+// save/load call, which verifies it and BURNS the nonce.
 //
-// Client : Assets/_Modules/Core/State/GameStateService.cs (auth pre-step)
-//   GET   /api/auth/nonce?wallet=<base58>
-//   Reply : { success:true, nonce, expiresAt, ttlSeconds }
+//   GET /api/auth/nonce?wallet=<base58>
+//   200 { success:true, ok:true, nonce, expiresAt, ttlSeconds }
+//   400 { ok:false, code:'AUTH_WALLET_MALFORMED', ref }
 //
 // Issuing a nonce is intentionally UNAUTHENTICATED — the nonce alone grants
-// nothing; it is only useful to whoever holds the wallet's PRIVATE key (they
-// must sign with it). So leaking a nonce is harmless.
+// nothing; it is only useful to whoever holds the wallet's PRIVATE key. Leaking
+// one is harmless.
 //
-// Driver: @neondatabase/serverless
-// Status codes: 200 | 400 | 500   (project constraint)
+// GUESTS DO NOT COME HERE. The guest rail carries no signature and needs no
+// challenge (see _lib/wallet-auth.verifyGuest); asking this endpoint for a nonce
+// with a guest id returns AUTH_WALLET_MALFORMED, which is correct and legible.
+//
+// CHANGED 2026-08-02: CORS + preflight (this had none, so the WebGL build's
+// nonce fetch was blocked by the browser before the function ever ran — the
+// wallet rail was unreachable from the web build no matter what the client did),
+// and structured codes + audit rows instead of prose errors.
+//
+// Status codes: 200 | 400 | 500 (project constraint).
 // =============================================================================
 
 const { neon } = require('@neondatabase/serverless');
-const { issueNonce } = require('../_lib/wallet-auth');
+const { AuthCode, issueNonce, isWalletId, isGuestId } = require('../_lib/wallet-auth');
+const { applyCors, newRef, quietFail } = require('../_lib/http');
+const { logAuthReject } = require('../_lib/audit');
 
 module.exports = async (req, res) => {
+    if (applyCors(req, res, 'GET, OPTIONS')) return;
+
+    const ref = newRef();
+
     if (req.method !== 'GET') {
-        return res.status(400).json({ error: 'Method not allowed' });
+        return quietFail(res, 400, AuthCode.METHOD_NOT_ALLOWED, ref);
     }
 
     const wallet = req.query && req.query.wallet != null ? String(req.query.wallet).trim() : '';
-    // Basic sanity on a Solana base58 address (32–44 chars, base58 alphabet).
-    // Not a full curve check — verifySignature does the real work — just a guard
-    // against empty/garbage so we don't mint nonces for obvious junk.
-    if (!wallet || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(wallet)) {
-        return res.status(400).json({ error: 'Missing or malformed wallet' });
+
+    // Same base58 rule as the verifier and as the client's IsCloudIdentityShaped —
+    // minting a nonce for an id that can never satisfy the verifier only
+    // manufactures a confusing 401 one step later.
+    if (!isWalletId(wallet)) {
+        let sql = null;
+        try { sql = neon(process.env.DATABASE_URL); } catch (_) { /* log to console only */ }
+        await logAuthReject(sql, req, {
+            code: AuthCode.WALLET_MALFORMED, ref, identity: wallet || null, mode: 'wallet',
+            detail: { len: wallet.length, looksLikeGuest: isGuestId(wallet) },
+        });
+        return quietFail(res, 400, AuthCode.WALLET_MALFORMED, ref);
     }
 
     try {
         const sql = neon(process.env.DATABASE_URL);
         const { nonce, expiresAt, ttlSeconds } = await issueNonce(sql, wallet);
-        return res.status(200).json({ success: true, nonce, expiresAt, ttlSeconds });
+        return res.status(200).json({ ok: true, success: true, nonce, expiresAt, ttlSeconds });
     } catch (err) {
         console.error('[auth/nonce] DB error:', err);
-        return res.status(500).json({ error: 'Internal server error' });
+        return quietFail(res, 500, AuthCode.SERVER_ERROR, ref);
     }
 };
