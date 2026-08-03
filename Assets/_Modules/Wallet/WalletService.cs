@@ -236,6 +236,31 @@ namespace DeNelle.Wallet
         private readonly IWalletProvider _provider;
 
         /// <summary>
+        /// Hard ceiling on ONE wallet-connect handshake (seconds).
+        /// <para>
+        /// Mobile Wallet Adapter has no failure mode of its own for "no wallet app is
+        /// installed" or "the player backgrounded the wallet and never came back" - the
+        /// await simply never resolves, which on the login surface reads to the player as
+        /// a frozen game. 30s matches the existing PiSignInController.Authenticate ceiling
+        /// (the same shape of problem: an external app must answer) and is generous enough
+        /// that a real player picking an account is never cut off.
+        /// </para>
+        /// <para>
+        /// Counted in UNSCALED player-loop time: while the app is backgrounded (the player
+        /// IS in the wallet app) Unity's loop is paused, so the budget does not burn - it
+        /// resumes counting when they return. That is the intended semantic.
+        /// </para>
+        /// </summary>
+        public const float ConnectTimeoutSeconds = 30f;
+
+        /// <summary>
+        /// Why the LAST <see cref="Connect"/> did not produce an account, in player-facing
+        /// words; empty after a success. Callers surface this instead of guessing
+        /// "cancelled" - a timeout and a refusal need different next steps from the player.
+        /// </summary>
+        public string LastConnectError { get; private set; } = string.Empty;
+
+        /// <summary>
         /// The active Solana network. Devnet in the v2 foundation (spec Part 10),
         /// seeded from <see cref="DefaultNetwork"/>. The flip to Mainnet is
         /// owner-gated — the agent never sets this to Mainnet without written
@@ -260,6 +285,22 @@ namespace DeNelle.Wallet
 
         /// <summary>The provider backing this service (the stub today, the SDK at Week 7).</summary>
         public string ProviderName => _provider.ProviderName;
+
+        /// <summary>
+        /// True ONLY when the connected wallet is a real, key-holding, signing wallet -
+        /// never the devnet stub. This is the single attestation the save layer accepts
+        /// before a wallet address may key a CLOUD identity (GameStateService.BindWallet
+        /// attested overload).
+        /// <para>
+        /// Why it exists: the stub used to mint a plain 44-char base58 string, and the
+        /// old cloud-identity test was a denylist ("does not start with guest-local-"), so
+        /// a stub address read as a real player. With SOLANA_SDK missing from a build,
+        /// EVERY device would have keyed the SAME cloud row. Attestation is now positive
+        /// and comes from the provider, not from the shape of a string.
+        /// </para>
+        /// </summary>
+        public bool IsRealSigningWallet =>
+            IsConnected && !(_provider is StubWalletProvider) && _provider.CanSignMessages;
 
         /// <summary>
         /// Constructs the service over an explicit provider — used by tests and
@@ -336,9 +377,15 @@ namespace DeNelle.Wallet
             if (IsConnected) return Account;
 
             SetStatus(WalletStatus.Connecting);
+            LastConnectError = string.Empty;
             try
             {
-                var account = await _provider.Connect(Network);
+                // TIME-BOUNDED (security audit 2026-08-02): an unanswered MWA handshake
+                // used to hang forever and froze the login surface. On expiry this throws
+                // TimeoutException, which lands in the catch below as a normal failure -
+                // status returns to Disconnected and the caller gets an honest reason.
+                var account = await _provider.Connect(Network)
+                    .Timeout(TimeSpan.FromSeconds(ConnectTimeoutSeconds), DelayType.UnscaledDeltaTime);
                 SetStatus(account.IsValid ? WalletStatus.Connected : WalletStatus.Disconnected);
 
                 // WO-121: expose this connected wallet as the backend save-auth
@@ -349,17 +396,35 @@ namespace DeNelle.Wallet
                 if (account.IsValid)
                 {
                     CoreServices.RegisterWalletSigner(this);
-                    FlowTrace.Step("Wallet", $"Connect OK — {account.Address} ({account.WalletName}).");
+                    // PRIVACY (security audit 2026-08-02): log the MASKED address only.
+                    // FlowTrace lines ride WebTraceSink -> api/trace.js into analytics_events
+                    // AND into plaintext Vercel logs, so a full base58 pubkey here publishes
+                    // the player's on-chain identity (and every transaction they ever made)
+                    // to anyone with log access. ShortAddress is enough to tell two wallets
+                    // apart while debugging.
+                    FlowTrace.Step("Wallet", $"Connect OK — {account.ShortAddress} ({account.WalletName}).");
                 }
                 else
                 {
+                    LastConnectError = "Connect was cancelled or refused by the wallet.";
                     FlowTrace.Warn("Wallet", "Connect resolved an INVALID account — cancelled or refused; staying disconnected.");
                 }
 
                 return account;
             }
+            catch (TimeoutException)
+            {
+                LastConnectError = "Your wallet did not respond in " + (int)ConnectTimeoutSeconds +
+                                   " seconds. Open your wallet app and try again.";
+                FlowTrace.Fail("Wallet",
+                    $"Connect TIMED OUT after {ConnectTimeoutSeconds}s (no wallet app installed, or the " +
+                    "handshake was never answered) — staying disconnected.");
+                SetStatus(WalletStatus.Disconnected);
+                return default;
+            }
             catch (Exception ex)
             {
+                LastConnectError = "Wallet connect failed (" + ex.GetType().Name + ").";
                 FlowTrace.Fail("Wallet", $"Connect FAILED: {ex.GetType().Name}: {ex.Message} — staying disconnected.");
                 SetStatus(WalletStatus.Disconnected);
                 return default;
