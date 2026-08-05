@@ -108,6 +108,53 @@ namespace DeNelle.Wallet
         private WalletAccount _account;
         private bool _connected;
 
+#if SOLANA_SDK
+        // MWA auth token from the last successful authorize. Lets a follow-up
+        // sign_messages call REAUTHORIZE instead of re-prompting the player for
+        // a fresh grant. Session-scoped only - never persisted.
+        private string _authToken;
+#endif
+
+        // =====================================================================
+        //  DAPP IDENTITY (2026-08-05 - THE wallet-connect root cause)
+        // ---------------------------------------------------------------------
+        //  MWA wallets VERIFY the calling dapp: they take the identity.uri we
+        //  send in `authorize`, fetch <identityUri>/.well-known/assetlinks.json,
+        //  and look for an `android_app` statement naming our package + signing
+        //  certificate. Per the MWA spec a wallet SHOULD decline with
+        //  ERROR_AUTHORIZATION_FAILED (-1) when the caller cannot be verified.
+        //
+        //  We were shipping the SDK's DEFAULT identity "https://solana.unity-sdk.gg/"
+        //  (SolanaMobileWalletAdapter.cs:18-21) because the options object was
+        //  constructed bare. That host returns HTTP 404 for
+        //  /.well-known/assetlinks.json - so NO wallet could ever verify us and
+        //  every connect died with -1. Latency proved it: 6.76s first attempt
+        //  (remote fetch -> 404) collapsing to ~1.1s on retries (cached negative).
+        //
+        //  The statement is now served by api/assetlinks.js, rewritten onto
+        //  /.well-known/assetlinks.json in vercel.json. If you change the host
+        //  here you MUST move that endpoint with it.
+        // =====================================================================
+
+        /// <summary>
+        /// The dapp identity URI sent to the wallet. MUST be ABSOLUTE - the SDK
+        /// client throws ArgumentException otherwise
+        /// (MobileWalletAdapterClient.cs:62-65) - and MUST be the host that
+        /// actually serves /.well-known/assetlinks.json.
+        /// </summary>
+        public const string DappIdentityUri = "https://defenders-of-the-realm-v2.vercel.app/";
+
+        /// <summary>
+        /// Dapp icon, RELATIVE to <see cref="DappIdentityUri"/>. MUST be relative -
+        /// the SDK client throws ArgumentException on an absolute icon Uri
+        /// (MobileWalletAdapterClient.cs:66-69). Best-effort display only: a
+        /// missing icon never fails authorization.
+        /// </summary>
+        public const string DappIconUri = "/icon.png";
+
+        /// <summary>Player-facing name shown in the wallet's approval sheet (owner-approved).</summary>
+        public const string DappIdentityName = "Echoes of Elarion";
+
         /// <inheritdoc/>
         public string ProviderName => "Solana Wallet";
 
@@ -126,13 +173,12 @@ namespace DeNelle.Wallet
         {
 #if SOLANA_SDK
             // -- Real SDK path (Android / Mobile Wallet Adapter ONLY, WO-766) --
-            // VERIFIED (v1.2.9 Web3.cs): Web3.Instance is the facade singleton;
-            // Task<Account> LoginWalletAdapter() is the MWA entry point (Seed
-            // Vault / Phantom / Solflare on-device). LoginPhantom() does NOT
-            // exist in v1.2.9 - the old desktop deep-link branch was drift and
-            // is removed; desktop + editor stay on StubWalletProvider (the
-            // SOLANA_SDK define is set for the Android target group only, and
-            // WalletService keeps the stub in the Editor).
+            // Desktop + editor stay on StubWalletProvider: v1.2.9 has no desktop
+            // deep-link API (LoginPhantom does NOT exist) and WalletService keeps
+            // the stub in the Editor.
+            // 2026-08-05: the authorize handshake no longer goes through
+            // Web3.Instance.LoginWalletAdapter() - see the block below. Web3 is
+            // still created (EnsureWeb3Host) because it owns the RPC clients.
             try
             {
 #if UNITY_ANDROID && !UNITY_EDITOR
@@ -140,26 +186,46 @@ namespace DeNelle.Wallet
                 // and is pointed at the right cluster BEFORE the login call
                 // (nothing in the project authored one; Web3.Instance would be
                 // null and the login would NRE).
+                // Still required: the Web3 facade owns the RPC/streaming clients
+                // that GetBalance + SendPayment resolve through, and the
+                // options-graph instantiation below is load-bearing for those.
                 EnsureWeb3Host(network);
 
                 // Mobile Wallet Adapter - the wallet app / Seed Vault signs.
-                // VERIFIED (v1.2.9): Web3.Instance.LoginWalletAdapter().
-                // (`var` deliberately: avoids any Account-type name collision
-                // between Solana.Unity.Wallet and Solana.Unity.Rpc.Models.)
-                var web3Account = await Web3.Instance.LoginWalletAdapter();
+                //
+                // 2026-08-05: this NO LONGER goes through
+                // Web3.Instance.LoginWalletAdapter(). That path builds an
+                // IMPLICIT association intent, so Android elects the winner among
+                // every installed handler - on the owner's Seeker that is Jupiter,
+                // and the Seeker's own wallet is never offered. Owner ruling:
+                // "Seeker should use seeker wallet ... make sure that's the
+                // primary before trying to use another one."
+                // TargetedLocalAssociationScenario is a clone of the SDK scenario
+                // that adds queryIntentActivities + Intent.setPackage() against a
+                // DATA preference chain, and falls back to the implicit intent
+                // when no preferred wallet is installed.
+                var scenario = new TargetedLocalAssociationScenario();
+                var authorization = await scenario.Authorize(
+                    DappIdentityUri, DappIconUri, DappIdentityName, ClusterName(network));
 
-                if (web3Account == null || web3Account.PublicKey == null)
+                if (authorization == null || authorization.PublicKey == null)
                 {
                     _connected = false;
                     _account = default;
+                    _authToken = null;
                     FlowTrace.Warn("Wallet",
-                        "MWA login returned no account - user cancelled or no wallet app responded.");
+                        "MWA authorize returned no account - user cancelled or no wallet app responded.");
                     return default;
                 }
 
+                // AuthorizationResult.PublicKey is the BASE64-decoded address
+                // BYTES (AuthorizationResult.cs) - wrap it to get base58.
+                var publicKey = new PublicKey(authorization.PublicKey);
+                _authToken = authorization.AuthToken;
+
                 _account = new WalletAccount
                 {
-                    Address = web3Account.PublicKey.Key, // base58 string
+                    Address = publicKey.Key, // base58 string
                     WalletName = ProviderName,
                 };
                 _connected = true;
@@ -183,8 +249,11 @@ namespace DeNelle.Wallet
             {
                 _connected = false;
                 _account = default;
+                _authToken = null;
                 FlowTrace.Fail("Wallet",
                     $"SolanaWalletProvider.Connect FAILED: {ex.GetType().Name}: {ex.Message}");
+                var hint = ExplainConnectFailure(ex);
+                if (hint != null) FlowTrace.Fail("Wallet", hint);
                 throw;
             }
 #else
@@ -210,6 +279,7 @@ namespace DeNelle.Wallet
                 // Logout() covers the session teardown this seam needs.)
                 if (Web3.Instance != null)
                     Web3.Instance.Logout();
+                _authToken = null; // drop the MWA grant with the session
             }
             catch (Exception ex)
             {
@@ -430,22 +500,38 @@ namespace DeNelle.Wallet
 
             try
             {
-                var wallet = Web3.Wallet; // VERIFIED (v1.2.9): static WalletBase
-                if (wallet == null)
-                {
-                    Debug.LogWarning("[SolanaWalletProvider] SignMessage: no active wallet on the SDK.");
-                    return null;
-                }
-
                 var messageBytes = System.Text.Encoding.UTF8.GetBytes(utf8Message);
+                byte[] sigBytes;
 
-                // VERIFIED (v1.2.9 WalletBase.cs): abstract Task<byte[]>
-                // SignMessage(byte[] message) - the 64-byte ed25519 signature.
-                // On MWA / Seed Vault this prompts the player's wallet to sign
-                // the off-chain message. The game holds NO key - the connected
-                // wallet signs (spec Part 10). This is the WO-766 identity/save
-                // auth path (dotr-save:v1 challenge, GameStateService).
-                var sigBytes = await wallet.SignMessage(messageBytes);
+                var wallet = Web3.Wallet; // VERIFIED (v1.2.9): static WalletBase
+                if (wallet != null)
+                {
+                    // VERIFIED (v1.2.9 WalletBase.cs): abstract Task<byte[]>
+                    // SignMessage(byte[] message) - the 64-byte ed25519 signature.
+                    // On MWA / Seed Vault this prompts the player's wallet to sign
+                    // the off-chain message. The game holds NO key - the connected
+                    // wallet signs (spec Part 10). This is the WO-766 identity/save
+                    // auth path (dotr-save:v1 challenge, GameStateService).
+                    sigBytes = await wallet.SignMessage(messageBytes);
+                }
+                else
+                {
+                    // 2026-08-05: Connect no longer routes through
+                    // Web3.Instance.LoginWalletAdapter (it used an implicit
+                    // association intent that never offered the Seeker wallet),
+                    // so Web3.Wallet is null even though we ARE connected.
+                    // Sign over the same TARGETED association instead - otherwise
+                    // this silently returned null and the save-auth headers were
+                    // dropped. Reuses the stored auth token so the wallet
+                    // REAUTHORIZES rather than re-prompting for a fresh grant.
+                    FlowTrace.Step("Wallet", "SignMessage via targeted MWA association (no Web3.Wallet).");
+                    var addressBytes = new PublicKey(_account.Address).KeyBytes;
+                    var scenario = new TargetedLocalAssociationScenario();
+                    sigBytes = await scenario.SignMessage(
+                        DappIdentityUri, DappIconUri, DappIdentityName,
+                        ClusterName(WalletService.DefaultNetwork),
+                        _authToken, messageBytes, addressBytes);
+                }
                 if (sigBytes == null || sigBytes.Length == 0)
                 {
                     Debug.LogWarning("[SolanaWalletProvider] SignMessage returned no signature.");
@@ -505,7 +591,18 @@ namespace DeNelle.Wallet
             // supply valid values (identityUri must parse as an absolute Uri).
             web3.solanaWalletAdapterOptions = new SolanaWalletAdapterOptions
             {
-                solanaMobileWalletAdapterOptions = new SolanaMobileWalletAdapterOptions(),
+                // WO-XXX 2026-08-05 ROOT CAUSE: this used to be a BARE ctor, which
+                // means it shipped the SDK's DEFAULT identity (see the constants
+                // above). Every MWA wallet then failed to verify us and declined
+                // with ERROR_AUTHORIZATION_FAILED. Explicit identity now, here too,
+                // so any code path that still goes through the Web3 facade's
+                // adapter carries the SAME identity as the targeted scenario.
+                solanaMobileWalletAdapterOptions = new SolanaMobileWalletAdapterOptions
+                {
+                    identityUri = DappIdentityUri,
+                    iconUri     = DappIconUri,
+                    name        = DappIdentityName,
+                },
                 solanaWalletAdapterWebGLOptions  = new SolanaWalletAdapterWebGLOptions(),
                 phantomWalletOptions             = new PhantomWalletOptions(),
             };
@@ -615,6 +712,57 @@ namespace DeNelle.Wallet
         // =====================================================================
         //  Pure unit-conversion helpers — no SDK types, always compiled
         // =====================================================================
+
+        /// <summary>
+        /// The MWA `cluster` string for a network. The wallet uses this to pick
+        /// which chain it authorizes for. Matches the SDK's own RPCNameMap
+        /// (WalletBase.cs:43-49). Kept out of the SDK #if so it is unit-testable.
+        /// </summary>
+        internal static string ClusterName(WalletNetwork network)
+        {
+            return network == WalletNetwork.Mainnet ? "mainnet-beta" : "devnet";
+        }
+
+        /// <summary>
+        /// Turns the SDK's opaque MWA failure strings into an honest, actionable
+        /// line. Returns null when we have nothing better to say than the raw
+        /// message.
+        /// <para>
+        /// WHY (2026-08-05): the wallet's ERROR_AUTHORIZATION_FAILED (-1) arrives
+        /// as the bare JSON-RPC message "authorization request failed", which the
+        /// SDK rethrows verbatim (JsonRpc20Client.Receiver -> SetException). That
+        /// reads like a USER DECLINE and cost hours of misdiagnosis - the actual
+        /// cause was that the wallet could not VERIFY our dapp identity against
+        /// /.well-known/assetlinks.json. Never let that string stand alone again.
+        /// </para>
+        /// ASCII only - this goes to Player.log / logcat / the F8 break-log.
+        /// </summary>
+        internal static string ExplainConnectFailure(Exception ex)
+        {
+            var msg = ex == null ? null : ex.Message;
+            if (string.IsNullOrEmpty(msg)) return null;
+
+            if (msg.IndexOf("authorization request failed", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                msg.IndexOf("ERROR_AUTHORIZATION_FAILED", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "MWA ERROR_AUTHORIZATION_FAILED (-1) - the wallet DECLINED the authorize request. " +
+                       "This is usually NOT a user cancel: the wallet could not verify our dapp identity. " +
+                       "Check that " + DappIdentityUri + ".well-known/assetlinks.json returns 200 with an " +
+                       "android_app statement for the running package AND for the certificate this build is " +
+                       "actually signed with (apksigner verify --print-certs). A Play App Signing build needs " +
+                       "Google's re-signing certificate appended to api/assetlinks.js.";
+            }
+
+            if (msg.IndexOf("never connected back", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                ex is TimeoutException)
+            {
+                return "MWA association timed out - the wallet app never dialed the local websocket back. " +
+                       "Check that a Solana wallet is installed/unlocked and that the <queries> block for the " +
+                       "solana-wallet scheme actually reached the packaged AndroidManifest.";
+            }
+
+            return null;
+        }
 
         /// <summary>Converts a base-unit integer (lamports / token base units) to a UI double.</summary>
         private static double LamportsToUi(ulong baseUnits, int decimals)

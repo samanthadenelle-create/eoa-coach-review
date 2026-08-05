@@ -8,7 +8,8 @@
         "UniTask",
         "UnityEngine.UI",
         "Unity.TextMeshPro",
-        "com.solana.unity_sdk"
+        "com.solana.unity_sdk",
+        "NativeWebSocket"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],

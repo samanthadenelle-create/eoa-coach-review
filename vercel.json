@@ -6,6 +6,9 @@
   "crons": [
     { "path": "/api/admin/cleanup", "schedule": "0 4 * * *" }
   ],
+  "rewrites": [
+    { "source": "/.well-known/assetlinks.json", "destination": "/api/assetlinks" }
+  ],
   "headers": [
     {
       "source": "/",
