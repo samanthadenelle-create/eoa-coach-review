@@ -480,9 +480,12 @@ namespace DeNelle.Wallet
         /// would NRE. Creates + configures a persistent host lazily.
         /// VERIFIED (v1.2.9 Web3.cs): serialized fields rpcCluster / customRpc /
         /// webSocketsRpc / autoConnectOnStartup exist with these names.
-        /// SDK-VERIFY: their accessibility (public vs [SerializeField] private) -
-        /// if the gate flags access, configure via a Resources prefab instead
-        /// and keep only the existence check here. NO reflection (CLAUDE.md s10).
+        /// CLOSED (2026-08-05): accessibility was never the problem - those fields
+        /// (and solanaWalletAdapterOptions, Web3.cs:88) are all plain public and
+        /// directly assignable. The real defect was missing INSTANTIATION:
+        /// AddComponent skips Unity's deserialization pass, so every [Serializable]
+        /// reference field arrives null and the first Login NREs. Fixed below by
+        /// populating the whole options graph. No Resources prefab, no reflection.
         /// SDK-VERIFY: RpcCluster member names (DevNet / MainNet).
         /// </summary>
         private static void EnsureWeb3Host(WalletNetwork network)
@@ -492,6 +495,20 @@ namespace DeNelle.Wallet
             var host = new GameObject("Web3 (WO-766 SolanaWalletProvider)");
             UnityEngine.Object.DontDestroyOnLoad(host);
             var web3 = host.AddComponent<Web3>();
+
+            // AddComponent leaves [Serializable] reference fields NULL - Unity only
+            // instantiates them when deserializing an authored asset. Web3.LoginWalletAdapter
+            // dereferences solanaWalletAdapterOptions on its FIRST statement (Web3.cs:264),
+            // and SolanaMobileWalletAdapter.Login dereferences _walletOptions - BOTH NRE
+            // without this graph. Captured on-device 2026-08-05 (Seeker, build 312200).
+            // Bare ctors are deliberate: each SDK options type's own field initializers
+            // supply valid values (identityUri must parse as an absolute Uri).
+            web3.solanaWalletAdapterOptions = new SolanaWalletAdapterOptions
+            {
+                solanaMobileWalletAdapterOptions = new SolanaMobileWalletAdapterOptions(),
+                solanaWalletAdapterWebGLOptions  = new SolanaWalletAdapterWebGLOptions(),
+                phantomWalletOptions             = new PhantomWalletOptions(),
+            };
 
             web3.rpcCluster = network == WalletNetwork.Mainnet ? RpcCluster.MainNet : RpcCluster.DevNet;
             web3.customRpc = WalletEndpoints.RpcUrl(network);
