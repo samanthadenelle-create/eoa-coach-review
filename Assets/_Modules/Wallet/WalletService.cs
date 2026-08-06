@@ -23,6 +23,7 @@ using Cysharp.Threading.Tasks;
 using DeNelle.Core;
 using DeNelle.Core.Web3;
 using DeNelle.Core.Diagnostics;
+using DeNelle.Core.Platform;
 using UnityEngine;
 
 namespace DeNelle.Wallet
@@ -437,6 +438,14 @@ namespace DeNelle.Wallet
                     // to anyone with log access. ShortAddress is enough to tell two wallets
                     // apart while debugging.
                     FlowTrace.Step("Wallet", $"Connect OK — {account.ShortAddress} ({account.WalletName}).");
+
+                    // The RETURN LEG of the connect seam (2026-08-05 Seeker capture): the
+                    // connect above succeeded end to end while every view still read
+                    // "Connect Wallet", because nothing ever published a CONNECTED state.
+                    // Published HERE, not in a caller, because this is the single choke
+                    // point BOTH connect paths pass through - the corner button
+                    // (WalletSkinBootstrap) and the login surface (LoginWalletBridge).
+                    CurrencySkinResolver.PublishWalletConnected(account.Address);
                 }
                 else
                 {
@@ -480,6 +489,10 @@ namespace DeNelle.Wallet
             {
                 CoreServices.UnregisterWalletSigner(this); // WO-121
                 SetStatus(WalletStatus.Disconnected);
+                // Same seam as the connect publish above - a view that showed the
+                // connected address must fall back to its connect label, never keep
+                // claiming a wallet that is gone.
+                CurrencySkinResolver.PublishWalletDisconnected();
             }
         }
 
