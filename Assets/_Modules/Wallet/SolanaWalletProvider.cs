@@ -105,6 +105,47 @@ namespace DeNelle.Wallet
 #endif
         }
 
+        /// <summary>
+        /// True ONLY where this provider can actually complete a connect: an
+        /// Android DEVICE build with the SDK compiled in. Everything else -
+        /// Windows/macOS/Linux standalone, WebGL, and the Editor on any target -
+        /// must use <see cref="StubWalletProvider"/>.
+        /// <para>
+        /// WHY THIS EXISTS (F8 capture 2026-08-06 10:41:22, scene Title, WINDOWS
+        /// standalone Player.log): the desktop exe selected THIS provider and then
+        /// threw NotSupportedException out of Connect - "Editor/desktop use
+        /// StubWalletProvider" - while doing no such thing. Tapping Connect Wallet
+        /// on desktop produced a LogError and nothing else.
+        /// </para>
+        /// <para>
+        /// The selector at WalletService.cs was written as
+        /// <c>IsSdkAvailable AND NOT Application.isEditor</c> on the stated belief
+        /// that "SOLANA_SDK is set for the ANDROID target group only". THAT BELIEF
+        /// IS FALSE. ProjectSettings.asset lists SOLANA_SDK under Android and NOT
+        /// under Standalone (scriptingDefineSymbols), but the define does not come
+        /// from there at all - it comes from a PLATFORM-INDEPENDENT versionDefine in
+        /// Assets/_Modules/Wallet/DeNelle.Wallet.asmdef ("com.solana.unity_sdk" ->
+        /// "SOLANA_SDK", with includePlatforms empty). The package resolves on every
+        /// target, so SOLANA_SDK is defined on EVERY target. IsSdkAvailable is
+        /// therefore true in the Windows player, isEditor is false in any player,
+        /// and the real provider got picked on a platform it cannot serve.
+        /// </para>
+        /// <para>
+        /// The fix is to test the PLATFORM, not the define. This predicate is
+        /// compiled from the EXACT same condition that guards the working body of
+        /// <see cref="Connect"/> below, so selection and capability can never drift
+        /// apart again - if one is true the other is true, by construction.
+        /// </para>
+        /// </summary>
+        public static bool IsSupportedOnThisPlatform
+        {
+#if SOLANA_SDK && UNITY_ANDROID && !UNITY_EDITOR
+            get => true;
+#else
+            get => false;
+#endif
+        }
+
         private WalletAccount _account;
         private bool _connected;
 
@@ -147,10 +188,35 @@ namespace DeNelle.Wallet
         /// <summary>
         /// Dapp icon, RELATIVE to <see cref="DappIdentityUri"/>. MUST be relative -
         /// the SDK client throws ArgumentException on an absolute icon Uri
-        /// (MobileWalletAdapterClient.cs:66-69). Best-effort display only: a
-        /// missing icon never fails authorization.
+        /// (MobileWalletAdapterClient.cs:66-69).
+        /// <para>
+        /// 2026-08-06 BRANDING FIX - two defects lived in the old value "/icon.png":
+        /// </para>
+        /// <para>
+        /// (1) NOTHING SERVED IT. vercel.json publishes "Builds/WebGL" as the static
+        /// root and that output carries only Build/, StreamingAssets/, index.html and
+        /// validation-key.txt - there is no icon.png anywhere on the host, and no
+        /// public/ directory exists (an outputDirectory project does not serve one).
+        /// The wallet's icon fetch therefore 404'd, and an MWA wallet that cannot
+        /// load the dapp icon falls back to its OWN generic/placeholder art - which
+        /// is exactly the "SDK branding, not ours" the owner saw. The icon is now
+        /// served by api/icon.js (the game's real 144px app icon) through the
+        /// /icon.png rewrite in vercel.json, mirroring the assetlinks pattern.
+        /// </para>
+        /// <para>
+        /// (2) LEADING SLASH. The MWA spec defines this field as a path RELATIVE TO
+        /// the identity URI, and the Android reference wallets resolve it by
+        /// APPENDING to that URI rather than by RFC-3986 reference resolution. A
+        /// leading "/" then yields a doubled slash ("https://host//icon.png"). The
+        /// SDK's own default carries the same slash (SolanaMobileWalletAdapter.cs:19)
+        /// and is equally wrong. Solana Mobile's published dapp sample uses a bare
+        /// "favicon.ico". Bare relative path it is - it resolves correctly under BOTH
+        /// append-style and RFC-style resolution.
+        /// </para>
+        /// Best-effort display only: a missing icon never fails authorization, it
+        /// only costs us the branding.
         /// </summary>
-        public const string DappIconUri = "/icon.png";
+        public const string DappIconUri = "icon.png";
 
         /// <summary>Player-facing name shown in the wallet's approval sheet (owner-approved).</summary>
         public const string DappIdentityName = "Echoes of Elarion";
@@ -233,12 +299,17 @@ namespace DeNelle.Wallet
                     $"SolanaWalletProvider connected ({network}) - {_account.ShortAddress}.");
                 return _account;
 #else
-                // SDK compiled in but not an Android device build (this is the
-                // Editor with the Android target active, or a future target
-                // that sets SOLANA_SDK). v1.2.9 has no desktop deep-link API
-                // and MWA needs a device - fail loudly instead of calling an
-                // API that does not exist. WalletService never selects this
-                // provider off-device, so this is defense in depth.
+                // SDK compiled in but not an Android device build (the Editor, or
+                // a Standalone/WebGL player - the asmdef versionDefine sets
+                // SOLANA_SDK on every target). v1.2.9 has no desktop deep-link API
+                // and MWA needs a device, so fail loudly instead of calling an API
+                // that does not exist.
+                //
+                // This is now GENUINELY defense in depth: WalletService selects on
+                // IsSupportedOnThisPlatform, which is compiled from this exact same
+                // #if, so nothing off-device can reach here. Until 2026-08-06 the
+                // selector used the SDK define instead and the Windows exe DID reach
+                // here - see IsSupportedOnThisPlatform for the capture.
                 await UniTask.CompletedTask;
                 throw new NotSupportedException(
                     "SolanaWalletProvider supports Android Mobile Wallet Adapter only (WO-766). " +
@@ -373,6 +444,18 @@ namespace DeNelle.Wallet
             // WalletService.Pay/PayFlat. Kept compiled for the later payments WO.
             try
             {
+                // KNOWN GAP, deliberately left as an honest failure (2026-08-06):
+                // Web3.Wallet is only populated by a Web3.Login* call (Web3.cs:261-273),
+                // and Connect no longer makes one - it authorizes through
+                // TargetedLocalAssociationScenario instead. So this is ALWAYS null
+                // today and SendPayment always returns the failure below.
+                // That is the safe state: PackStore.Purchase already refuses while
+                // FeatureFlags.RealmStorePurchase is OFF (the release default), so
+                // nothing reaches here. The later payments WO must route signing
+                // through the targeted scenario (client.SignTransactions) the same
+                // way SignMessageBase58 now does - NOT by reviving the Web3 login,
+                // which drags back the implicit-intent wallet election AND the SDK's
+                // dequeue-after-close bug (LocalAssociationScenario.cs:132-138).
                 var wallet = Web3.Wallet; // VERIFIED (v1.2.9): static WalletBase
                 if (wallet == null)
                     return PaymentResult.Failure(packSku, currency, "No active wallet on the SDK.");
@@ -501,37 +584,60 @@ namespace DeNelle.Wallet
             try
             {
                 var messageBytes = System.Text.Encoding.UTF8.GetBytes(utf8Message);
-                byte[] sigBytes;
 
-                var wallet = Web3.Wallet; // VERIFIED (v1.2.9): static WalletBase
-                if (wallet != null)
-                {
-                    // VERIFIED (v1.2.9 WalletBase.cs): abstract Task<byte[]>
-                    // SignMessage(byte[] message) - the 64-byte ed25519 signature.
-                    // On MWA / Seed Vault this prompts the player's wallet to sign
-                    // the off-chain message. The game holds NO key - the connected
-                    // wallet signs (spec Part 10). This is the WO-766 identity/save
-                    // auth path (dotr-save:v1 challenge, GameStateService).
-                    sigBytes = await wallet.SignMessage(messageBytes);
-                }
-                else
-                {
-                    // 2026-08-05: Connect no longer routes through
-                    // Web3.Instance.LoginWalletAdapter (it used an implicit
-                    // association intent that never offered the Seeker wallet),
-                    // so Web3.Wallet is null even though we ARE connected.
-                    // Sign over the same TARGETED association instead - otherwise
-                    // this silently returned null and the save-auth headers were
-                    // dropped. Reuses the stored auth token so the wallet
-                    // REAUTHORIZES rather than re-prompting for a fresh grant.
-                    FlowTrace.Step("Wallet", "SignMessage via targeted MWA association (no Web3.Wallet).");
-                    var addressBytes = new PublicKey(_account.Address).KeyBytes;
-                    var scenario = new TargetedLocalAssociationScenario();
-                    sigBytes = await scenario.SignMessage(
-                        DappIdentityUri, DappIconUri, DappIdentityName,
-                        ClusterName(WalletService.DefaultNetwork),
-                        _authToken, messageBytes, addressBytes);
-                }
+                // =========================================================
+                //  ALWAYS the targeted association. NEVER Web3.Wallet.
+                // ---------------------------------------------------------
+                //  This used to prefer Web3.Wallet when it was non-null and
+                //  only fall back to our scenario. That preference is now
+                //  REMOVED, for three reasons, in order of severity:
+                //
+                //  1. SDK BUG - "dequeue after close". Web3.Wallet on Android
+                //     is a SolanaWalletAdapter wrapping SolanaMobileWalletAdapter,
+                //     whose SignMessage drives the SDK's own
+                //     LocalAssociationScenario (SolanaMobileWalletAdapter.cs:145-187).
+                //     That scenario's action pump is:
+                //
+                //       LocalAssociationScenario.cs:132-138
+                //         if (_actions.Count == 0 || response is { Failed: true })
+                //             CloseAssociation(response);   // <-- NO return
+                //         var action = _actions.Dequeue();  // <-- runs anyway
+                //
+                //     There is no `return` and no `else`. On the LAST response
+                //     the queue is empty, CloseAssociation() is entered, and
+                //     control falls straight into Dequeue() on an empty Queue
+                //     -> InvalidOperationException, thrown from inside the
+                //     websocket OnMessage callback (HandleEncryptedSessionPayload,
+                //     :98-110, which has no try/catch). The signature itself has
+                //     already resolved by then, so the failure is a torn-down
+                //     message pump rather than a clean error - the classic
+                //     "connect worked, signing dies later" shape. Our scenario
+                //     has no action queue at all, so it cannot reproduce this.
+                //
+                //  2. IDENTITY. The SDK adapter signs under whatever options the
+                //     Web3 facade happens to hold. Our scenario always sends the
+                //     three DappIdentity* constants above, so the sign sheet is
+                //     branded identically to the connect sheet.
+                //
+                //  3. WALLET TARGETING. The SDK adapter builds an IMPLICIT
+                //     association intent, which on the owner's Seeker elects
+                //     Jupiter instead of the Seeker's own wallet - so a signature
+                //     could be demanded from a DIFFERENT wallet than the one that
+                //     authorized, and the address would not match.
+                //
+                //  Reuses the stored auth token so the wallet REAUTHORIZES rather
+                //  than re-prompting the player for a fresh grant. The game holds
+                //  NO key - the connected wallet signs (spec Part 10). This is the
+                //  WO-766 identity / save-auth path (dotr-save:v1 challenge).
+                // =========================================================
+                FlowTrace.Step("Wallet", "SignMessage via targeted MWA association.");
+                var addressBytes = new PublicKey(_account.Address).KeyBytes;
+                var scenario = new TargetedLocalAssociationScenario();
+                var sigBytes = await scenario.SignMessage(
+                    DappIdentityUri, DappIconUri, DappIdentityName,
+                    ClusterName(WalletService.DefaultNetwork),
+                    _authToken, messageBytes, addressBytes);
+
                 if (sigBytes == null || sigBytes.Length == 0)
                 {
                     Debug.LogWarning("[SolanaWalletProvider] SignMessage returned no signature.");

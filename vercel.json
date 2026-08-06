@@ -7,7 +7,8 @@
     { "path": "/api/admin/cleanup", "schedule": "0 4 * * *" }
   ],
   "rewrites": [
-    { "source": "/.well-known/assetlinks.json", "destination": "/api/assetlinks" }
+    { "source": "/.well-known/assetlinks.json", "destination": "/api/assetlinks" },
+    { "source": "/icon.png", "destination": "/api/icon" }
   ],
   "headers": [
     {

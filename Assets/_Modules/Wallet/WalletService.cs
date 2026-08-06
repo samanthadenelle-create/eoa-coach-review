@@ -322,12 +322,41 @@ namespace DeNelle.Wallet
         /// </summary>
         public WalletService()
         {
-            // WO-766: the real provider is selected only when the SDK is
-            // compiled in (SOLANA_SDK - set for the ANDROID target group only)
-            // AND we are on-device. In the Editor the Android target group's
-            // defines apply too, but Mobile Wallet Adapter needs a device, so
-            // play mode deliberately keeps the stub.
-            if (SolanaWalletProvider.IsSdkAvailable && !Application.isEditor)
+            // WO-766: the real provider is selected only where it can actually
+            // complete a connect - an ANDROID DEVICE build with the SDK compiled in.
+            //
+            // 2026-08-06 FIX (F8 capture 10:41:22, scene Title, WINDOWS standalone
+            // Player.log): this test used to be
+            //     SolanaWalletProvider.IsSdkAvailable && !Application.isEditor
+            // on the belief - stated in the comment that lived here - that
+            // "SOLANA_SDK is set for the ANDROID target group only". It is not.
+            // The define comes from a platform-independent versionDefine in
+            // DeNelle.Wallet.asmdef ("com.solana.unity_sdk" -> "SOLANA_SDK",
+            // includePlatforms empty), NOT from ProjectSettings, so it is defined on
+            // EVERY target including Standalone and WebGL. The old test therefore
+            // excluded only the Editor: the Windows exe picked the real provider and
+            // Connect threw NotSupportedException("...Editor/desktop use
+            // StubWalletProvider") - naming a fallback that never happened. Desktop
+            // Connect Wallet produced a LogError and nothing else, and because no
+            // account was ever bound the save layer stayed local-only while telling
+            // the log to "tap Connect Wallet once to re-attest".
+            //
+            // IsSupportedOnThisPlatform is compiled from the same
+            // "#if SOLANA_SDK && UNITY_ANDROID && !UNITY_EDITOR" that guards the
+            // working body of SolanaWalletProvider.Connect, so this branch and that
+            // capability cannot drift. It also closes the identical latent hole for
+            // WebGL / any future non-Android target, which the old test had too.
+            //
+            // NOT WEAKENED: on an Android device build the condition is unchanged -
+            // SDK compiled in, not the editor - so the Seeker still gets, and only
+            // gets, the real MWA provider.
+            //
+            // NOT A CLOUD-SYNC LOOPHOLE: the stub is still a StubWalletProvider, so
+            // IsRealSigningWallet (above) stays FALSE on desktop and BindWallet is
+            // called un-attested. Desktop remains LOCAL-ONLY by design - a devnet
+            // stub address must never key a shared cloud save row. This change only
+            // stops Connect from erroring; it grants the stub nothing.
+            if (SolanaWalletProvider.IsSupportedOnThisPlatform)
             {
                 _provider = new SolanaWalletProvider();
                 // WO-766 safety invariant (spec s3), traced once per session:
@@ -342,9 +371,14 @@ namespace DeNelle.Wallet
             else
             {
                 _provider = new StubWalletProvider();
+                // Say WHICH of the two reasons it was. The old line claimed "Editor
+                // session" for every stub selection, which is what made the desktop
+                // player's mis-selection invisible until it threw (F8 2026-08-06).
+                // Local-only saves are the correct outcome here, not a degradation.
                 Debug.Log(SolanaWalletProvider.IsSdkAvailable
-                    ? "[WalletService] Using StubWalletProvider (Editor session - MWA needs a device; SDK present)."
-                    : "[WalletService] Using StubWalletProvider (Solana Unity SDK absent — devnet mock).");
+                    ? "[WalletService] Using StubWalletProvider (SDK present, but Mobile Wallet Adapter needs an " +
+                      "Android device - editor/desktop/WebGL run the devnet mock; saves stay local-only)."
+                    : "[WalletService] Using StubWalletProvider (Solana Unity SDK absent - devnet mock).");
             }
         }
 
