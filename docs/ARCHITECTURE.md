@@ -165,7 +165,7 @@ properties so you can re-skin without touching logic and re-tune without touchin
 
 > STALE: 2026-07-12 — `SaveSchema.CurrentVersion` is now **v30** (v29 heroLevel/heroXp/heroLifetimeXp F8-47; v30 strategicPlacementMigrated WO-673), not 20; the migrator runs v1 → v29 (see CANON_GROUND_TRUTH_2026-07-12.md)
 > ⚠ CORRECTION 2026-07-22 — `SaveSchema.CurrentVersion` is now **v34** (v31 echoLanes, v32 freeBuildsUsed, v33 echoLanes lane:level grammar, v34 tribes/wards/arena/petActiveSlots persistence gaps closed); the v30 note above is itself stale. Source: `Assets/_Modules/Core/State/SaveSchema.cs`.
-> STALE: 2026-07-12 — "the backend code stays in the React repo" is wrong: the backend `api/` (trace.js, events/track.js, game/*, bug-report.js, schema.sql) lives IN THIS repo at `C:\EOA\api\`, gitignored (see CANON_GROUND_TRUTH_2026-07-12.md)
+> STALE: 2026-07-12 — "the backend code stays in the React repo" is wrong: the backend `api/` (trace.js, events/track.js, game/*, bug-report.js, schema.sql) lives IN THIS repo at `api/` (repo-root-relative), gitignored (see CANON_GROUND_TRUTH_2026-07-12.md)
 
 Persistence spine (deep facts in `docs/MASTER_CATALOG/core.md`):
 
