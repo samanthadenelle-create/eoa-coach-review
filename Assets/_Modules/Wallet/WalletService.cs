@@ -303,6 +303,23 @@ namespace DeNelle.Wallet
         public bool IsRealSigningWallet =>
             IsConnected && !(_provider is StubWalletProvider) && _provider.CanSignMessages;
 
+        // ── WO-931 (2026-08-10): payment-seam refusal reasons ────────────────
+        // The save layer consults IsRealSigningWallet before keying a cloud
+        // identity; until WO-931 the PAYMENT layer never did — so on any build
+        // where auto-select lands on the stub (release desktop/WebGL, Android
+        // without SOLANA_SDK), a fabricated SendPayment "success" flowed straight
+        // into PackStore.ApplyPackContents: free packs plus a fake
+        // purchase_completed analytics event. Pay/PayFlat now refuse at the seam,
+        // BEFORE _provider.SendPayment, in every build configuration (Editor,
+        // development and release alike — deliberately NOT #if-guarded). Public
+        // consts so the regression cases assert the exact reason, not a paraphrase.
+        /// <summary>WO-931: <see cref="Pay"/>/<see cref="PayFlat"/> refusal reason when the resolved provider is the devnet stub.</summary>
+        public const string StubPaymentRefusalReason =
+            "Payments are unavailable: the devnet stub wallet cannot make a real payment.";
+        /// <summary>WO-931: refusal reason when a connected provider holds no signing key (fails <see cref="IsRealSigningWallet"/>).</summary>
+        public const string NonSigningPaymentRefusalReason =
+            "Payments are unavailable: the connected wallet provider holds no signing key.";
+
         /// <summary>
         /// Constructs the service over an explicit provider — used by tests and
         /// any caller that wants to pin the provider (e.g. force the stub).
@@ -545,6 +562,19 @@ namespace DeNelle.Wallet
                 return PaymentResult.Failure(string.Empty, currency, "Pack definition is null.");
             }
 
+            // WO-931: the stub can NEVER pay — refuse OUTRIGHT, before any
+            // connection-state check, so the refusal cannot be raced by connect
+            // timing and sits before the first await (the [wallet-provider]
+            // regression drives this branch synchronously). This is the
+            // IsConnected-free half of IsRealSigningWallet: the type test.
+            if (_provider is StubWalletProvider)
+            {
+                FlowTrace.Fail("Wallet",
+                    $"Pay '{pack.Sku}' ({currency}) REFUSED: stub provider cannot sign — no real payment " +
+                    "rail on this platform (WO-931; player NOT charged, pack NOT granted).");
+                return PaymentResult.Failure(pack.Sku, currency, StubPaymentRefusalReason);
+            }
+
             if (!IsConnected)
             {
                 FlowTrace.Warn("Wallet", $"Pay '{pack.Sku}' ({currency}): no wallet connected — aborted (player NOT charged).");
@@ -556,6 +586,20 @@ namespace DeNelle.Wallet
             {
                 FlowTrace.Fail("Wallet", $"Pay '{pack.Sku}': no price for {currency} (amount={amount}) — payment aborted.");
                 return PaymentResult.Failure(pack.Sku, currency, $"Pack '{pack.Sku}' has no price for {currency}.");
+            }
+
+            // WO-931 belt to the stub short-circuit above: with IsConnected now
+            // settled, this is EXACTLY the save layer's attestation (reused, not
+            // rewritten). It also closes the decorator dodge — the dev-only
+            // DevWalletProbe delegates SendPayment to an INNER stub, so it passes
+            // the type test above but can never attest here (CanSignMessages
+            // delegates to the stub's false). No key, no payment.
+            if (!IsRealSigningWallet)
+            {
+                FlowTrace.Fail("Wallet",
+                    $"Pay '{pack.Sku}' ({currency}) REFUSED: provider '{ProviderName}' is not a real signing " +
+                    "wallet (IsRealSigningWallet is false) — no key, no payment (WO-931; player NOT charged).");
+                return PaymentResult.Failure(pack.Sku, currency, NonSigningPaymentRefusalReason);
             }
 
             try
@@ -589,6 +633,18 @@ namespace DeNelle.Wallet
         {
             using var _ = FlowTrace.Enter("Wallet", $"PayFlat tx='{transactionId}' {currency} amount={amount} ({NetworkLabel})");
 
+            // WO-931: same seam as Pay. PayFlat reaches the SAME
+            // StubWalletProvider.SendPayment and was gated by NOTHING (not even
+            // RealmStorePurchase) — unreachable today only because both its
+            // callers are scene-absent. Gate it now, while the seam is open.
+            if (_provider is StubWalletProvider)
+            {
+                FlowTrace.Fail("Wallet",
+                    $"PayFlat '{transactionId}' ({currency}) REFUSED: stub provider cannot sign — no real " +
+                    "payment rail on this platform (WO-931; player NOT charged).");
+                return PaymentResult.Failure(transactionId, currency, StubPaymentRefusalReason);
+            }
+
             if (!IsConnected)
             {
                 FlowTrace.Warn("Wallet", $"PayFlat '{transactionId}' ({currency}): no wallet connected — aborted (player NOT charged).");
@@ -599,6 +655,16 @@ namespace DeNelle.Wallet
             {
                 FlowTrace.Fail("Wallet", $"PayFlat '{transactionId}' ({currency}): amount must be > 0 (was {amount}) — aborted.");
                 return PaymentResult.Failure(transactionId, currency, "Amount must be > 0.");
+            }
+
+            // WO-931 belt (see Pay): a connected provider that cannot attest a
+            // real signing key must never fabricate a "settled" flat payment.
+            if (!IsRealSigningWallet)
+            {
+                FlowTrace.Fail("Wallet",
+                    $"PayFlat '{transactionId}' ({currency}) REFUSED: provider '{ProviderName}' is not a real " +
+                    "signing wallet (IsRealSigningWallet is false) — no key, no payment (WO-931).");
+                return PaymentResult.Failure(transactionId, currency, NonSigningPaymentRefusalReason);
             }
 
             try
