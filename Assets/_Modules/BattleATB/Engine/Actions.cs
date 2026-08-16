@@ -73,6 +73,9 @@ namespace DeNelle.BattleATB.Engine
                       + (result.Crit ? " (CRIT!)" : "") + ".",
                 Amount = dealt,
                 Crit = result.Crit,
+                // Element is presentation metadata (ice-impact VFX keys off it) -
+                // stamping it changes no logic, no RNG draw, no log text.
+                Element = element,
             });
             if (target.Hp <= 0 && !target.Alive)
             {

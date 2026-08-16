@@ -349,6 +349,10 @@ namespace DeNelle.BattleATB.Engine
         public bool? Crit;
         /// <summary>Status involved, when relevant.</summary>
         public StatusKind? Status;
+        /// <summary>Damage element of the strike, when relevant. LOG METADATA ONLY
+        /// (owner VFX picks 2026-08-16 - the presentation layer keys element-typed
+        /// impact VFX off this; the engine never reads it back).</summary>
+        public ElementType? Element;
 
         public BattleLogEntry Clone()
         {
@@ -362,6 +366,7 @@ namespace DeNelle.BattleATB.Engine
                 Amount = Amount,
                 Crit = Crit,
                 Status = Status,
+                Element = Element,
             };
         }
     }
