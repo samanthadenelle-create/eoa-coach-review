@@ -152,6 +152,11 @@ properties so you can re-skin without touching logic and re-tune without touchin
   the bow via `HeroBowAttachment.NormalizeInto`. **This MUST generalize to every weapon + armor
   (`WeaponOrientHelper`), applied at equip + dev-adjustable via DevOrient.** Binding canon +
   algorithm: **`docs/WEAPON_ARMOR_ORIENT_LOGIC.md`** — read before any attach/placement work.
+  > ⚠ **2026-08-16 — derivation did NOT save the bow: its held rotation was 90 degrees wrong at the
+  > ATTACH SEAT** (a different failure from the grip POSITION, which measured correct).
+  > **Derivation is not self-proving; headless gates cannot see orientation.** A value can be derived
+  > correctly and still land wrong one transform up the chain — for anything the player sees pointed a
+  > direction, the screenshot is the evidence, not the gate.
 - **DataRegression harness** (`Assets/Editor/Regression/DataRegression.cs`) is the
   "**real object in → assert real response → one marker**" gate: reload through the *real* game path,
   assert the catalog mapped to non-empty rows with ids, emit `REGRESSION_OK` / `REGRESSION_FAIL`
@@ -163,15 +168,15 @@ properties so you can re-skin without touching logic and re-tune without touchin
 
 ## 5. Save system
 
-> STALE: 2026-07-12 — `SaveSchema.CurrentVersion` is now **v30** (v29 heroLevel/heroXp/heroLifetimeXp F8-47; v30 strategicPlacementMigrated WO-673), not 20; the migrator runs v1 → v29 (see CANON_GROUND_TRUTH_2026-07-12.md)
-> ⚠ CORRECTION 2026-07-22 — `SaveSchema.CurrentVersion` is now **v34** (v31 echoLanes, v32 freeBuildsUsed, v33 echoLanes lane:level grammar, v34 tribes/wards/arena/petActiveSlots persistence gaps closed); the v30 note above is itself stale. Source: `Assets/_Modules/Core/State/SaveSchema.cs`.
+> ⚠ CURRENT 2026-08-16 — `SaveSchema.CurrentVersion` is **v38**, and the body of §5 below is stale wherever it says otherwise. Source: `Assets/_Modules/Core/State/SaveSchema.cs:41` (the const, which the file's own header names as the sole authority). Recent steps: v35 WO-773 obsidianQueue · v36 WO-834 everBuiltStructureIds · v37 WO-911 the per-job paid basket · **v38 WO-934 the army loadout bank** (`ArmyStorage.loadouts` + `activeLoadout`, `MigrateToV38` EnsureLoadouts). *(This note replaces two stacked stale corrections that said v30 and then v34 — a doc correcting its own correction and still being wrong is the pattern §15 exists to stop. Never restate the number here; read the const.)*
 > STALE: 2026-07-12 — "the backend code stays in the React repo" is wrong: the backend `api/` (trace.js, events/track.js, game/*, bug-report.js, schema.sql) lives IN THIS repo at `api/` (repo-root-relative), gitignored (see CANON_GROUND_TRUTH_2026-07-12.md)
 
 Persistence spine (deep facts in `docs/MASTER_CATALOG/core.md`):
 
 - **`GameState`** (ScriptableObject, ~41 partialized fields) is the single live state object —
   resources, region progress, hero/pet choices, `BaseLayout`, quests.
-- **`SaveSchema`** (`CurrentVersion = 20`) + **`SaveMigrator`** (v1 → v20) handle serialization and
+- **`SaveSchema`** (`CurrentVersion = 38`, `SaveSchema.cs:41` — read the const, never this line) +
+  **`SaveMigrator`** (v1 → v38, top step `{ 38, MigrateToV38 }`) handle serialization and
   forward migration. **Rule for new fields:** additive-nullable + schema bump + default-on-read
   (the v14/v18/v20 precedent) — never a breaking change. `BaseLayout` is the public contract once
   raids/Arena land, so treat its shape as a versioned API.
@@ -196,8 +201,17 @@ reconciliation + gap list + delivery plan: `docs/BUILD_MODE_ARCHITECTURE.md`.
   designer builder and a future Arena server use (the headless-replay seam is designed in).
 - **NavMesh = carving, NOT runtime bake** (the hardest-won lesson) — placed structures attach a
   `NavMeshObstacle`; a gate-clearance rule guarantees a spawn→Heart lane always exists.
+- **THE UPGRADE VERB HAS ONE DECIDER AND ONE START PATH (2026-08-16).**
+  `UpgradeFamilyResolver` is the **single** decider of a structure's upgrade family, and
+  `PlacedStructureUpgradeService` is the **single** start path for placed structures (both in
+  `Assets/_Modules/Village/Buildings/Progression/`). Multiple doorways — the Manage tab, the modeled
+  page — **one destination**. Every `maxLevel > 1` structure now reaches a truthful upgrade page with
+  a 3D preview. ⚠ The defect this closed was a **lie, not an absence**: Manage passed a bare catalog
+  id, it resolved to `UpgradeFamily.None`, and a LEVEL-1 TOWER rendered *"Fully enhanced — has reached
+  tier 0 of 0, there is nothing left to upgrade here."* **Never add a second family-resolution or
+  upgrade-start site.**
 - Gaps (the real work): fill the palette beyond towers, multi-resource cost via `ResourceLedger`,
-  the upgrade verb + wall tiers, mobile touch behind `IBuildInput`, a bounded plot, Arena snapshot.
+  wall tiers, mobile touch behind `IBuildInput`, a bounded plot, Arena snapshot.
 
 The wider ambition is a **generic typed-dispatch world engine** (`EngineDispatcher.Build(def)` over
 `WorldDef`/`IBuildHandler`, with the rampart's visual⊥navigable `NavSurface` decouple as the
