@@ -82,7 +82,6 @@
 // =============================================================================
 
 using System;
-using DeNelle.Core.Backend;       // WO-1990: BackendRequestSigner.ISessionVault is implemented here
 using DeNelle.Core.Diagnostics;
 using UnityEngine;
 
@@ -290,116 +289,6 @@ namespace DeNelle.Wallet
             if (string.IsNullOrEmpty(address)) return "<none>";
             if (address.Length < 8) return "<short>";
             return address.Substring(0, 4) + "..." + address.Substring(address.Length - 4);
-        }
-
-        // =====================================================================
-        //  WO-1990 — the BACKEND session vault (BackendRequestSigner.ISessionVault)
-        // ---------------------------------------------------------------------
-        //  The backend bearer session (15-minute token from /api/auth/session) was
-        //  memory-only, so every relaunch started with why=missing and every
-        //  passive authed call - Heartbound stake verify, the Order ballot the
-        //  Vigil ceremony reads, clan/me for chat - failed closed until the player
-        //  found a door that signs (device log 2026-09-24, see the WO).
-        //
-        //  It is sealed with the SAME AndroidKeyStore AES-256/GCM key as the MWA
-        //  grant above. That grant is the MORE powerful credential (it lets this app
-        //  ask the wallet to sign), so storing the weaker, 15-minute, server-revocable
-        //  backend token beside it adds no new exposure class. Same rules as above:
-        //  never plaintext, bound to one wallet address, dropped on any unseal failure.
-        //  An MWA Clear (explicit disconnect, wallet mismatch) deletes the keystore key,
-        //  which makes this blob unreadable too - so a disconnect also ends the backend
-        //  session on the next launch, which is the honest outcome.
-        //  ⛔ BackendSessionVault.Clear deletes ONLY its own prefs keys, never the key:
-        //  deleting the shared key would silently log the player out of the wallet.
-        // =====================================================================
-
-        /// <summary>Sealed backend session blob ("v1:iv:ct" of "&lt;token&gt;|&lt;expiry ISO-8601&gt;").</summary>
-        public const string BackendTokenPrefsKey = "dotr.backend.session.v1";
-
-        /// <summary>The wallet the sealed backend session belongs to (public data, stored clear, like AddressPrefsKey).</summary>
-        public const string BackendAddressPrefsKey = "dotr.backend.session.address.v1";
-
-        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
-        private static void InstallBackendSessionVault()
-        {
-            if (BackendRequestSigner.SessionVault != null) return;
-            BackendRequestSigner.SessionVault = new BackendSessionVault();
-            FlowTrace.Step("Wallet",
-                "backend session vault installed (secureStorage=" + SecureStorageAvailable + "; off-device it " +
-                "persists nothing, by design). WO-1990: boot can now RESTORE a still-live session without signing.");
-        }
-
-        private sealed class BackendSessionVault : BackendRequestSigner.ISessionVault
-        {
-            public bool Save(string wallet, string token, DateTime expiresUtc)
-            {
-                if (string.IsNullOrEmpty(wallet) || string.IsNullOrEmpty(token)) return false;
-                if (!SecureStorageAvailable) return false;
-                string plain = token + "|" + expiresUtc.ToUniversalTime().ToString("o", System.Globalization.CultureInfo.InvariantCulture);
-                var blob = Guard.Try("Wallet", "seal backend session", () => Encrypt(plain), (string)null);
-                if (string.IsNullOrEmpty(blob))
-                {
-                    // Fail CLOSED: never leave an older token paired with a newer wallet.
-                    Clear("could not seal the backend session - persisting nothing");
-                    return false;
-                }
-                PlayerPrefs.SetString(BackendTokenPrefsKey, blob);
-                PlayerPrefs.SetString(BackendAddressPrefsKey, wallet);
-                PlayerPrefs.Save();
-                return true;
-            }
-
-            public bool TryLoad(string wallet, out string token, out DateTime expiresUtc)
-            {
-                token = null;
-                expiresUtc = DateTime.MinValue;
-                string stored = PlayerPrefs.GetString(BackendAddressPrefsKey, string.Empty);
-                string blob = PlayerPrefs.GetString(BackendTokenPrefsKey, string.Empty);
-                if (string.IsNullOrEmpty(stored) || string.IsNullOrEmpty(blob)) return false;
-
-                if (!string.Equals(stored, wallet, StringComparison.Ordinal))
-                {
-                    // The single worst outcome is a session reused for a DIFFERENT wallet.
-                    Clear($"sealed backend session is for {Mask(stored)} but the resuming wallet is " +
-                          $"{Mask(wallet)} - DIFFERENT wallet, discarding");
-                    return false;
-                }
-                if (!SecureStorageAvailable)
-                {
-                    Clear("a sealed backend session exists but this platform cannot unseal it - discarding");
-                    return false;
-                }
-
-                string plain = Guard.Try("Wallet", "unseal backend session", () => Decrypt(blob), (string)null);
-                int bar = string.IsNullOrEmpty(plain) ? -1 : plain.LastIndexOf('|');
-                if (bar <= 0 ||
-                    !DateTime.TryParse(plain.Substring(bar + 1), System.Globalization.CultureInfo.InvariantCulture,
-                        System.Globalization.DateTimeStyles.AdjustToUniversal |
-                        System.Globalization.DateTimeStyles.AssumeUniversal, out var parsed))
-                {
-                    // Normal after an MWA Clear deleted the shared key, a keystore reset, or a restore
-                    // onto a new device. Not exceptional - the player signs once at the next door.
-                    Clear("sealed backend session could not be unsealed (shared key deleted by a wallet " +
-                          "disconnect, keystore reset, or new device) - discarding");
-                    return false;
-                }
-
-                token = plain.Substring(0, bar);
-                expiresUtc = parsed;
-                FlowTrace.Step("Wallet",
-                    $"sealed backend session found for {Mask(stored)} - expires in " +
-                    $"{(int)(parsed - DateTime.UtcNow).TotalSeconds}s (negative = past the server TTL).");
-                return true;
-            }
-
-            public void Clear(string why)
-            {
-                bool had = PlayerPrefs.HasKey(BackendTokenPrefsKey);
-                PlayerPrefs.DeleteKey(BackendTokenPrefsKey);
-                PlayerPrefs.DeleteKey(BackendAddressPrefsKey);
-                PlayerPrefs.Save();
-                if (had) FlowTrace.Step("Wallet", $"sealed backend session CLEARED - {why}.");
-            }
         }
 
         // =====================================================================

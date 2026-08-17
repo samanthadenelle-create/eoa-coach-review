@@ -150,9 +150,25 @@ namespace DeNelle.Wallet
         private bool _connected;
 
 #if SOLANA_SDK
-        // MWA auth token from the last successful authorize. Lets a follow-up
-        // sign_messages call REAUTHORIZE instead of re-prompting the player for
-        // a fresh grant. Session-scoped only - never persisted.
+        // MWA auth token from the last successful authorize/reauthorize. Lets a
+        // follow-up sign_messages call REAUTHORIZE instead of re-prompting the
+        // player for a fresh grant.
+        //
+        // 2026-08-17: this field used to be commented "Session-scoped only - never
+        // persisted", and that WAS the defect. The owner connected on her Seeker,
+        // force-quit, relaunched, and was asked to connect again: on relaunch this
+        // was null, so there was no grant to reauthorize against and MWA ran a full
+        // `authorize` - which IS the connect prompt. Her SAVE came back, because
+        // GameState.BoundWallet is persisted and keys the row; identity survived a
+        // restart, the session did not.
+        //
+        // It is now MIRRORED into MwaSessionStore, which seals it under an
+        // AndroidKeyStore AES-256/GCM key before it touches PlayerPrefs and binds it
+        // to the address it was issued for. This field remains the in-process copy;
+        // the store is the across-launch copy. Read the MwaSessionStore header for
+        // the full security rationale - in one line: the token is a capability
+        // grant, so it is never written in plaintext, never logged, and destroyed on
+        // disconnect.
         private string _authToken;
 #endif
 
@@ -257,6 +273,32 @@ namespace DeNelle.Wallet
                 // options-graph instantiation below is load-bearing for those.
                 EnsureWeb3Host(network);
 
+                // =====================================================
+                //  STEP 1 - SILENT RESUME (2026-08-17, the relaunch fix)
+                // -----------------------------------------------------
+                //  If a sealed grant survives from a previous launch, spend
+                //  one `reauthorize` round-trip on it FIRST. A valid token
+                //  re-establishes the dapp<->account link with NO approval
+                //  sheet, so the returning player never sees a connect
+                //  prompt. Everything about this step is best-effort: no
+                //  stored token, an expired/revoked one, a different wallet,
+                //  a wallet that will not answer - every one of them falls
+                //  through to the full authorize below. There is no path on
+                //  which a failed resume leaves the player unable to connect.
+                // =====================================================
+                var storedToken = MwaSessionStore.Load(BoundWalletAddressOrEmpty());
+                if (!string.IsNullOrEmpty(storedToken))
+                {
+                    var resumed = await TryResumeSession(storedToken, network);
+                    if (resumed.IsValid) return resumed;
+                    // Deliberate fall-through: STEP 2 prompts, exactly as before.
+                    FlowTrace.Step("Wallet",
+                        "MWA silent resume did not produce an account - falling back to a full authorize (player will be prompted).");
+                }
+
+                // =====================================================
+                //  STEP 2 - FULL AUTHORIZE (the original, unchanged path)
+                // =====================================================
                 // Mobile Wallet Adapter - the wallet app / Seed Vault signs.
                 //
                 // 2026-08-05: this NO LONGER goes through
@@ -295,6 +337,12 @@ namespace DeNelle.Wallet
                     WalletName = ProviderName,
                 };
                 _connected = true;
+
+                // Seal the fresh grant BOUND TO THIS ADDRESS so the next launch can
+                // resume silently. Failure to persist is never fatal - it costs one
+                // prompt next time and says so in the trace (MwaSessionStore.Save).
+                MwaSessionStore.Save(_authToken, _account.Address);
+
                 FlowTrace.Step("Wallet",
                     $"SolanaWalletProvider connected ({network}) - {_account.ShortAddress}.");
                 return _account;
@@ -361,9 +409,111 @@ namespace DeNelle.Wallet
 #else
             await UniTask.CompletedTask;
 #endif
+            // A player who disconnects must ACTUALLY be disconnected: drop the
+            // persisted grant and destroy the keystore key that sealed it, so no
+            // later launch can silently resume this wallet. Outside the SDK #if on
+            // purpose - an explicit disconnect revokes the stored session in every
+            // build configuration, not only where the SDK compiled in.
+            MwaSessionStore.Clear("explicit disconnect");
+
             _connected = false;
             _account = default;
         }
+
+        // =====================================================================
+        //  Silent resume (2026-08-17) — the relaunch fix
+        // =====================================================================
+
+#if SOLANA_SDK && UNITY_ANDROID && !UNITY_EDITOR
+        /// <summary>
+        /// The wallet address this device's save is bound to, or empty when the
+        /// save is not (yet) keyed by a real wallet.
+        /// <para>
+        /// ONE AUTHORITY, no second notion of "the current wallet":
+        /// <c>GameState.BoundWallet</c> is the save key, and
+        /// <c>GameStateService.IsCloudIdentityShaped</c> is the same gate the save
+        /// layer already applies to decide whether that value is a wallet address
+        /// at all. A local guest key ("guest-local-...") is NOT a wallet, so it
+        /// contributes no binding - and that is safe, because the address the
+        /// wallet returns from the reauthorize is checked against the address
+        /// stored beside the token regardless.
+        /// </para>
+        /// </summary>
+        private static string BoundWalletAddressOrEmpty()
+        {
+            return Guard.Try("Wallet", "read bound wallet for session binding", () =>
+            {
+                var bound = DeNelle.Core.State.GameStateService.Instance?.State?.BoundWallet;
+                return DeNelle.Core.State.GameStateService.IsCloudIdentityShaped(bound) ? bound : string.Empty;
+            }, string.Empty);
+        }
+
+        /// <summary>
+        /// Spends one MWA <c>reauthorize</c> on a persisted grant. Returns the
+        /// connected account on success, or an invalid account on ANY failure -
+        /// in which case the caller falls through to a full authorize.
+        /// <para>
+        /// A failure here is ORDINARY, not exceptional: MWA tokens are revocable
+        /// wallet-side and can expire, the player may have switched wallets, or the
+        /// wallet app may simply not answer. Every one of those clears the stored
+        /// session and costs exactly one connect prompt - the behaviour we had
+        /// before this path existed.
+        /// </para>
+        /// </summary>
+        private async UniTask<WalletAccount> TryResumeSession(string storedToken, WalletNetwork network)
+        {
+            AuthorizationResult reauth;
+            try
+            {
+                var scenario = new TargetedLocalAssociationScenario();
+                reauth = await scenario.Reauthorize(
+                    DappIdentityUri, DappIconUri, DappIdentityName, storedToken);
+            }
+            catch (Exception ex)
+            {
+                // NOTE: the message may name the JSON-RPC failure but never the
+                // token - nothing in this file interpolates the grant into a string.
+                FlowTrace.Warn("Wallet",
+                    $"MWA reauthorize FAILED ({ex.GetType().Name}: {ex.Message}) - discarding the stored session.");
+                MwaSessionStore.Clear("reauthorize failed - grant revoked, expired, or the wallet did not answer");
+                return default;
+            }
+
+            if (reauth == null || reauth.PublicKey == null)
+            {
+                MwaSessionStore.Clear("reauthorize returned no account");
+                return default;
+            }
+
+            var address = new PublicKey(reauth.PublicKey).Key;
+
+            // THE BINDING CHECK, applied to the WALLET'S OWN ANSWER. A token
+            // silently accepted for a different wallet would cross-key the cloud
+            // save row - the worst outcome in this system. Refuse and re-prompt.
+            if (!MwaSessionStore.MatchesStoredWallet(address))
+            {
+                MwaSessionStore.Clear(
+                    $"reauthorize answered as {MwaSessionStore.Mask(address)}, which is NOT the wallet the grant " +
+                    "was issued for - refusing to resume");
+                return default;
+            }
+
+            // The wallet MAY rotate the token on reauthorize (the MWA spec allows a
+            // new auth_token in the response); keep whichever one we now hold.
+            _authToken = string.IsNullOrEmpty(reauth.AuthToken) ? storedToken : reauth.AuthToken;
+            _account = new WalletAccount
+            {
+                Address = address,
+                WalletName = ProviderName,
+            };
+            _connected = true;
+            MwaSessionStore.Save(_authToken, address);
+
+            FlowTrace.Step("Wallet",
+                $"SolanaWalletProvider RESUMED silently ({network}) - {_account.ShortAddress}, no connect prompt.");
+            return _account;
+        }
+#endif
 
         // =====================================================================
         //  GetBalance — SOL / USDC / SKR
