@@ -15,26 +15,33 @@ Each module folder has its own README with purpose + key files. **Read the modul
 | `Audio/` | `DeNelle.Audio` | AudioService, SFX library, music selection, WebGL unlock |
 | `BattleATB/` | `DeNelle.BattleATB` (+Tests) | ATB combat: pure-C# engine + Unity controllers |
 | `Characters/` | — (empty) | Reserved slot, no code/asmdef yet. Character code lives in `Village/` + `Editor/` |
-| `Core/` | `DeNelle.Core`, `DeNelle.AI` (+Tests) | Interfaces, enums, save/state, services, behavior-tree AI. **Owns `Core/Jobs/`** — the shared "Obsidian" multi-channel work queue (WO-773, `ObsidianQueueEngine`/`ObsidianQueueState`; landed at save v35 — live schema is now **v36**) |
+| `Core/` | `DeNelle.Core`, `DeNelle.AI` (+Tests) | Interfaces, enums, save/state, services, behavior-tree AI. **Owns `Core/Jobs/`** — the shared "Obsidian" multi-channel work queue (WO-773, `ObsidianQueueEngine`/`ObsidianQueueState`, plus `JobKind`/`JobRushPolicy`/`IJobEffect`; landed at save v35 — **never quote the live schema here, read `Core/State/SaveSchema.cs:CurrentVersion`**; a copied number is how this row went stale at v36). Also owns **`Core/Catalog/`** — catalog registry + placement/timer config, and the dungeon payout data types `DungeonRunGrade` / `DungeonRunPayout` / `DungeonExclusiveItems` / `PolishBonusProvider` |
 | `Cosmetics/` | `DeNelle.Cosmetics` | Battle pass, cosmetic catalog, Glimmer currency |
 | `Data/` | Assembly-CSharp | `MasterAssetCatalog` only |
 | `DevTools/` | `DeNelle.DevTools` | Dev panel, wallet probe |
 | `DialogueUI/` | `DeNelle.DialogueUI` | Intro sequence + companion dialogue presentation |
-| `Dungeons/` | `DeNelle.Dungeons` | 3D dungeon gameplay, crafting, lore, Bryn the wanderer |
+| `Dungeons/` | `DeNelle.Dungeons` | 3D dungeon gameplay, crafting, lore, Bryn the wanderer. Sub-READMEs: `Dungeons/README.md` + `Dungeons/RoomForge/README.md` (the only nested README under `_Modules/`). The **`Composed*` layer** is the runtime host for generated dungeons — `ComposedDungeonHost`/`ComposedDungeonBootstrap`, prop presentation `ComposedPropVisuals`/`ComposedPropSpin`, and the interactables (`ComposedKeyLock`, `ComposedOilStone`, `ComposedTrapHazard`, `ComposedAmbushDirector`, …); `DungeonLanternBalance` holds the torch/oil light tuning |
 | `Economy/` | Assembly-CSharp | Resource nodes (gem/ore/lumber/magic) + inventory |
 | `Environment/` | Assembly-CSharp | Night torch lighting |
 | `HUD/` | `DeNelle.HUD` | VillageHudController + HUD panels. **Core-only deps** |
 | `Onboarding/` | `DeNelle.Onboarding` | Title → hero select → pet select → story intro flow |
-| `Pets/` | `DeNelle.Pets` | Pet companion runtime: deploy, leash, progression, skills |
+| `Pets/` | `DeNelle.Pets` | Pet companion runtime: deploy, leash. ⚠ **"progression, skills" is RETIRED, not current** — `PetProgression` was DELETED 2026-08-16 (WO-993, with `AuraController` + `EchoSpiritPresentation`; `HeroProgression` is now the only `IXpEarner`), and `PetSkillTreeCatalog` was deleted 2026-07-08. `PetTaskController` is **RETIRED IN PLACE, NOT deleted** (WO-1031 → WO-1108 Lane B) — a task-state holder with no update loop and no installer, kept as a TYPE because `EchoEngageDialogueRegression` pins its shape; the repair loop moved to `EchoRepairService`. See `Pets/README.md` |
 | `Settings/` | `DeNelle.Settings` | Settings/pause UI, audio mixer bridge |
 | `UI/` | Assembly-CSharp | (empty — `GameOverUI` deleted 2026-07-03, dead-surface sweep) |
-| `Village/` | `DeNelle.Village` | The big one (~275+ files): waves, enemies, hero, buildings, world. **Owns `Village/Troops/`** — the COC-style Teleport/Deploy raid V1 spine + barracks (WO-771/772: `RaidDeployController`, `TroopFactory`, `BarracksService`, `RaidScoring`, shared enemy classes/families) |
+| `Village/` | `DeNelle.Village` | The big one (~275+ files): waves, enemies, hero, buildings, world. **Owns `Village/Troops/`** — the COC-style Teleport/Deploy raid V1 spine + barracks (WO-771/772: `RaidDeployController`, `TroopFactory`, `BarracksService`, `RaidScoring`, shared enemy classes/families). Also owns **`Village/Crafting/`** — the crafting/jeweler surface incl. `JewelPolishService` + `JewelPolishConfirmPanel`, and **`Village/Buildings/Progression/`** — the placed-structure upgrade spine (`UpgradeFamilyResolver`, `PlacedStructureUpgradeService`, `PlacedUpgradeKey`, `StructurePreviewSource`, `DualFamilyLevelResetMigration`) plus the resource-collector stack (`CollectorStackPropCatalog`/`CollectorStackView`, data at `Assets/Resources/Collectors/`) |
 | `Wallet/` | `DeNelle.Wallet` (+Tests) | PackStore, crypto payments, wallet providers |
 | `Web3/` | `DeNelle.Web3` | Jupiter swap integration |
 
 ## Cross-assembly rules (from CLAUDE.md — non-negotiable)
 
-- Village → Core only. HUD → Core only. **Never Village ↔ HUD directly.**
+- ⛔ **`DeNelle.HUD` NEVER references `DeNelle.Village`, in either direction.** `HUD/DeNelle.HUD.asmdef`
+  references `DeNelle.Core` + `DeNelle.Data` ONLY; `HUD/AdminOverlay.cs` reaches a Village type by
+  reflection *because* the asmdef forbids the reference — that is evidence of the rule, not a breach.
+- ⚠ The old line here — *"Village → Core only. HUD → Core only"* — **was FALSE and is RETIRED**
+  (CLAUDE.md §5). `DeNelle.Village.asmdef` legitimately references `DeNelle.BattleATB`, `DeNelle.AI`,
+  `DeNelle.Cosmetics`, `DeNelle.Data`, `DeNelle.Pets`, `DeNelle.Wallet` and `DeNelle.Audio` besides
+  `DeNelle.Core`. **Read the `.asmdef` — it is the authority on what may reference what.** The table
+  above is a convenience map, never the dependency graph.
 - Cross-module calls go through `CoreServices.Hud` / `CoreServices.Audio` with `?.`
 - Key interfaces live in Core: `IDamageableStructure`, `IVillageHud`, `IAudioService`
 
