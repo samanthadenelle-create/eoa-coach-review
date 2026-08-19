@@ -22,6 +22,18 @@
 // and hex '0', all of which fail base58), so no value can ever be routed to the
 // wrong rail, and no guest header can influence a wallet-keyed row.
 //
+// ── A THIRD RULE, ADDED 2026-08-18 (and the one the shape-disjointness above does
+//    NOT give you for free) ──────────────────────────────────────────────────────
+// Disjoint shapes stop a guest from touching a WALLET-KEYED row. They do NOT stop a
+// guest from being handed value keyed to its OWN id — and since the client MINTS
+// that id, an attacker mints as many "players" as they like. So:
+//
+//   ⛔ ROUTES THAT GRANT VALUE CALL authenticateGranting(), NOT authenticate().
+//      authenticate()          = "prove you are you" — a guest can.  (save/load/…)
+//      authenticateGranting()  = "prove you may be PAID" — a guest never can.
+//
+// See the corrected honesty note on verifyGuest for the exploit this closed.
+//
 // EVERY failure returns a STABLE MACHINE CODE (AuthCode). Before this, all nine
 // distinct ways to fail collapsed into one opaque 401 with a prose "reason" sent
 // to the PLAYER and nothing kept server-side — you could not tell no-header from
@@ -99,6 +111,7 @@ const AuthCode = {
     GUEST_MISMATCH:         'GUEST_MISMATCH',           // X-Guest-Id != the guest playerId
     GUEST_RATE_LIMITED:     'GUEST_RATE_LIMITED',       // guest exceeded its window budget
     GUEST_DISABLED:         'GUEST_DISABLED',           // guest rail switched off by env
+    WALLET_REQUIRED:        'AUTH_WALLET_REQUIRED',     // guest rail authenticated, but this route GRANTS VALUE
 
     PAYLOAD_TOO_LARGE:      'PAYLOAD_TOO_LARGE',
     BAD_PAYLOAD:            'BAD_PAYLOAD',
@@ -338,9 +351,24 @@ async function verifyAndConsume(sql, headers, payload, claimedPlayerId) {
  *
  * What that buys, and what it must NEVER buy, is enforced structurally, not by
  * convention: a guest id can never satisfy the wallet regex, so it can never key
- * a wallet row, and the wallet rail never consults a guest header. Real-value
- * paths (leaderboard, entitlements, anything on-chain) key off the wallet and are
- * untouched by this function.
+ * a wallet row, and the wallet rail never consults a guest header.
+ *
+ * ⚠ CORRECTED 2026-08-18 — the sentence that used to end this paragraph was FALSE
+ * and is why an exploit survived a security audit. It read:
+ *     "Real-value paths (leaderboard, entitlements, anything on-chain) key off the
+ *      wallet and are untouched by this function."
+ * They were NOT all untouched. /api/promo/redeem and /api/referral/claim both call
+ * authenticate(), which routes a guest-shaped id straight to THIS function — so a
+ * self-asserted, unsigned, unlimited-to-mint bearer id was reaching two endpoints
+ * that hand out crystals. Because the id is minted by the CLIENT
+ * (GameStateService.EnsureAccount: sha256(deviceId + salt)), an attacker chooses it:
+ * every fresh 64-hex string is a brand-new "player", which burns a code's
+ * max_redemptions (redeem.js counts ROWS) and walks straight past per_player_limit
+ * (which counts rows keyed by that same chosen id). Sybil-by-construction.
+ * The honest statement of the rule, now ENFORCED instead of asserted:
+ *   ⛔ A GUEST MAY NEVER AUTHENTICATE A REQUEST THAT GRANTS VALUE.
+ * Value-granting routes call authenticateGranting() (below), not authenticate().
+ * Do not "simplify" them back — the distinction IS the fix.
  *
  * @returns {Promise<{ok:boolean, guestId?:string, code?:string, detail?:object}>}
  */
@@ -452,6 +480,48 @@ async function authenticate(sql, req, payload, claimedPlayerId) {
     };
 }
 
+/**
+ * THE ENTRY POINT EVERY VALUE-GRANTING ROUTE CALLS (added 2026-08-18).
+ *
+ * Identical to authenticate(), then ONE extra, deliberately blunt rule:
+ *
+ *   ⛔ the proven identity must be a WALLET. A guest is refused, always.
+ *
+ * WHY A SEPARATE FUNCTION AND NOT A FLAG ON authenticate(): the two questions are
+ * genuinely different and must not share a default. authenticate() answers "is
+ * this caller who they say they are, for their OWN row?" — a guest legitimately
+ * passes that, and save/load/generate/tower-swap depend on it. This one answers
+ * "may this caller be HANDED VALUE?" — and a self-asserted id can never earn a
+ * yes, because the client picks it and an attacker is a client. A boolean
+ * parameter would make the safe answer the one you have to remember to ask for;
+ * a distinct name makes the grant path say out loud that it is a grant path.
+ *
+ * FAILS CLOSED: anything other than a fully verified wallet rail is a refusal.
+ * The refusal is LOUD server-side (the caller audits AUTH_WALLET_REQUIRED with
+ * the full context) and QUIET to the player (quietFail → a stable code + ref,
+ * which the Unity client maps to its "we couldn't confirm your identity" line —
+ * never a wall of JSON).
+ *
+ * @returns {Promise<{ok:boolean, mode:string, identity?:string, code?:string, detail?:object}>}
+ */
+async function authenticateGranting(sql, req, payload, claimedPlayerId) {
+    const r = await authenticate(sql, req, payload, claimedPlayerId);
+    if (!r.ok) return r;
+
+    // Belt AND braces: require the mode we expect AND re-test the id shape, so a
+    // future edit to authenticate()'s routing cannot quietly open this door.
+    if (r.mode !== 'wallet' || !isWalletId(String(r.identity || ''))) {
+        return {
+            ok: false,
+            mode: r.mode,
+            identity: r.identity,
+            code: AuthCode.WALLET_REQUIRED,
+            detail: { grantingRoute: true, provenMode: r.mode },
+        };
+    }
+    return r;
+}
+
 module.exports = {
     NONCE_TTL_SECONDS,
     GUEST_WINDOW_SECONDS,
@@ -472,5 +542,6 @@ module.exports = {
     verifyWallet,
     verifyGuest,
     verifyAndConsume,   // back-compat
-    authenticate,       // ← use this
+    authenticate,          // ← self-service routes (own row): save, load, generate, tower-swap
+    authenticateGranting,  // ← ANY route that hands out value: promo redeem, referral claim
 };
