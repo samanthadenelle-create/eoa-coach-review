@@ -594,22 +594,6 @@ namespace DeNelle.Wallet
             // WalletService.Pay/PayFlat. Kept compiled for the later payments WO.
             try
             {
-                // KNOWN GAP, deliberately left as an honest failure (2026-08-06):
-                // Web3.Wallet is only populated by a Web3.Login* call (Web3.cs:261-273),
-                // and Connect no longer makes one - it authorizes through
-                // TargetedLocalAssociationScenario instead. So this is ALWAYS null
-                // today and SendPayment always returns the failure below.
-                // That is the safe state: PackStore.Purchase already refuses while
-                // FeatureFlags.RealmStorePurchase is OFF (the release default), so
-                // nothing reaches here. The later payments WO must route signing
-                // through the targeted scenario (client.SignTransactions) the same
-                // way SignMessageBase58 now does - NOT by reviving the Web3 login,
-                // which drags back the implicit-intent wallet election AND the SDK's
-                // dequeue-after-close bug (LocalAssociationScenario.cs:132-138).
-                var wallet = Web3.Wallet; // VERIFIED (v1.2.9): static WalletBase
-                if (wallet == null)
-                    return PaymentResult.Failure(packSku, currency, "No active wallet on the SDK.");
-
                 var rpc = ResolveRpc(network);
                 var from = new PublicKey(_account.Address);
                 var to = new PublicKey(recipient);
@@ -663,21 +647,42 @@ namespace DeNelle.Wallet
                     var fromAta = AssociatedTokenAccountProgram.DeriveAssociatedTokenAccount(from, mint);
                     var toAta = AssociatedTokenAccountProgram.DeriveAssociatedTokenAccount(to, mint);
 
-                    // If the recipient has no ATA for this mint yet, create it
-                    // (payer = sender). Harmless to always include on devnet QA.
-                    // SDK-VERIFY: CreateAssociatedTokenAccount(payer, owner, mint).
-                    tx.Instructions.Add(
-                        AssociatedTokenAccountProgram.CreateAssociatedTokenAccount(from, to, mint));
+                    // Create the recipient ATA only when it does not exist. The SDK version in this
+                    // build exposes the legacy create instruction, not create-idempotent; emitting
+                    // it unconditionally makes every payment after the first fail preflight.
+                    var recipientAta = await rpc.GetAccountInfoAsync(toAta.Key, Commitment.Confirmed);
+                    if (recipientAta == null || !recipientAta.WasSuccessful || recipientAta.Result == null)
+                        return PaymentResult.Failure(packSku, currency,
+                            "Could not verify the recipient token account; no payment was submitted.");
+                    if (recipientAta.Result.Value == null)
+                        tx.Instructions.Add(
+                            AssociatedTokenAccountProgram.CreateAssociatedTokenAccount(from, to, mint));
 
-                    // SDK-VERIFY: TokenProgram.Transfer(source, dest, amount, owner).
-                    tx.Instructions.Add(
-                        TokenProgram.Transfer(fromAta, toAta, baseUnits, from));
+                    // Checked transfer pins the mint and decimals into the signed instruction. The
+                    // backend independently requires the identical parsed transferChecked shape.
+                    tx.Instructions.Add(TokenProgram.TransferChecked(
+                        fromAta, toAta, baseUnits, decimals, from, mint));
                 }
 
                 // ── Sign + send through the connected wallet ─────────────────
                 // The player's wallet (Phantom / Seeker Seed Vault) signs — the
                 // game holds NO key.
-                var sendResult = await wallet.SignAndSendTransaction(tx);
+                // MON-1147: sign through the same TARGETED MWA association that established the
+                // connected identity. Web3.Wallet is intentionally absent on this connection path;
+                // reviving it would reintroduce implicit wallet election and could ask a different
+                // wallet to sign. The returned wire payload contains the wallet signature but no key.
+                var scenario = new TargetedLocalAssociationScenario();
+                var signedWire = await scenario.SignTransaction(
+                    DappIdentityUri, DappIconUri, DappIdentityName,
+                    ClusterName(network), _authToken, tx.Serialize());
+                if (signedWire == null || signedWire.Length == 0)
+                    return PaymentResult.Failure(packSku, currency,
+                        "Wallet returned no signed transaction (cancelled or refused).");
+
+                var sendResult = await rpc.SendTransactionAsync(
+                    Convert.ToBase64String(signedWire),
+                    skipPreflight: false,
+                    preFlightCommitment: Commitment.Confirmed);
 
                 if (sendResult == null || !sendResult.WasSuccessful || string.IsNullOrEmpty(sendResult.Result))
                 {

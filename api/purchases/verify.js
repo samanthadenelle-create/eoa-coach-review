@@ -1,84 +1,17 @@
 'use strict';
 
 // MON-1147 — authenticated, server-authoritative SKR purchase verification.
-// WO-1158 — and the number it verifies against is now THE ONE THE SERVER QUOTED.
-//
-// ⛔ THE CHANGE THIS FILE CARRIES: for a real pack there is no constant to check.
-// The amount is whatever the SERVER quoted at purchase time (purchase_quotes),
-// looked up by the quote id the client presents. The client transfers exactly
-// that; it does no arithmetic and it is authoritative for nothing.
-//
-// The two CANARIES are the deliberate exception and are untouched: their amount
-// IS a protocol constant (a proof-of-rail, not a sale), so they still verify
-// against api/_lib/purchase-catalog's pinned row, need no quote, and consult no
-// rate. A live mainnet canary purchase succeeded against exactly those numbers.
 const { neon } = require('@neondatabase/serverless');
 const { AuthCode, authenticateGranting, WALLET_MAX_BODY_BYTES } = require('../_lib/wallet-auth');
 const { applyCors, newRef, quietFail, readBodyExact } = require('../_lib/http');
 const { logAuthReject, logApiEvent } = require('../_lib/audit');
-const { purchaseContract, walletAllowed, isPinnedSku, contractFromQuoteRow,
-    quoteValidAtPayment, FLAT_RATE_SOURCE } = require('../_lib/purchase-catalog');
+const { purchaseContract } = require('../_lib/purchase-catalog');
 
 const TX_SIG_RE = /^[1-9A-HJ-NP-Za-km-z]{80,90}$/;
-const QUOTE_REF_RE = /^[0-9a-f]{32}$/;
-
-/**
- * The rate to REPORT and to COPY FORWARD for a quote row — WO-1818.
- *
- * ⛔ NOTHING HERE RECOMPUTES AN AMOUNT. This file checks the chain against
- * `contractFromQuoteRow(quote)` (:305, compared by exact string at :88), so the
- * flat ladder needs no arithmetic change at all: the amount the verifier accepts
- * is the one the server PERSISTED when it issued the quote, flat or derived.
- * This helper is only about the rate FIELD.
- *
- * ⚠ A flat quote persists `usd_rate = 0` because the column is NOT NULL
- * (api/schema.sql:1366) and there is no rate to record. Echoing that 0 outward, or
- * copying it into purchase_entitlements.usd_rate (which IS nullable,
- * api/schema.sql:1175), would state a price of zero per SKR to whoever reads the
- * ledger next. `rate_source = 'flat-skr'` is the discriminator, and the
- * normalisation lives HERE ONCE for the MONEY PATH — two readers applying this
- * rule separately is how the response and the ledger come to disagree about one
- * purchase.
- *
- * ⚠ THE ADMIN VIEWS ARE NOT COVERED AND THAT IS STATED RATHER THAN IMPLIED:
- * api/admin/db.js:312 / :324 and api/admin/stats.js:1061 SELECT usd_rate raw, so
- * those pages show 0.000000000000 for a flat quote. They are operator reads, not
- * money decisions, and they print rate_source in the same row — but do not read
- * this helper's existence as a claim that every reader is normalised.
- */
-function ledgerRate(quote) {
-    if (!quote) return null;
-    if (String(quote.rate_source || '') === FLAT_RATE_SOURCE) return null;
-    return quote.usd_rate == null ? null : quote.usd_rate;
-}
-
-// Worded refusals. A money-path refusal that says only "rejected" sends the
-// player to support and the next seat to the source. Each of these names the one
-// thing that went wrong and states plainly whether anything was charged.
-const QUOTE_MESSAGES = {
-    quote_required:
-        'This pack needs a fresh price from the server before it can be bought. ' +
-        'Nothing has been charged. Reopen the store to get one.',
-    quote_unknown:
-        'We do not recognise that price quote. Nothing has been granted. ' +
-        'Reopen the store for a fresh one.',
-    quote_not_yours:
-        'That price quote belongs to a different wallet, pack or network. Nothing has been granted.',
-    quote_already_used:
-        'That price quote has already been used for another payment. ' +
-        'Reopen the store for a fresh one.',
-    quote_expired:
-        'The price quote had expired by the time this payment settled, so it was not ' +
-        'granted automatically. The payment IS recorded and is queued for review — ' +
-        'do not pay again.',
-};
 
 function rpcUrl(network) {
-    if (network === 'devnet')
-        return String(process.env.SOLANA_DEVNET_RPC_URL || process.env.SOLANA_RPC_URL || '').trim() || null;
-    if (network === 'mainnet-beta')
-        return String(process.env.SOLANA_MAINNET_RPC_URL || '').trim() || null;
-    return null;
+    if (network !== 'devnet') return null;
+    return String(process.env.SOLANA_DEVNET_RPC_URL || process.env.SOLANA_RPC_URL || '').trim() || null;
 }
 
 async function readFinalizedTransfer(url, signature, wallet, contract) {
@@ -105,293 +38,32 @@ async function readFinalizedTransfer(url, signature, wallet, contract) {
         .map(k => String(k.pubkey || ''));
     if (!signers.includes(wallet)) return { state: 'rejected', reason: 'wrong_signer' };
 
-    // ⚠ blockTime is WHEN THE PLAYER ACTUALLY PAID, and it is the only honest
-    // clock for judging a quote's expiry. See QUOTE_SETTLEMENT_GRACE_SECONDS.
-    const blockTimeMs = Number.isFinite(Number(tx.blockTime)) && Number(tx.blockTime) > 0
-        ? Number(tx.blockTime) * 1000 : null;
-    const slot = Number(tx.slot) || null;
-
-    // ── SHAPE 1 (unchanged): one top-level transferChecked, wallet -> treasury ATA.
-    // This is what the SKR-in-hand branch (`_wallet.Pay`) produces.
     const instructions = message && Array.isArray(message.instructions) ? message.instructions : [];
-    const matches = instructions.filter(ix => topLevelTransferMatches(ix, wallet, contract));
-    if (matches.length === 1) return { state: 'verified', shape: 'transfer', slot, blockTimeMs };
-
-    // ── SHAPE 2 (one-sheet option (b), 2026-09-22): the swap IS the payment.
-    // Jupiter delivers `destinationTokenAccount` by CPI, so none of shape 1's
-    // predicates can see it; the treasury SKR ATA's token-balance DELTA can.
-    const delta = matchTreasuryDelta(tx, keys, wallet, contract);
-    if (delta.ok) return { state: 'verified', shape: 'treasury-delta', slot, blockTimeMs };
-
-    // Neither shape. The transaction LANDED (finalized, no error, signed by the
-    // wallet), so whatever it moved is money support may have to find: report
-    // what was observed so the handler can write the manual_review row.
-    return { state: 'rejected', reason: delta.reason || 'transfer_contract_mismatch',
-        landed: true, observed: observeLanding(tx, keys, wallet, contract), slot, blockTimeMs };
-}
-
-const AMOUNT_RE = /^\d+$/;
-
-/** Shape 1's five-predicate match on ONE top-level instruction (verbatim from the pre-09-22 filter). */
-function topLevelTransferMatches(ix, wallet, contract) {
-    const parsed = ix && ix.parsed;
-    const info = parsed && parsed.info;
-    const tokenAmount = info && info.tokenAmount;
-    return !!(ix && ix.program === 'spl-token' && parsed && parsed.type === 'transferChecked' && info && tokenAmount &&
-        String(info.authority || '') === wallet &&
-        String(info.destination || '') === contract.recipientAta &&
-        String(info.mint || '') === contract.mint &&
-        Number(tokenAmount.decimals) === contract.decimals &&
-        String(tokenAmount.amount || '') === String(contract.amountBaseUnits));
-}
-
-/**
- * Normalise one side of meta.pre/postTokenBalances into rows keyed by account
- * pubkey. `accountIndex` indexes `message.accountKeys`, which under jsonParsed
- * ALREADY INCLUDES the lookup-table-loaded keys (`source: 'lookupTable'`) — read
- * off a real mainnet Jupiter v0 swap on 2026-09-22 (27 keys, balances indexing up
- * to 14). An amount that is not a plain digit string is kept as null so a
- * malformed RPC row can never throw out of the verifier as a 500.
- */
-function tokenBalanceRows(list, keys) {
-    const rows = [];
-    if (!Array.isArray(list)) return rows;
-    for (const entry of list) {
-        if (!entry || typeof entry !== 'object') continue;
-        const key = keys[Number(entry.accountIndex)];
-        const account = key && typeof key === 'object' ? String(key.pubkey || '') : '';
-        const ui = entry.uiTokenAmount && typeof entry.uiTokenAmount === 'object' ? entry.uiTokenAmount : {};
-        const amountText = String(ui.amount == null ? '' : ui.amount);
-        rows.push({
-            account,
-            mint: String(entry.mint || ''),
-            owner: entry.owner == null ? null : String(entry.owner),
-            decimals: Number(ui.decimals),
-            amount: AMOUNT_RE.test(amountText) ? BigInt(amountText) : null,
-        });
-    }
-    return rows;
-}
-
-/**
- * SHAPE 2 — accept a swap-delivered payment by the treasury ATA's balance delta.
- *
- * Fail-closed on every predicate:
- *   - the wallet is the FEE PAYER (accountKeys[0]) and a signer; the treasury never signs
- *   - exactly one pre AND one post row for {recipientAta, mint} — a missing pre row
- *     is a refusal (the ATA is required initialized; it is never treated as 0)
- *   - both rows: owner === recipient (absent owner fails), decimals === contract
- *   - post − pre === amountBaseUnits EXACTLY (partial and over both refuse)
- *   - no account owned by the treasury (any mint) lost balance or disappeared
- *
- * A reason more specific than transfer_contract_mismatch is only emitted when
- * the treasury ATA actually appears in the token balances — the shape-1 fixtures
- * carry no balances at all and keep their historical reason.
- */
-function matchTreasuryDelta(tx, keys, wallet, contract) {
-    const meta = tx.meta || {};
-    const pre = tokenBalanceRows(meta.preTokenBalances, keys);
-    const post = tokenBalanceRows(meta.postTokenBalances, keys);
-    const ata = String(contract.recipientAta || '');
-    const mint = String(contract.mint || '');
-    const treasury = String(contract.recipient || '');
-    if (!ata || !mint || !treasury) return { ok: false, reason: null };
-
-    const postRows = post.filter(r => r.account === ata && r.mint === mint);
-    const preRows = pre.filter(r => r.account === ata && r.mint === mint);
-    if (!postRows.length && !preRows.length) return { ok: false, reason: null };  // not a candidate
-
-    const feePayer = keys[0] && typeof keys[0] === 'object' ? String(keys[0].pubkey || '') : '';
-    if (feePayer !== wallet) return { ok: false, reason: 'wrong_fee_payer' };
-    if (keys.some(k => k && k.signer === true && String(k.pubkey || '') === treasury))
-        return { ok: false, reason: 'treasury_debited' };
-
-    // Any treasury-owned account (any mint) that went DOWN, or vanished, refuses.
-    for (const row of pre) {
-        if (row.owner !== treasury) continue;
-        const after = post.find(p => p.account === row.account && p.mint === row.mint);
-        if (!after) return { ok: false, reason: 'treasury_debited' };
-        // An unreadable amount is a refusal, but it is "cannot read", not "went down".
-        if (after.amount == null || row.amount == null) return { ok: false, reason: 'treasury_delta_mismatch' };
-        if (after.amount < row.amount) return { ok: false, reason: 'treasury_debited' };
-    }
-
-    if (postRows.length !== 1 || preRows.length !== 1) return { ok: false, reason: 'treasury_delta_mismatch' };
-    const before = preRows[0], after = postRows[0];
-    if (before.owner !== treasury || after.owner !== treasury) return { ok: false, reason: 'treasury_delta_mismatch' };
-    if (before.decimals !== contract.decimals || after.decimals !== contract.decimals)
-        return { ok: false, reason: 'treasury_delta_mismatch' };
-    if (before.amount == null || after.amount == null) return { ok: false, reason: 'treasury_delta_mismatch' };
-    const expected = String(contract.amountBaseUnits);
-    if (!AMOUNT_RE.test(expected)) return { ok: false, reason: 'treasury_delta_mismatch' };
-    if (after.amount - before.amount !== BigInt(expected)) return { ok: false, reason: 'treasury_delta_mismatch' };
-    return { ok: true };
-}
-
-/**
- * What did a LANDED-but-refused transaction actually move? Best single
- * observation, for the manual_review ledger row (MONEY_HANDLING_AUDIT §1):
- *   1. a balance CREDIT to any treasury-owned account (SKR mint preferred), then
- *   2. any spl-token transfer/transferChecked authorised by the wallet, top-level
- *      or CPI-wrapped (meta.innerInstructions), with the mint read off the
- *      instruction or, for a plain `transfer`, off the destination's balance row.
- * Returns null when nothing attributable moved — then there is no money to find
- * and no row is written (observed_lamports is CHECK > 0, api/schema.sql).
- */
-function observeLanding(tx, keys, wallet, contract) {
-    const meta = tx.meta || {};
-    const treasury = String(contract.recipient || '');
-    const pre = tokenBalanceRows(meta.preTokenBalances, keys);
-    const post = tokenBalanceRows(meta.postTokenBalances, keys);
-    const credits = [];
-    for (const after of post) {
-        // An out-of-range accountIndex yields account '' — never let a blank
-        // destination reach the ledger's observed_recipient column.
-        if (after.owner !== treasury || after.amount == null || !after.account) continue;
-        const before = pre.find(p => p.account === after.account && p.mint === after.mint);
-        const beforeAmount = before && before.amount != null ? before.amount : 0n;
-        if (after.amount > beforeAmount)
-            credits.push({ via: 'balance-delta', amount: String(after.amount - beforeAmount),
-                mint: after.mint, destination: after.account });
-    }
-    const skr = credits.find(c => c.mint === String(contract.mint || ''));
-    if (skr) return skr;
-    if (credits.length) return credits[0];
-
-    const message = tx.transaction && tx.transaction.message;
-    const top = message && Array.isArray(message.instructions) ? message.instructions : [];
-    const inner = [];
-    if (Array.isArray(meta.innerInstructions))
-        for (const group of meta.innerInstructions)
-            if (group && Array.isArray(group.instructions)) inner.push(...group.instructions);
-    for (const ix of top.concat(inner)) {
-        const parsed = ix && ix.program === 'spl-token' && ix.parsed;
+    const matches = instructions.filter(ix => {
+        const parsed = ix && ix.parsed;
         const info = parsed && parsed.info;
-        if (!info || (parsed.type !== 'transfer' && parsed.type !== 'transferChecked')) continue;
-        if (String(info.authority || '') !== wallet) continue;
-        const amountText = String(parsed.type === 'transferChecked'
-            ? (info.tokenAmount && info.tokenAmount.amount) : info.amount);
-        if (!AMOUNT_RE.test(amountText) || amountText === '0') continue;
-        const destination = String(info.destination || '');
-        const row = post.find(p => p.account === destination) || pre.find(p => p.account === destination);
-        return { via: parsed.type === 'transferChecked' ? 'transfer-checked' : 'transfer',
-            amount: amountText, mint: String(info.mint || (row && row.mint) || '') || null, destination };
-    }
-    return null;
+        const tokenAmount = info && info.tokenAmount;
+        return ix.program === 'spl-token' && parsed.type === 'transferChecked' && info && tokenAmount &&
+            String(info.authority || '') === wallet &&
+            String(info.destination || '') === contract.recipientAta &&
+            String(info.mint || '') === contract.mint &&
+            Number(tokenAmount.decimals) === contract.decimals &&
+            String(tokenAmount.amount || '') === String(contract.amountBaseUnits);
+    });
+    return matches.length === 1
+        ? { state: 'verified', slot: Number(tx.slot) || null }
+        : { state: 'rejected', reason: 'transfer_contract_mismatch' };
 }
 
 function entitlementResponse(row, signature, sku) {
     return { success: true, state: row.status, sku,
-        txSignature: signature, network: row.network, currency: row.currency,
+        txSignature: signature, currency: row.currency,
         amountLamports: Number(row.expected_lamports), chainSlot: row.chain_slot,
         entitlementId: row.entitlement_id == null ? undefined : String(row.entitlement_id) };
 }
 
 function entitlementMatches(row, playerId, sku, network) {
     return !!row && row.wallet === playerId && row.sku === sku && row.network === network;
-}
-
-/**
- * Is this persisted quote row usable for THIS request, before we look at chain?
- *
- * Pure on purpose — every refusal below is a case in test/purchases.verify.test.js
- * and none of them needs a database to prove.
- *
- * ⛔ EXPIRY IS NOT JUDGED HERE. It needs the transaction's blockTime, which we do
- * not have yet, and judging it by wall-clock would refuse an honest player whose
- * money has already moved. See evaluatePaidQuote.
- *
- * @returns {{ok:true}|{ok:false, code:string}}
- */
-function evaluateQuoteRow(row, playerId, sku, network, signature) {
-    if (!row) return { ok: false, code: 'quote_unknown' };
-    if (String(row.wallet) !== playerId || String(row.sku) !== sku ||
-        String(row.network) !== network)
-        return { ok: false, code: 'quote_not_yours' };
-    // SINGLE-USE. A quote already spent on a DIFFERENT signature is refused; the
-    // SAME signature is an idempotent retry of the very payment it was issued for.
-    if (row.consumed_tx && String(row.consumed_tx) !== signature)
-        return { ok: false, code: 'quote_already_used' };
-    if (!contractFromQuoteRow(row)) return { ok: false, code: 'quote_unknown' };
-    return { ok: true };
-}
-
-/**
- * Was the quote still live at the moment the money actually moved?
- * @param row       the persisted quote
- * @param paidAtMs  the transaction's blockTime in ms, or null when the RPC omits it
- * @param nowMs     fallback clock when blockTime is unavailable
- */
-function evaluatePaidQuote(row, paidAtMs, nowMs) {
-    const expiresAtMs = new Date(row.expires_at).getTime();
-    const paid = Number.isFinite(paidAtMs) && paidAtMs > 0 ? paidAtMs : nowMs;
-    return quoteValidAtPayment(expiresAtMs, paid)
-        ? { ok: true } : { ok: false, code: 'quote_expired' };
-}
-
-function quoteRejection(res, code, ref) {
-    return res.status(400).json({ success: false, state: 'rejected', code,
-        message: QUOTE_MESSAGES[code] || undefined, ref });
-}
-
-// ============================================================================
-// THE POST-SETTLEMENT DB FAULT -- a THIRD outcome, not a flavour of rejection.
-// ----------------------------------------------------------------------------
-// Every sql call in handler() below runs AFTER the SPL transfer has settled. An
-// SPL transfer CANNOT be reversed. So a database fault at any of those sites
-// lands with the player's money already gone, and it used to surface as a bare
-// unhandled 500 with NO row written anywhere -- the player paid and there was
-// nothing to reconcile from.
-//
-// "The money moved and we failed to record it" is NOT the same outcome as "the
-// payment was invalid", and it must never be reported as one:
-//   rejected      -> state:'rejected', 4xx  -- nothing was granted AND nothing was
-//                    validly paid; the remedy is a fresh quote.
-//   record_failed -> state:'record_failed', 503 -- the payment stands; the remedy
-//                    is RETRY (every write below is idempotent or conflict-safe),
-//                    and failing that, reconciliation by `ref`.
-// 503 is deliberate: it is the only status here that says "transient, retry",
-// and it is distinct from the 400/401/403/409 refusals and the 500s that mean
-// the request never got as far as chain.
-const RECORD_FAILED_MESSAGE =
-    'Your payment went through, but we could not finish recording it just now. ' +
-    'You have NOT been charged twice and nothing is lost -- do not pay again. ' +
-    'Try once more in a moment; if it keeps happening, quote the reference below.';
-
-/**
- * Run one post-settlement sql call without letting a fault escape as a 500.
- * Returns {ok:true, rows} or {ok:false, err} -- never throws.
- */
-async function tryDb(run) {
-    try { return { ok: true, rows: await run() }; }
-    catch (err) { return { ok: false, err: err }; }
-}
-
-/**
- * Capture a post-settlement DB fault and answer with the retryable outcome.
- *
- * NEVER a silent catch (CLAUDE.md 12.2): one console.error for the runtime log
- * -- readable without DATABASE_URL, which matters because the DB is the thing
- * that just failed -- plus one durable analytics row. logApiEvent is itself
- * fully guarded in _lib/audit.js and never throws, so this second attempt at
- * durability cannot mask the first failure.
- *
- * `stage` is what makes the fault ATTRIBUTABLE: it names which of the sites
- * died, which is the difference between "retry it" and "a payment exists with
- * no entitlement row, go look".
- */
-async function recordFailure(sql, res, playerId, ref, stage, err, extra) {
-    let detail = 'unknown';
-    try { detail = String((err && (err.message || err.code)) || 'unknown').slice(0, 400); }
-    catch (_) { /* an unreadable error is still a recorded one */ }
-    try {
-        console.error('[purchase_record_failed] stage=' + stage + ' ref=' + ref +
-            ' id=' + String(playerId || '').slice(0, 12) + ' detail=' + detail);
-    } catch (_) { /* logging must never break the response */ }
-    await logApiEvent(sql, playerId, 'purchase_record_failed',
-        Object.assign({ ref: ref, stage: stage, detail: detail }, extra || {}));
-    return res.status(503).json({ success: false, state: 'record_failed',
-        code: 'record_failed', stage: stage, message: RECORD_FAILED_MESSAGE, ref: ref });
 }
 
 async function handler(req, res) {
@@ -410,22 +82,12 @@ async function handler(req, res) {
     const signature = String(body.txSignature || '').trim();
     const sku = String(body.sku || '').trim();
     const network = String(body.network || '').trim().toLowerCase();
-    const quoteId = String(body.quoteId || '').trim();
-    // ⛔ NOTE WHAT IS *NOT* READ FROM THE BODY: an amount. There is no
-    // client-supplied price anywhere on this path, by construction. A client that
-    // invents one has nowhere to put it.
-    if (!playerId || !TX_SIG_RE.test(signature) || !sku ||
-        (network !== 'devnet' && network !== 'mainnet-beta'))
+    if (!playerId || !TX_SIG_RE.test(signature) || !sku || network !== 'devnet')
         return quietFail(res, 400, AuthCode.BAD_PAYLOAD, ref);
 
-    // MON002 is a single-owner canary, not a public Mainnet launch. Enforce the
-    // allowlist at the authenticated backend boundary; a client-side gate alone
-    // would only hide the button and could be bypassed by a crafted request.
-    if (!walletAllowed(network, sku, playerId))
-        return quietFail(res, 403, AuthCode.BAD_PAYLOAD, ref);
-
+    const contract = purchaseContract(network, sku);
     const url = rpcUrl(network);
-    if (!url) return quietFail(res, 503, AuthCode.SERVER_ERROR, ref);
+    if (!contract || !url) return quietFail(res, 503, AuthCode.SERVER_ERROR, ref);
 
     let sql;
     try { sql = neon(process.env.DATABASE_URL); }
@@ -440,15 +102,9 @@ async function handler(req, res) {
         return quietFail(res, 401, auth.code, ref);
     }
 
-    // SITE 1 -- the idempotency read. Pure SELECT, so a fault here has written
-    // nothing; but the player has already paid, so it is a retry, not a refusal.
-    const existingQ = await tryDb(() => sql`
+    const existing = await sql`
         SELECT entitlement_id, wallet, sku, network, status, currency, expected_lamports, chain_slot
-        FROM purchase_entitlements WHERE tx_signature = ${signature} LIMIT 1`);
-    if (!existingQ.ok)
-        return recordFailure(sql, res, playerId, ref, 'lookup_existing_entitlement',
-            existingQ.err, { sku: sku, network: network });
-    const existing = existingQ.rows;
+        FROM purchase_entitlements WHERE tx_signature = ${signature} LIMIT 1`;
     if (existing.length) {
         const row = existing[0];
         if (!entitlementMatches(row, playerId, sku, network))
@@ -456,214 +112,47 @@ async function handler(req, res) {
         return res.status(200).json(entitlementResponse(row, signature, sku));
     }
 
-    // ── Resolve the contract: a pinned canary constant, or the issued quote. ──
-    const pinned = isPinnedSku(network, sku);
-    let contract = null;
-    let quote = null;
-    if (pinned) {
-        contract = purchaseContract(network, sku);
-        if (!contract) return quietFail(res, 503, AuthCode.SERVER_ERROR, ref);
-    } else {
-        if (!QUOTE_REF_RE.test(quoteId)) return quoteRejection(res, 'quote_required', ref);
-        // SITE 2 -- the quote read. Pure SELECT. The critical distinction: an
-        // UNREADABLE quote is not an INVALID quote. Letting this fall through to
-        // evaluateQuoteRow(null, ...) would answer 'quote_unknown' and tell a
-        // player who has already paid that their price quote does not exist.
-        const rowsQ = await tryDb(() => sql`
-            SELECT quote_ref, wallet, sku, network, currency, amount_base_units, decimals,
-                   mint, recipient, recipient_ata, usd_anchor, usd_rate, rate_source,
-                   discount_bps, discount_reason,
-                   expires_at, consumed_at, consumed_tx
-            FROM purchase_quotes WHERE quote_ref = ${quoteId} LIMIT 1`);
-        if (!rowsQ.ok)
-            return recordFailure(sql, res, playerId, ref, 'lookup_quote',
-                rowsQ.err, { sku: sku, network: network, quoteId: quoteId });
-        const rows = rowsQ.rows;
-        quote = rows.length ? rows[0] : null;
-        const usable = evaluateQuoteRow(quote, playerId, sku, network, signature);
-        if (!usable.ok) {
-            await logApiEvent(sql, playerId, 'purchase_quote_refused',
-                { ref, sku, network, quoteId, reason: usable.code });
-            return quoteRejection(res, usable.code, ref);
-        }
-        contract = contractFromQuoteRow(quote);
-    }
-
     const chain = await readFinalizedTransfer(url, signature, playerId, contract);
     if (chain.state === 'pending') {
         await logApiEvent(sql, playerId, 'purchase_verification_pending',
             { ref, sku, network, reason: chain.reason });
-        return res.status(202).json({ success: true, state: 'pending', sku, network,
-            currency: contract.currency, txSignature: signature });
+        return res.status(202).json({ success: true, state: 'pending', sku, txSignature: signature });
     }
     if (chain.state !== 'verified') {
-        // ⚠ THIS IS THE TAMPERED-AMOUNT REFUSAL. The chain was checked against the
-        // amount the SERVER issued, so a client that transferred anything else
-        // lands here as transfer_contract_mismatch and is granted nothing.
-        //
-        // ⛔ BUT A REFUSED TRANSFER THAT LANDED IS STILL MONEY (MONEY_HANDLING_AUDIT
-        // 2026-09-22 §1). Before this branch was widened, an over/under amount, a
-        // wrong mint or ATA, a plain `transfer` or a CPI-wrapped one ended as a 400
-        // plus a log line, and support had no row to find the payment by. Now a
-        // transaction that is finalized, error-free and SIGNED BY THE WALLET writes a
-        // purchase_entitlements row in 'manual_review' — the same shape the
-        // quote_expired branch below has always used — carrying the signature, the
-        // quote id, what was actually observed moving (amount / mint / destination)
-        // and the refusal reason. The quote is NOT consumed and nothing is granted.
-        // A failed transaction or a stranger's signature moved nothing of the
-        // player's, so those two reasons still write nothing.
-        // SITE 3b -- idempotent (ON CONFLICT DO NOTHING); a retry re-lands it.
-        const observed = chain.landed && chain.observed && AMOUNT_RE.test(String(chain.observed.amount)) &&
-            String(chain.observed.amount) !== '0' ? chain.observed : null;
-        if (observed) {
-            const reviewQ = await tryDb(() => sql`
-                INSERT INTO purchase_entitlements
-                    (tx_signature, wallet, sku, rail, network, currency, expected_lamports,
-                     observed_lamports, recipient, observed_recipient, chain_slot, status,
-                     verified_at, quote_ref, usd_anchor, usd_rate, rate_source,
-                     review_reason, observed_mint)
-                VALUES (${signature}, ${playerId}, ${sku}, 'solana', ${network}, ${contract.currency},
-                        ${contract.amountBaseUnits}, ${observed.amount}, ${contract.recipient},
-                        ${observed.destination || contract.recipientAta}, ${chain.slot}, 'manual_review', NOW(),
-                        ${quote ? quote.quote_ref : null}, ${quote ? quote.usd_anchor : null},
-                        ${ledgerRate(quote)}, ${quote ? quote.rate_source : 'server-pinned'},
-                        ${chain.reason}, ${observed.mint || null})
-                ON CONFLICT (tx_signature) DO NOTHING`);
-            if (!reviewQ.ok)
-                return recordFailure(sql, res, playerId, ref, 'record_rejected_review',
-                    reviewQ.err, { sku: sku, network: network, quoteId: quoteId || null,
-                        chainSlot: chain.slot, txSignature: signature, reason: chain.reason,
-                        observed: observed });
-        }
         await logApiEvent(sql, playerId, 'purchase_verification_rejected',
-            { ref, sku, network, quoteId: quoteId || null, reason: chain.reason,
-              expectedBaseUnits: String(contract.amountBaseUnits),
-              landed: chain.landed === true, observed: observed,
-              manualReview: !!observed });
-        return res.status(400).json({ success: false, state: 'rejected', code: chain.reason, ref,
-            manualReview: !!observed });
+            { ref, sku, network, reason: chain.reason });
+        return res.status(400).json({ success: false, state: 'rejected', code: chain.reason, ref });
     }
 
-    // ── Expiry, judged against the moment the player actually paid. ──────────
-    if (quote) {
-        const timely = evaluatePaidQuote(quote, chain.blockTimeMs, Date.now());
-        if (!timely.ok) {
-            // The transfer matched the quoted contract exactly; only the clock is
-            // wrong. The money HAS moved, so this is recorded for review rather
-            // than dropped on the floor — a lost payment is worse than a slow one.
-            // SITE 3 -- the WORST of the six. This row IS the reconciliation
-            // record for a payment we are about to refuse to grant on. If it does
-            // not land, the refusal below tells the player "not granted" with
-            // nothing anywhere saying they paid. Idempotent (ON CONFLICT DO
-            // NOTHING), so a retry is safe.
-            const reviewQ = await tryDb(() => sql`
-                INSERT INTO purchase_entitlements
-                    (tx_signature, wallet, sku, rail, network, currency, expected_lamports,
-                     observed_lamports, recipient, observed_recipient, chain_slot, status,
-                     verified_at, quote_ref, usd_anchor, usd_rate, rate_source)
-                VALUES (${signature}, ${playerId}, ${sku}, 'solana', ${network}, ${contract.currency},
-                        ${contract.amountBaseUnits}, ${contract.amountBaseUnits}, ${contract.recipient},
-                        ${contract.recipientAta}, ${chain.slot}, 'manual_review', NOW(),
-                        ${quote.quote_ref}, ${quote.usd_anchor}, ${ledgerRate(quote)}, ${quote.rate_source})
-                ON CONFLICT (tx_signature) DO NOTHING`);
-            if (!reviewQ.ok)
-                return recordFailure(sql, res, playerId, ref, 'record_manual_review',
-                    reviewQ.err, { sku: sku, network: network, quoteId: quoteId,
-                        chainSlot: chain.slot, txSignature: signature,
-                        amountBaseUnits: String(contract.amountBaseUnits) });
-            await logApiEvent(sql, playerId, 'purchase_quote_expired_after_payment',
-                { ref, sku, network, quoteId, blockTimeMs: chain.blockTimeMs,
-                  expiresAt: quote.expires_at });
-            return quoteRejection(res, 'quote_expired', ref);
-        }
-
-        // SINGLE-USE, enforced atomically. The pre-check above is the fast, worded
-        // refusal; THIS is the authority — two concurrent verifies for different
-        // signatures cannot both win, whatever they each read a moment earlier.
-        // SITE 4 -- the atomic single-use claim. A FAULT here is not a LOST RACE:
-        // zero rows means someone else won, a throw means we never asked. Reporting
-        // the fault as 'quote_already_used' would accuse a paid player of double-
-        // spending a quote nobody consumed. Safe to retry -- the WHERE clause
-        // re-admits this same signature.
-        const consumedQ = await tryDb(() => sql`
-            UPDATE purchase_quotes
-               SET consumed_at = COALESCE(consumed_at, NOW()), consumed_tx = ${signature}
-             WHERE quote_ref = ${quoteId}
-               AND (consumed_tx IS NULL OR consumed_tx = ${signature})
-            RETURNING quote_ref`);
-        if (!consumedQ.ok)
-            return recordFailure(sql, res, playerId, ref, 'consume_quote',
-                consumedQ.err, { sku: sku, network: network, quoteId: quoteId,
-                    chainSlot: chain.slot, txSignature: signature });
-        const consumed = consumedQ.rows;
-        if (!consumed.length) {
-            await logApiEvent(sql, playerId, 'purchase_quote_refused',
-                { ref, sku, network, quoteId, reason: 'quote_already_used' });
-            return quoteRejection(res, 'quote_already_used', ref);
-        }
-    }
-
-    // The row records AMOUNT, RATE, RATE SOURCE and QUOTE ID — the owner's
-    // requirement verbatim ("they buy for 3 skr at X price so thats what resolves
-    // on db"), and what makes revenue reporting truthful rather than reconstructed.
-    // SITE 5 -- the grant itself. The quote is already consumed at this point, so
-    // a fault here leaves a spent quote, a settled transfer and no entitlement:
-    // the single most expensive state this file can produce. Idempotent
-    // (ON CONFLICT DO NOTHING) and the quote's WHERE re-admits this signature, so
-    // the whole request is safely retryable end to end.
-    const insertedQ = await tryDb(() => sql`
+    const inserted = await sql`
         INSERT INTO purchase_entitlements
             (tx_signature, wallet, sku, rail, network, currency, expected_lamports,
-             observed_lamports, recipient, observed_recipient, chain_slot, status, verified_at,
-             quote_ref, usd_anchor, usd_rate, rate_source)
+             observed_lamports, recipient, observed_recipient, chain_slot, status, verified_at)
         VALUES (${signature}, ${playerId}, ${sku}, 'solana', ${network}, ${contract.currency},
                 ${contract.amountBaseUnits}, ${contract.amountBaseUnits}, ${contract.recipient},
-                ${contract.recipientAta}, ${chain.slot}, 'verified', NOW(),
-                ${quote ? quote.quote_ref : null}, ${quote ? quote.usd_anchor : null},
-                ${ledgerRate(quote)}, ${quote ? quote.rate_source : 'server-pinned'})
-        ON CONFLICT (tx_signature) DO NOTHING RETURNING entitlement_id`);
-    if (!insertedQ.ok)
-        return recordFailure(sql, res, playerId, ref, 'record_entitlement',
-            insertedQ.err, { sku: sku, network: network, quoteId: quoteId || null,
-                chainSlot: chain.slot, txSignature: signature,
-                amountBaseUnits: String(contract.amountBaseUnits) });
-    const inserted = insertedQ.rows;
+                ${contract.recipientAta}, ${chain.slot}, 'verified', NOW())
+        ON CONFLICT (tx_signature) DO NOTHING RETURNING entitlement_id`;
     // A wallet retry and the original request can verify the same finalized
     // signature concurrently. The UNIQUE constraint is the authority; losing
     // that harmless race must read back the winner, not tell an honest client
     // its already-recorded payment is a conflict.
     if (!inserted.length) {
-        // SITE 6 -- the read-back of the race winner. Pure SELECT; the grant row
-        // exists (that is why the insert conflicted), we simply could not read it.
-        // Falling through would answer 409 BAD_PAYLOAD and tell a paid, RECORDED
-        // player their payment conflicts -- the exact confusion this outcome split
-        // exists to prevent.
-        const racedQ = await tryDb(() => sql`
+        const raced = await sql`
             SELECT entitlement_id, wallet, sku, network, status, currency,
                    expected_lamports, chain_slot
-            FROM purchase_entitlements WHERE tx_signature = ${signature} LIMIT 1`);
-        if (!racedQ.ok)
-            return recordFailure(sql, res, playerId, ref, 'readback_raced_entitlement',
-                racedQ.err, { sku: sku, network: network, txSignature: signature });
-        const raced = racedQ.rows;
+            FROM purchase_entitlements WHERE tx_signature = ${signature} LIMIT 1`;
         if (!raced.length || !entitlementMatches(raced[0], playerId, sku, network))
             return quietFail(res, 409, AuthCode.BAD_PAYLOAD, ref);
         return res.status(200).json(entitlementResponse(raced[0], signature, sku));
     }
 
-    await logApiEvent(sql, playerId, 'purchase_entitlement_created', { ref, sku, network,
-        quoteId: quoteId || null, amountBaseUnits: String(contract.amountBaseUnits),
-        rate: ledgerRate(quote), rateSource: quote ? quote.rate_source : 'server-pinned',
-        shape: chain.shape || 'transfer' });
+    await logApiEvent(sql, playerId, 'purchase_entitlement_created', { ref, sku, network });
     return res.status(200).json({ success: true, state: 'verified', sku,
-        txSignature: signature, network, currency: contract.currency,
-        amountLamports: Number(contract.amountBaseUnits), chainSlot: chain.slot,
+        txSignature: signature, currency: contract.currency,
+        amountLamports: contract.amountBaseUnits, chainSlot: chain.slot,
         entitlementId: String(inserted[0].entitlement_id) });
 }
 
 module.exports = handler;
 module.exports.config = { api: { bodyParser: false } };
-module.exports._test = { readFinalizedTransfer, rpcUrl, entitlementMatches, entitlementResponse,
-    evaluateQuoteRow, evaluatePaidQuote, QUOTE_MESSAGES, QUOTE_REF_RE,
-    tryDb, recordFailure, RECORD_FAILED_MESSAGE, ledgerRate,
-    matchTreasuryDelta, observeLanding, tokenBalanceRows, topLevelTransferMatches };
+module.exports._test = { readFinalizedTransfer, rpcUrl, entitlementMatches, entitlementResponse };
