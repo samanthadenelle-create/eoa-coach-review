@@ -2,8 +2,12 @@
 
 // MON-1147 server-owned canary contract. The client may name a SKU, but it may
 // never choose the amount or recipient the verifier accepts.
+// PRICE-PARITY LAW: a build/deploy is forbidden unless the automated parity gate
+// proves every row here equals both canonical client mirrors after exact decimal
+// conversion to base units. Never update this table without updating canon first.
+const DEVNET_CANARY_SKU = 'hearth-spark';
 const DEVNET_PACKS = Object.freeze({
-    'hearth-spark': Object.freeze({ currency: 'SKR', amountBaseUnits: 20_000_000_000, decimals: 9 }),
+    [DEVNET_CANARY_SKU]: Object.freeze({ currency: 'SKR', amountBaseUnits: 25_000_000_000, decimals: 9 }),
 });
 
 function purchaseContract(network, sku) {
@@ -17,4 +21,4 @@ function purchaseContract(network, sku) {
         decimals: row.decimals, mint, recipient, recipientAta };
 }
 
-module.exports = { DEVNET_PACKS, purchaseContract };
+module.exports = { DEVNET_CANARY_SKU, DEVNET_PACKS, purchaseContract };

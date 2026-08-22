@@ -61,9 +61,13 @@
 
 using System;
 using System.Collections.Generic;
+using System.Text;
 using Cysharp.Threading.Tasks;
 using DeNelle.Core.Diagnostics;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using UnityEngine;
+using UnityEngine.Networking;
 
 #if SOLANA_SDK
 // VERIFIED (v1.2.9): Solana.Unity.SDK (Web3 facade), Solana.Unity.Wallet
@@ -671,6 +675,12 @@ namespace DeNelle.Wallet
                 // connected identity. Web3.Wallet is intentionally absent on this connection path;
                 // reviving it would reintroduce implicit wallet election and could ask a different
                 // wallet to sign. The returned wire payload contains the wallet signature but no key.
+                // MWA requires a fully formed wire transaction: its signature vector must contain
+                // one 64-byte placeholder for each required signer. WalletBase.SignTransaction does
+                // this through Transaction.Sign(Account) before invoking an external wallet. This
+                // targeted path bypasses WalletBase, so mirror that SDK step with the public-only
+                // account; it creates the fee-payer placeholder without possessing a private key.
+                tx.Sign(new Account(string.Empty, from));
                 var scenario = new TargetedLocalAssociationScenario();
                 var signedWire = await scenario.SignTransaction(
                     DappIdentityUri, DappIconUri, DappIdentityName,
@@ -679,26 +689,40 @@ namespace DeNelle.Wallet
                     return PaymentResult.Failure(packSku, currency,
                         "Wallet returned no signed transaction (cancelled or refused).");
 
-                var sendResult = await rpc.SendTransactionAsync(
-                    Convert.ToBase64String(signedWire),
-                    skipPreflight: false,
-                    preFlightCommitment: Commitment.Confirmed);
+                // Capture the deterministic signature before transport. If RPC accepts the wire
+                // but its response is lost, PackStore can still persist and reconcile this receipt.
+                if (!TryReadPrimarySignature(signedWire, out string signedSignature))
+                    return PaymentResult.Failure(packSku, currency,
+                        "Wallet returned a malformed signed transaction; nothing was submitted.");
 
-                if (sendResult == null || !sendResult.WasSuccessful || string.IsNullOrEmpty(sendResult.Result))
+                // The pinned SDK collapses some HTTP/RPC failures into the opaque string
+                // "Unable to parse json", discarding the node response. Use explicit JSON-RPC
+                // so the signed transaction is submitted once and refusals stay diagnosable.
+                var submitted = await SubmitSignedTransaction(
+                    WalletEndpoints.RpcUrl(network), signedWire);
+
+                if (string.IsNullOrEmpty(submitted.signature))
                 {
-                    var err = sendResult != null ? sendResult.Reason : "unknown error";
+                    return PaymentResult.Indeterminate(packSku, currency, amount, signedSignature,
+                        "Transaction submission outcome is unknown. Reconcile this receipt; do not pay again.");
+#if false
+                    var err = submitted.error;
                     return PaymentResult.Failure(packSku, currency, $"Transaction submission failed — {err}.");
+                    #endif
                 }
 
-                var signature = sendResult.Result;
+                var signature = submitted.signature;
+                if (!string.Equals(signature, signedSignature, StringComparison.Ordinal))
+                    return PaymentResult.Indeterminate(packSku, currency, amount, signedSignature,
+                        "RPC returned a different signature. Reconcile the wallet-signed receipt; do not pay again.");
 
                 // ── Await devnet confirmation ────────────────────────────────
-                var confirmed = await ConfirmTransaction(rpc, signature);
-                if (!confirmed)
-                    return PaymentResult.Failure(packSku, currency,
-                        $"Transaction {signature} did not confirm in time.");
+                // RPC acceptance is the handoff point, not entitlement authority. Return the
+                // signature immediately so PackStore persists it before any finality wait. The
+                // authenticated backend independently requires finalized chain data and exact
+                // signer/recipient/mint/decimals/amount before granting.
 
-                Debug.Log($"[SolanaWalletProvider] Devnet tx confirmed — {packSku}: {amount} {currency}, sig {signature}.");
+                Debug.Log($"[SolanaWalletProvider] Devnet tx submitted — {packSku}: {amount} {currency}, sig {signature}; backend finality required.");
                 return PaymentResult.Success(packSku, currency, amount, signature);
             }
             catch (Exception ex)
@@ -711,6 +735,31 @@ namespace DeNelle.Wallet
             throw new InvalidOperationException("Solana Unity SDK is not installed (SOLANA_SDK define unset).");
 #endif
         }
+
+#if SOLANA_SDK
+        private static bool TryReadPrimarySignature(byte[] wire, out string signature)
+        {
+            signature = null;
+            if (wire == null || wire.Length < 65) return false;
+            int offset = 0, count = 0, shift = 0;
+            byte current;
+            do
+            {
+                if (offset >= wire.Length || shift > 21) return false;
+                current = wire[offset++];
+                count |= (current & 0x7f) << shift;
+                shift += 7;
+            } while ((current & 0x80) != 0);
+            if (count < 1 || offset + 64 > wire.Length) return false;
+            var bytes = new byte[64];
+            Buffer.BlockCopy(wire, offset, bytes, 0, bytes.Length);
+            bool any = false;
+            for (int i = 0; i < bytes.Length; i++) any |= bytes[i] != 0;
+            if (!any) return false;
+            signature = new Solana.Unity.Wallet.Utilities.Base58Encoder().EncodeData(bytes);
+            return !string.IsNullOrEmpty(signature);
+        }
+#endif
 
         // =====================================================================
         //  Message signing (WO-121) — backend save-auth ed25519 signature
@@ -932,6 +981,62 @@ namespace DeNelle.Wallet
             }
         }
 
+        private static async UniTask<(string signature, string error)> SubmitSignedTransaction(
+            string rpcUrl, byte[] signedWire)
+        {
+            string wireBase64 = Convert.ToBase64String(signedWire);
+            byte[] body = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(new
+            {
+                jsonrpc = "2.0",
+                id = 1,
+                method = "sendTransaction",
+                @params = new object[]
+                {
+                    wireBase64,
+                    new
+                    {
+                        encoding = "base64",
+                        skipPreflight = false,
+                        preflightCommitment = "confirmed",
+                        maxRetries = 3,
+                    }
+                }
+            }));
+
+            using var req = new UnityWebRequest(rpcUrl, "POST")
+            {
+                uploadHandler = new UploadHandlerRaw(body),
+                downloadHandler = new DownloadHandlerBuffer(),
+                timeout = 20,
+            };
+            req.SetRequestHeader("Content-Type", "application/json");
+            req.SetRequestHeader("Accept", "application/json");
+
+            try { await req.SendWebRequest(); }
+            catch (Exception ex)
+            {
+                return (null, $"RPC transport {ex.GetType().Name}: {ex.Message}");
+            }
+
+            string responseText = req.downloadHandler?.text ?? string.Empty;
+            JObject response = null;
+            try { response = JObject.Parse(responseText); }
+            catch (Exception ex)
+            {
+                string preview = responseText.Length > 240 ? responseText.Substring(0, 240) : responseText;
+                return (null, $"RPC HTTP {req.responseCode} returned non-JSON ({ex.GetType().Name}): {preview}");
+            }
+
+            string signature = response["result"]?.Value<string>();
+            if (!string.IsNullOrEmpty(signature)) return (signature, null);
+
+            string message = response["error"]?["message"]?.Value<string>();
+            string data = response["error"]?["data"]?.ToString(Formatting.None);
+            if (string.IsNullOrEmpty(message)) message = $"RPC HTTP {req.responseCode} returned no signature";
+            if (!string.IsNullOrEmpty(data)) message += $"; data={data}";
+            return (null, message);
+        }
+
         /// <summary>
         /// Polls the RPC until the transaction reaches a confirmed/finalized
         /// commitment, or a timeout elapses. Devnet finality is ~1–2s; we poll
@@ -964,7 +1069,7 @@ namespace DeNelle.Wallet
                 {
                     Debug.LogWarning($"[SolanaWalletProvider] Confirmation poll {i} failed: {ex.Message}");
                 }
-                await UniTask.Delay(pollMs);
+                await UniTask.Delay(pollMs, ignoreTimeScale: true);
             }
             return false;
         }

@@ -150,6 +150,16 @@ namespace DeNelle.Wallet
                 TxSignature = signature,
             };
         }
+
+        public static PaymentResult Indeterminate(string sku, CurrencyKind currency, double amount,
+                                                   string signature, string error)
+        {
+            return new PaymentResult
+            {
+                Ok = false, PackSku = sku, Currency = currency, AmountNative = amount,
+                TxSignature = signature, Error = error,
+            };
+        }
     }
 
     /// <summary>

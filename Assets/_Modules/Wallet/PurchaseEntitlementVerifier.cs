@@ -8,7 +8,7 @@ using UnityEngine.Networking;
 
 namespace DeNelle.Wallet
 {
-    public enum EntitlementVerificationState { Verified, Pending, Rejected, Unavailable }
+    public enum EntitlementVerificationState { Verified, Fulfilled, Pending, Rejected, Unavailable }
 
     public readonly struct EntitlementVerificationResult
     {
@@ -55,6 +55,9 @@ namespace DeNelle.Wallet
         {
             [JsonProperty("success")] public bool Success;
             [JsonProperty("state")] public string State;
+            [JsonProperty("sku")] public string Sku;
+            [JsonProperty("network")] public string Network;
+            [JsonProperty("currency")] public string Currency;
             [JsonProperty("txSignature")] public string TxSignature;
             [JsonProperty("entitlementId")] public string EntitlementId;
             [JsonProperty("code")] public string Code;
@@ -65,7 +68,7 @@ namespace DeNelle.Wallet
 
         public static void Remember(PackDef pack, PaymentResult payment, WalletService wallet)
         {
-            if (pack == null || !payment.Ok || string.IsNullOrEmpty(payment.TxSignature) || wallet == null)
+            if (pack == null || string.IsNullOrEmpty(payment.TxSignature) || wallet == null)
                 return;
             var row = new PendingPurchase
             {
@@ -80,7 +83,7 @@ namespace DeNelle.Wallet
         }
 
         public static async UniTask<EntitlementVerificationResult> VerifyPendingAsync(
-            PackDef pack, WalletService wallet)
+            PackDef pack, CurrencyKind currency, WalletService wallet)
         {
             if (pack == null || wallet == null || !wallet.IsRealSigningWallet)
                 return new EntitlementVerificationResult(EntitlementVerificationState.Unavailable, null,
@@ -104,6 +107,14 @@ namespace DeNelle.Wallet
             if (!string.Equals(pending.playerId, wallet.Account.Address, StringComparison.Ordinal))
                 return new EntitlementVerificationResult(EntitlementVerificationState.Rejected,
                     pending.txSignature, error: "Connect the wallet that made this payment.");
+            string expectedNetwork = wallet.Network == WalletNetwork.Devnet ? "devnet" : "mainnet";
+            string expectedCurrency = currency.ToString().ToUpperInvariant();
+            if (!string.Equals(pending.sku, pack.Sku, StringComparison.Ordinal) ||
+                !string.Equals(pending.network, expectedNetwork, StringComparison.Ordinal) ||
+                !string.Equals(pending.currency, expectedCurrency, StringComparison.Ordinal))
+                return new EntitlementVerificationResult(EntitlementVerificationState.Rejected,
+                    pending.txSignature,
+                    error: "The recorded payment does not match this SKU, network, and currency.");
 
             byte[] body = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(new
             {
@@ -142,9 +153,12 @@ namespace DeNelle.Wallet
                     pending.txSignature, error: response?.Code);
 
             if (req.result == UnityWebRequest.Result.Success && response != null && response.Success &&
-                (response.State == "verified" || response.State == "fulfilled"))
+                (response.State == "verified" || response.State == "fulfilled") &&
+                string.Equals(response.Sku, pack.Sku, StringComparison.Ordinal) &&
+                string.Equals(response.Currency, expectedCurrency, StringComparison.Ordinal))
             {
-                return new EntitlementVerificationResult(EntitlementVerificationState.Verified,
+                return new EntitlementVerificationResult(response.State == "fulfilled"
+                        ? EntitlementVerificationState.Fulfilled : EntitlementVerificationState.Verified,
                     pending.txSignature, response.EntitlementId);
             }
 
@@ -186,10 +200,14 @@ namespace DeNelle.Wallet
             VerifyResponse response = null;
             try { response = JsonConvert.DeserializeObject<VerifyResponse>(req.downloadHandler.text); }
             catch { return new EntitlementVerificationResult(EntitlementVerificationState.Unavailable, null); }
+            string expectedNetwork = wallet.Network == WalletNetwork.Devnet ? "devnet" : "mainnet";
             if (response != null && response.Success &&
                 (response.State == "verified" || response.State == "fulfilled") &&
-                !string.IsNullOrEmpty(response.TxSignature))
-                return new EntitlementVerificationResult(EntitlementVerificationState.Verified,
+                !string.IsNullOrEmpty(response.TxSignature) &&
+                string.Equals(response.Sku, pack.Sku, StringComparison.Ordinal) &&
+                string.Equals(response.Network, expectedNetwork, StringComparison.Ordinal))
+                return new EntitlementVerificationResult(response.State == "fulfilled"
+                        ? EntitlementVerificationState.Fulfilled : EntitlementVerificationState.Verified,
                     response.TxSignature, response.EntitlementId);
             return new EntitlementVerificationResult(EntitlementVerificationState.Rejected, null,
                 error: response?.Code ?? "No durable entitlement exists for this SKU.");
@@ -213,6 +231,7 @@ namespace DeNelle.Wallet
                 pending = JsonConvert.DeserializeObject<PendingPurchase>(raw);
                 if (pending == null || !string.Equals(pending.txSignature, transactionSignature,
                         StringComparison.Ordinal) ||
+                    !string.Equals(pending.sku, sku, StringComparison.Ordinal) ||
                     !string.Equals(pending.playerId, wallet.Account.Address, StringComparison.Ordinal))
                     return false;
             }
@@ -240,7 +259,8 @@ namespace DeNelle.Wallet
             try { response = JsonConvert.DeserializeObject<VerifyResponse>(req.downloadHandler.text); }
             catch { return false; }
             if (req.responseCode != 200 || req.result != UnityWebRequest.Result.Success ||
-                response == null || !response.Success || response.State != "fulfilled") return false;
+                response == null || !response.Success || response.State != "fulfilled" ||
+                !string.Equals(response.Sku, sku, StringComparison.Ordinal)) return false;
 
             PlayerPrefs.DeleteKey(PendingPrefix + sku);
             PlayerPrefs.Save();
