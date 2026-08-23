@@ -552,7 +552,7 @@ namespace DeNelle.Wallet
 
                 var skrMint = WalletEndpoints.SkrMint(network);
                 if (!string.IsNullOrEmpty(skrMint))
-                    balance.Skr = await ReadSplBalance(rpc, owner, skrMint, WalletEndpoints.SkrDecimals);
+                    balance.Skr = await ReadSplBalance(rpc, owner, skrMint, WalletEndpoints.SkrDecimals(network));
                 // else: SKR devnet mint not yet provisioned — leave 0 (week7-wallet.md).
             }
             catch (Exception ex)
@@ -578,6 +578,14 @@ namespace DeNelle.Wallet
             if (!_connected || !_account.IsValid)
                 return PaymentResult.Failure(packSku, currency, "No wallet connected.");
 
+#if MAINNET_CANARY_TEST
+            if (network == WalletNetwork.Mainnet &&
+                (!string.Equals(packSku, PurchaseGate.MainnetCanarySku, StringComparison.Ordinal) ||
+                 currency != CurrencyKind.Skr ||
+                 !string.Equals(_account.Address, MainnetCanaryCatalog.OwnerWallet, StringComparison.Ordinal)))
+                return PaymentResult.Failure(packSku, currency,
+                    "Mainnet payment refused: this build authorizes only the owner 1 SKR canary.");
+#else
             // GUARDRAIL (spec Part 10): devnet only. The agent never sets
             // WalletService.ActiveNetwork to Mainnet, but defend in depth here.
             if (network == WalletNetwork.Mainnet)
@@ -587,9 +595,13 @@ namespace DeNelle.Wallet
             // The pack-purchase recipient. The §4 Squads multisig revenue
             // treasuries are not yet provisioned, so devnet transfers land in the
             // documented dev/staging smoke-test wallet (wallets.json).
-            var recipient = WalletRegistry.DevnetPurchaseRecipientAddress;
+#endif
+            var recipient = network == WalletNetwork.Mainnet
+                ? WalletRegistry.MainnetPurchaseRecipientAddress
+                : WalletRegistry.DevnetPurchaseRecipientAddress;
             if (string.IsNullOrEmpty(recipient))
-                return PaymentResult.Failure(packSku, currency, "No devnet purchase recipient configured.");
+                return PaymentResult.Failure(packSku, currency,
+                    $"No owner-approved {network} purchase recipient configured.");
 
             // WO-766 SAFETY: this is the ONLY transfer-constructing code in the
             // wallet module, and it is UNREACHABLE in release builds -
@@ -643,7 +655,7 @@ namespace DeNelle.Wallet
                             $"{currency} mint not configured for {network} — see WalletEndpoints / week7-wallet.md.");
 
                     var mint = new PublicKey(mintStr);
-                    var decimals = WalletEndpoints.DecimalsFor(currency);
+                    var decimals = WalletEndpoints.DecimalsFor(currency, network);
                     var baseUnits = UiToBaseUnits(amount, decimals);
 
                     // Associated Token Accounts for sender + recipient.

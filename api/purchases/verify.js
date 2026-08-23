@@ -5,13 +5,16 @@ const { neon } = require('@neondatabase/serverless');
 const { AuthCode, authenticateGranting, WALLET_MAX_BODY_BYTES } = require('../_lib/wallet-auth');
 const { applyCors, newRef, quietFail, readBodyExact } = require('../_lib/http');
 const { logAuthReject, logApiEvent } = require('../_lib/audit');
-const { purchaseContract } = require('../_lib/purchase-catalog');
+const { purchaseContract, walletAllowed } = require('../_lib/purchase-catalog');
 
 const TX_SIG_RE = /^[1-9A-HJ-NP-Za-km-z]{80,90}$/;
 
 function rpcUrl(network) {
-    if (network !== 'devnet') return null;
-    return String(process.env.SOLANA_DEVNET_RPC_URL || process.env.SOLANA_RPC_URL || '').trim() || null;
+    if (network === 'devnet')
+        return String(process.env.SOLANA_DEVNET_RPC_URL || process.env.SOLANA_RPC_URL || '').trim() || null;
+    if (network === 'mainnet-beta')
+        return String(process.env.SOLANA_MAINNET_RPC_URL || '').trim() || null;
+    return null;
 }
 
 async function readFinalizedTransfer(url, signature, wallet, contract) {
@@ -57,7 +60,7 @@ async function readFinalizedTransfer(url, signature, wallet, contract) {
 
 function entitlementResponse(row, signature, sku) {
     return { success: true, state: row.status, sku,
-        txSignature: signature, currency: row.currency,
+        txSignature: signature, network: row.network, currency: row.currency,
         amountLamports: Number(row.expected_lamports), chainSlot: row.chain_slot,
         entitlementId: row.entitlement_id == null ? undefined : String(row.entitlement_id) };
 }
@@ -82,8 +85,15 @@ async function handler(req, res) {
     const signature = String(body.txSignature || '').trim();
     const sku = String(body.sku || '').trim();
     const network = String(body.network || '').trim().toLowerCase();
-    if (!playerId || !TX_SIG_RE.test(signature) || !sku || network !== 'devnet')
+    if (!playerId || !TX_SIG_RE.test(signature) || !sku ||
+        (network !== 'devnet' && network !== 'mainnet-beta'))
         return quietFail(res, 400, AuthCode.BAD_PAYLOAD, ref);
+
+    // MON002 is a single-owner canary, not a public Mainnet launch. Enforce the
+    // allowlist at the authenticated backend boundary; a client-side gate alone
+    // would only hide the button and could be bypassed by a crafted request.
+    if (!walletAllowed(network, sku, playerId))
+        return quietFail(res, 403, AuthCode.BAD_PAYLOAD, ref);
 
     const contract = purchaseContract(network, sku);
     const url = rpcUrl(network);
@@ -116,7 +126,8 @@ async function handler(req, res) {
     if (chain.state === 'pending') {
         await logApiEvent(sql, playerId, 'purchase_verification_pending',
             { ref, sku, network, reason: chain.reason });
-        return res.status(202).json({ success: true, state: 'pending', sku, txSignature: signature });
+        return res.status(202).json({ success: true, state: 'pending', sku, network,
+            currency: contract.currency, txSignature: signature });
     }
     if (chain.state !== 'verified') {
         await logApiEvent(sql, playerId, 'purchase_verification_rejected',
@@ -148,7 +159,7 @@ async function handler(req, res) {
 
     await logApiEvent(sql, playerId, 'purchase_entitlement_created', { ref, sku, network });
     return res.status(200).json({ success: true, state: 'verified', sku,
-        txSignature: signature, currency: contract.currency,
+        txSignature: signature, network, currency: contract.currency,
         amountLamports: contract.amountBaseUnits, chainSlot: chain.slot,
         entitlementId: String(inserted[0].entitlement_id) });
 }

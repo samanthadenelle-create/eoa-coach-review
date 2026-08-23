@@ -7,11 +7,12 @@ const { neon } = require('@neondatabase/serverless');
 const { AuthCode, authenticateGranting, WALLET_MAX_BODY_BYTES } = require('../_lib/wallet-auth');
 const { applyCors, newRef, quietFail, readBodyExact } = require('../_lib/http');
 const { logAuthReject, logApiEvent } = require('../_lib/audit');
+const { walletAllowed } = require('../_lib/purchase-catalog');
 
 const TX_SIG_RE = /^[1-9A-HJ-NP-Za-km-z]{80,90}$/;
 
-function matches(row, playerId, sku) {
-    return !!row && row.wallet === playerId && row.sku === sku;
+function matches(row, playerId, sku, network) {
+    return !!row && row.wallet === playerId && row.sku === sku && row.network === network;
 }
 
 async function handler(req, res) {
@@ -28,8 +29,12 @@ async function handler(req, res) {
     const playerId = String(body.playerId || '').trim();
     const signature = String(body.txSignature || '').trim();
     const sku = String(body.sku || '').trim();
-    if (!playerId || !TX_SIG_RE.test(signature) || !sku)
+    const network = String(body.network || 'devnet').trim().toLowerCase();
+    if (!playerId || !TX_SIG_RE.test(signature) || !sku ||
+        (network !== 'devnet' && network !== 'mainnet-beta'))
         return quietFail(res, 400, AuthCode.BAD_PAYLOAD, ref);
+    if (!walletAllowed(network, sku, playerId))
+        return quietFail(res, 403, AuthCode.BAD_PAYLOAD, ref);
 
     let sql;
     try { sql = neon(process.env.DATABASE_URL); }
@@ -45,10 +50,10 @@ async function handler(req, res) {
     }
 
     const rows = await sql`
-        SELECT entitlement_id, wallet, sku, status
+        SELECT entitlement_id, wallet, sku, network, status
         FROM purchase_entitlements WHERE tx_signature = ${signature} LIMIT 1`;
     if (!rows.length) return quietFail(res, 404, AuthCode.BAD_PAYLOAD, ref);
-    if (!matches(rows[0], playerId, sku))
+    if (!matches(rows[0], playerId, sku, network))
         return quietFail(res, 409, AuthCode.BAD_PAYLOAD, ref);
 
     if (rows[0].status === 'verified') {
@@ -61,7 +66,7 @@ async function handler(req, res) {
     }
 
     return res.status(200).json({ success: true, state: 'fulfilled', sku,
-        txSignature: signature, entitlementId: String(rows[0].entitlement_id) });
+        network, txSignature: signature, entitlementId: String(rows[0].entitlement_id) });
 }
 
 module.exports = handler;

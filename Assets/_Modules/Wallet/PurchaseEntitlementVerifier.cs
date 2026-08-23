@@ -75,7 +75,7 @@ namespace DeNelle.Wallet
                 playerId = wallet.Account.Address,
                 sku = pack.Sku,
                 txSignature = payment.TxSignature,
-                network = wallet.Network == WalletNetwork.Devnet ? "devnet" : "mainnet",
+                network = WireNetwork(wallet.Network),
                 currency = payment.Currency.ToString().ToUpperInvariant(),
             };
             PlayerPrefs.SetString(PendingPrefix + pack.Sku, JsonConvert.SerializeObject(row));
@@ -107,7 +107,7 @@ namespace DeNelle.Wallet
             if (!string.Equals(pending.playerId, wallet.Account.Address, StringComparison.Ordinal))
                 return new EntitlementVerificationResult(EntitlementVerificationState.Rejected,
                     pending.txSignature, error: "Connect the wallet that made this payment.");
-            string expectedNetwork = wallet.Network == WalletNetwork.Devnet ? "devnet" : "mainnet";
+            string expectedNetwork = WireNetwork(wallet.Network);
             string expectedCurrency = currency.ToString().ToUpperInvariant();
             if (!string.Equals(pending.sku, pack.Sku, StringComparison.Ordinal) ||
                 !string.Equals(pending.network, expectedNetwork, StringComparison.Ordinal) ||
@@ -155,6 +155,7 @@ namespace DeNelle.Wallet
             if (req.result == UnityWebRequest.Result.Success && response != null && response.Success &&
                 (response.State == "verified" || response.State == "fulfilled") &&
                 string.Equals(response.Sku, pack.Sku, StringComparison.Ordinal) &&
+                string.Equals(response.Network, expectedNetwork, StringComparison.Ordinal) &&
                 string.Equals(response.Currency, expectedCurrency, StringComparison.Ordinal))
             {
                 return new EntitlementVerificationResult(response.State == "fulfilled"
@@ -181,6 +182,7 @@ namespace DeNelle.Wallet
             {
                 playerId,
                 sku = pack.Sku,
+                network = WireNetwork(wallet.Network),
             }));
             using var req = new UnityWebRequest(ReconcileUrl, "POST")
             {
@@ -200,7 +202,7 @@ namespace DeNelle.Wallet
             VerifyResponse response = null;
             try { response = JsonConvert.DeserializeObject<VerifyResponse>(req.downloadHandler.text); }
             catch { return new EntitlementVerificationResult(EntitlementVerificationState.Unavailable, null); }
-            string expectedNetwork = wallet.Network == WalletNetwork.Devnet ? "devnet" : "mainnet";
+            string expectedNetwork = WireNetwork(wallet.Network);
             if (response != null && response.Success &&
                 (response.State == "verified" || response.State == "fulfilled") &&
                 !string.IsNullOrEmpty(response.TxSignature) &&
@@ -242,6 +244,7 @@ namespace DeNelle.Wallet
                 playerId = pending.playerId,
                 sku,
                 txSignature = transactionSignature,
+                network = pending.network,
             }));
             using var req = new UnityWebRequest(FulfillUrl, "POST")
             {
@@ -260,11 +263,16 @@ namespace DeNelle.Wallet
             catch { return false; }
             if (req.responseCode != 200 || req.result != UnityWebRequest.Result.Success ||
                 response == null || !response.Success || response.State != "fulfilled" ||
-                !string.Equals(response.Sku, sku, StringComparison.Ordinal)) return false;
+                !string.Equals(response.Sku, sku, StringComparison.Ordinal) ||
+                !string.Equals(response.Network, pending.network, StringComparison.Ordinal)) return false;
 
             PlayerPrefs.DeleteKey(PendingPrefix + sku);
             PlayerPrefs.Save();
             return true;
         }
+
+        /// <summary>Backend/chain spelling. MWA uses solana:mainnet; purchase APIs use mainnet-beta.</summary>
+        private static string WireNetwork(WalletNetwork network) =>
+            network == WalletNetwork.Mainnet ? "mainnet-beta" : "devnet";
     }
 }
