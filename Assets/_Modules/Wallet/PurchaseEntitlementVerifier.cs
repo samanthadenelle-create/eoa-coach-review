@@ -49,6 +49,15 @@ namespace DeNelle.Wallet
             public string txSignature;
             public string network;
             public string currency;
+            /// <summary>
+            /// The SERVER-ISSUED quote this payment was made against (WO-1158). Empty for the two
+            /// CANARY skus, whose amount is a pinned protocol constant that needs no quote.
+            /// <para>⛔ IT IS PERSISTED WITH THE SIGNATURE, NOT RE-FETCHED. /verify checks the chain
+            /// against the quote it issued; a retry after process death that asked for a FRESH quote
+            /// would be checking a settled transfer against a price nobody agreed to - and the money
+            /// has already moved by then. The quote id is part of the receipt.</para>
+            /// </summary>
+            public string quoteId;
         }
 
         private sealed class VerifyResponse
@@ -66,7 +75,8 @@ namespace DeNelle.Wallet
         public static bool HasPending(string sku) =>
             !string.IsNullOrEmpty(PlayerPrefs.GetString(PendingPrefix + sku, string.Empty));
 
-        public static void Remember(PackDef pack, PaymentResult payment, WalletService wallet)
+        public static void Remember(PackDef pack, PaymentResult payment, WalletService wallet,
+                                    string quoteId = null)
         {
             if (pack == null || string.IsNullOrEmpty(payment.TxSignature) || wallet == null)
                 return;
@@ -77,6 +87,7 @@ namespace DeNelle.Wallet
                 txSignature = payment.TxSignature,
                 network = WireNetwork(wallet.Network),
                 currency = payment.Currency.ToString().ToUpperInvariant(),
+                quoteId = quoteId ?? string.Empty,
             };
             PlayerPrefs.SetString(PendingPrefix + pack.Sku, JsonConvert.SerializeObject(row));
             PlayerPrefs.Save();
@@ -123,6 +134,9 @@ namespace DeNelle.Wallet
                 txSignature = pending.txSignature,
                 network = pending.network,
                 currency = pending.currency,
+                // WO-1158: the id of the quote the SERVER issued. It is a LOOKUP KEY, never a
+                // price - the amount lives on the server's own row and is not on this wire at all.
+                quoteId = pending.quoteId ?? string.Empty,
             }));
 
             using var req = new UnityWebRequest(VerifyUrl, "POST")

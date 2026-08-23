@@ -77,6 +77,18 @@ function loadCrypto() {
 // happens inside one user action).
 const NONCE_TTL_SECONDS = 300; // 5 minutes
 
+// WO-1157. A SESSION is a short-lived bearer token issued FROM one burned nonce, so a
+// purchase prompts the wallet ONCE (the transfer) instead of three times (connect, a
+// per-request auth signature, the transfer).
+//
+// ⛔ WHY THIS IS SHORT AND WHY IT MUST STAY SHORT. A per-request signature is bound to
+// that exact request body and therefore cannot be replayed against a different one. A
+// bearer token CAN, until it expires. That is a genuine security reduction, taken
+// deliberately to remove a prompt the player should never have seen -- and it is only
+// acceptable while the window is small. Do NOT raise this for convenience, and do NOT
+// turn it into a permanent login: the whole justification is the size of the window.
+const SESSION_TTL_SECONDS = 900; // 15 minutes
+
 // ── Identity shapes ──────────────────────────────────────────────────────────
 // The wallet regex is deliberately IDENTICAL to the one api/auth/nonce.js applies
 // and to the client's GameStateService.IsCloudIdentityShaped — three copies of
@@ -106,6 +118,11 @@ const AuthCode = {
     NONCE_WRONG_WALLET:     'AUTH_NONCE_WRONG_WALLET',  // nonce exists but was issued to another wallet
     NONCE_REPLAYED:         'AUTH_NONCE_REPLAYED',      // nonce exists, already burned  ← the replay case
     NONCE_EXPIRED:          'AUTH_NONCE_EXPIRED',       // nonce exists, past its 5-minute TTL
+
+    SESSION_UNKNOWN:        'AUTH_SESSION_UNKNOWN',     // no such session row (never issued, revoked, or swept)
+    SESSION_EXPIRED:        'AUTH_SESSION_EXPIRED',     // session exists, past its TTL -- client re-signs ONCE
+    SESSION_WRONG_WALLET:   'AUTH_SESSION_WRONG_WALLET',// session is valid but issued to a DIFFERENT wallet
+    SESSION_MALFORMED:      'AUTH_SESSION_MALFORMED',   // X-Session is not a plausible token
 
     GUEST_HEADER_MISSING:   'GUEST_HEADER_MISSING',     // guest rail, no X-Guest-Id
     GUEST_MISMATCH:         'GUEST_MISMATCH',           // X-Guest-Id != the guest playerId
@@ -190,6 +207,72 @@ async function issueNonce(sql, wallet) {
         expiresAt: rows[0].expires_at,
         ttlSeconds: NONCE_TTL_SECONDS,
     };
+}
+
+const SESSION_RE = /^[A-Za-z0-9_-]{40,90}$/;
+
+/**
+ * Issue a session token for a wallet whose signature has ALREADY been verified and
+ * whose nonce has ALREADY been burned. WO-1157.
+ *
+ * ⛔ THIS FUNCTION DOES NOT AUTHENTICATE ANYTHING. It mints a credential. The caller is
+ * responsible for having proven wallet ownership first -- call it only after a
+ * successful verifyWallet(). Calling it on an unproven wallet hands out that wallet's
+ * identity, which is the one mistake here that matters.
+ */
+async function issueSession(sql, wallet) {
+    const token = crypto.randomBytes(32).toString('base64url');
+
+    // Housekeeping: drop this wallet's dead sessions so the table cannot grow unbounded.
+    // Non-fatal -- a failed prune must never block a login.
+    try {
+        await sql`DELETE FROM auth_sessions WHERE wallet = ${wallet} AND (revoked = TRUE OR expires_at < NOW())`;
+    } catch (_) { /* housekeeping only */ }
+
+    const rows = await sql`
+        INSERT INTO auth_sessions (token, wallet, expires_at)
+        VALUES (${token}, ${wallet}, NOW() + (${SESSION_TTL_SECONDS} * INTERVAL '1 second'))
+        RETURNING token, expires_at
+    `;
+    return { token: rows[0].token, expiresAt: rows[0].expires_at, ttlSeconds: SESSION_TTL_SECONDS };
+}
+
+/**
+ * Verify a bearer session token and bind it to the player being acted on.
+ *
+ * Distinguishes UNKNOWN from EXPIRED on purpose: expired is a normal, recoverable state
+ * the client answers by re-signing once, while unknown means revoked/never-issued and
+ * should not be retried in a loop.
+ */
+async function verifySession(sql, token, claimedPlayerId) {
+    if (!token || !SESSION_RE.test(String(token))) {
+        return { ok: false, code: AuthCode.SESSION_MALFORMED, detail: { len: String(token || '').length } };
+    }
+    let rows;
+    try {
+        rows = await sql`
+            SELECT wallet, revoked, (expires_at < NOW()) AS expired
+            FROM auth_sessions WHERE token = ${token} LIMIT 1
+        `;
+    } catch (e) {
+        return { ok: false, code: AuthCode.SESSION_UNKNOWN, detail: { query_failed: true } };
+    }
+    if (!rows || rows.length === 0) {
+        return { ok: false, code: AuthCode.SESSION_UNKNOWN, detail: { swept_or_never_issued: true } };
+    }
+    const row = rows[0];
+    if (row.revoked === true) return { ok: false, code: AuthCode.SESSION_UNKNOWN, detail: { revoked: true } };
+    if (row.expired === true) return { ok: false, code: AuthCode.SESSION_EXPIRED, detail: {} };
+
+    // ⛔ THE CHECK THAT KEEPS A SESSION FROM BECOMING A SKELETON KEY: a token proves WHICH
+    // wallet, and that wallet must still be the player being acted on. Without this, any
+    // valid session could act for any player id -- the same invariant verifyWallet enforces
+    // via WALLET_MISMATCH, and it must not be weaker just because the proof arrived as a
+    // token instead of a signature.
+    if (claimedPlayerId != null && String(claimedPlayerId) !== String(row.wallet)) {
+        return { ok: false, code: AuthCode.SESSION_WRONG_WALLET, detail: {} };
+    }
+    return { ok: true, wallet: String(row.wallet) };
 }
 
 /**
@@ -297,6 +380,33 @@ async function verifyWallet(sql, headers, payload, claimedPlayerId) {
     const wallet = headers['x-wallet'];
     const nonce = headers['x-nonce'];
     const signature = headers['x-signature'];
+
+    // ── WO-1157: the session rail, tried FIRST when offered ──────────────────────────
+    // A valid session is proof of the same fact the signature proves -- that this caller
+    // holds the wallet's key -- established once, minutes ago, from a burned nonce.
+    //
+    // ⛔ ADDITIVE AND FAIL-CLOSED. A session that is malformed, unknown, revoked, expired
+    // or issued to another wallet does NOT authenticate; it falls through to the signature
+    // path below, which either proves the caller or refuses. There is no branch here that
+    // reaches `ok` without one of the two proofs, and the old path is untouched, so nothing
+    // is forced to migrate.
+    const sessionToken = headers['x-session'];
+    if (sessionToken) {
+        const ses = await verifySession(sql, sessionToken, claimedPlayerId);
+        if (ses.ok) return { ok: true, wallet: ses.wallet, mode: 'wallet', via: 'session' };
+
+        // A WRONG-WALLET token is not a stale credential, it is a token being used against
+        // an identity it was never issued for. Refuse outright rather than letting the
+        // caller retry with headers for the wallet it actually wants.
+        if (ses.code === AuthCode.SESSION_WRONG_WALLET) {
+            return { ok: false, code: ses.code, detail: ses.detail };
+        }
+        // Otherwise fall through: an expired session is an ordinary, recoverable state and
+        // the caller may well have sent signature headers alongside it.
+        if (!wallet || !nonce || !signature) {
+            return { ok: false, code: ses.code, detail: ses.detail };
+        }
+    }
 
     if (!wallet || !nonce || !signature) {
         return {
@@ -523,6 +633,7 @@ async function authenticateGranting(sql, req, payload, claimedPlayerId) {
 }
 
 module.exports = {
+    issueSession, verifySession, SESSION_TTL_SECONDS,
     NONCE_TTL_SECONDS,
     GUEST_WINDOW_SECONDS,
     GUEST_MAX_PER_WINDOW,
