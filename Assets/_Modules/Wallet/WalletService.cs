@@ -232,7 +232,14 @@ namespace DeNelle.Wallet
         // foundation runs devnet, and flipping the realm to mainnet is ONE edit
         // here — and an edit the agent never makes. It ships, and stays, Devnet.
         // Mainnet requires explicit written owner approval (Part 10).
-        public const WalletNetwork DefaultNetwork = WalletNetwork.Devnet;
+        // ⚠ TEMPORARILY MAINNET — flipped 2026-08-23 on EXPLICIT owner instruction ("lets do the
+        // mainnet test", then confirmed against this exact line) for the MON002 1-SKR canary.
+        // ⛔ REVERT TO Devnet THE MOMENT THE CANARY IS DONE. This is the single line that points
+        // the game at real money. It is committed ON ITS OWN so reverting is one commit.
+        // Safety does NOT rest on this line alone: SolanaWalletProvider.SendPayment refuses every
+        // mainnet payment that is not the canary SKU, in SKR, signed by the owner wallet, and the
+        // backend independently allowlists the same SKU+wallet. This flip widens nothing by itself.
+        public const WalletNetwork DefaultNetwork = WalletNetwork.Mainnet;
 
         // ── Treasury (devnet display only) ───────────────────────────────────
         // Public address shown for transparency (spec Week 7 "Rewards Distributor
