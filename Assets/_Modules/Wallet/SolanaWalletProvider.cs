@@ -586,15 +586,52 @@ namespace DeNelle.Wallet
                 return PaymentResult.Failure(packSku, currency,
                     "Mainnet payment refused: this build authorizes only the owner 1 SKR canary.");
 #else
-            // GUARDRAIL (spec Part 10): devnet only. The agent never sets
-            // WalletService.ActiveNetwork to Mainnet, but defend in depth here.
-            if (network == WalletNetwork.Mainnet)
+            // ── GO-LIVE (WO-1159, owner ruling 2026-08-23, explicit) ────────────────────
+            // This branch used to refuse EVERY mainnet payment unconditionally ("the v2
+            // foundation is devnet-only, spec Part 10"). That refusal was step 1 of the
+            // four-step order written in FeatureFlags.cs, and the owner has now taken all
+            // four in sequence: the mainnet decision (explicit), DefaultNetwork off Devnet
+            // (6802e2292), a real signed transaction settled on-chain (the 1-SKR canaries,
+            // success recorded), and only then the flag default.
+            //
+            // ⛔ WHAT AUTHORIZES A MAINNET SALE IS NOT THIS LINE. The authority is the
+            // SERVER-ISSUED QUOTE (WO-1158): api/purchases/quote.js decides which SKUs are
+            // sellable (`quotableSkus`) and at what exact base-unit amount, PackStore fails
+            // CLOSED when no quote comes back, and api/purchases/verify.js re-derives its
+            // exact-equality contract from the persisted quote row and reads NO amount from
+            // the request body. This guard is DEFENCE IN DEPTH behind that, and it is
+            // deliberately written so it CANNOT become a second opinion about price or a
+            // second list of sellable SKUs - the repo's most expensive recurring failure is
+            // one fact written down twice (CLAUDE.md sec.2 WO numbers, sec.5 the assembly
+            // table, sec.16 the R2 push). There is no SKU allowlist here on purpose.
+            //
+            // So it asserts only what a provider can honestly know at this seam:
+            //   - SKR is the rail. It is the only currency with a live mainnet mint
+            //     (WalletEndpoints.SkrMintMainnet) and a server quote contract behind it.
+            //     A USDC/SOL mainnet transfer has no quote row, so /verify could only
+            //     refuse it AFTER settlement - paid-but-not-granted, the exact family
+            //     WO-1158 exists to close.
+            //   - The amount is positive. AmountFor(Skr) returns ZERO when no server quote
+            //     was issued (PackCatalog.cs:293-318), so zero here means "nobody quoted
+            //     this" and a transfer must never be built from it.
+            // The WO-931 stub refusal in WalletService.Pay/PayFlat is untouched and still
+            // runs BEFORE this, so a fabricated wallet can never reach these lines.
+            if (network == WalletNetwork.Mainnet && currency != CurrencyKind.Skr)
                 return PaymentResult.Failure(packSku, currency,
-                    "Mainnet payment blocked — the v2 foundation is devnet-only (spec Part 10).");
+                    "Mainnet purchases settle in SKR. Nothing has been charged.");
+            if (network == WalletNetwork.Mainnet && !(amount > 0d))
+                return PaymentResult.Failure(packSku, currency,
+                    "No server price was issued for this pack, so nothing was charged. Try again in a moment.");
 
-            // The pack-purchase recipient. The §4 Squads multisig revenue
-            // treasuries are not yet provisioned, so devnet transfers land in the
-            // documented dev/staging smoke-test wallet (wallets.json).
+            // The pack-purchase recipient. On mainnet this resolves to
+            // WalletRegistry.MainnetPurchaseRecipientAddress - the Squads treasury vault
+            // 9wbHbKuirtKai5e3ajvdpzdRYVpuxpAH4DUnERkVtBzj, verified OFF-CURVE on chain
+            // 2026-08-23 with its SKR ATA present and the official mint at 6 decimals.
+            // ⚠ That vault's multisig threshold is 1-of-1 (wallets.json:41 says so in its
+            // own words: "ACCEPTABLE FOR THE 1-SKR CANARY, NOT FOR PUBLIC SALES - raise to
+            // 2-of-3 first"). Raising it does NOT change the vault address, so it needs no
+            // edit here - but it is an open owner item, surfaced, not silently passed.
+            // On devnet transfers land in the documented dev/staging smoke-test wallet.
 #endif
             var recipient = network == WalletNetwork.Mainnet
                 ? WalletRegistry.MainnetPurchaseRecipientAddress
