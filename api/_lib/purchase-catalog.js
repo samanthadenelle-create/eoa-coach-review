@@ -148,10 +148,11 @@ function mainnetCanaryEnabled() {
  * MAINNET_CANARY_ENABLED. It is a proof-of-rail, not a sale, and widening sales must
  * never widen it.
  *
- * ⚠ BEFORE FLIPPING MAINNET_SALES_ENABLED FOR THE PUBLIC, the treasury item is still
- * open: the revenue vault's Squads threshold is 1-of-1 (wallets.json — "ACCEPTABLE FOR
- * THE 1-SKR CANARY, NOT FOR PUBLIC SALES - raise to 2-of-3 first"). One key, no
- * co-signer, all revenue.
+ * ⭐ THE TREASURY PRECONDITION IS MET. The revenue vault's Squads threshold is 2-of-3, timeLock 0, RE-VERIFIED ON CHAIN 2026-08-24 (`node tools/treasury-verify.mjs 9wbHbKuirtKai5e3ajvdpzdRYVpuxpAH4DUnERkVtBzj --multisig BcHLoNCsnGD6oegywkP19PALKMQYoFeQWTvmPLmp22no` -> "multisig is 2-of-3, timeLock 0 - production-shaped").
+ * No multisig blocker remains on MAINNET_SALES_ENABLED.
+ *
+ * ⚠ This comment asserted a 1-of-1 blocker until 2026-08-24 and it was STALE. Do not
+ * re-cache a threshold here from any doc - the verifier reads it from chain.
  */
 function mainnetSalesEnabled() {
     return String(process.env.MAINNET_SALES_ENABLED || '').trim().toLowerCase() === 'true';

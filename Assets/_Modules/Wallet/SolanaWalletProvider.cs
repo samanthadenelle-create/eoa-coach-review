@@ -627,10 +627,11 @@ namespace DeNelle.Wallet
             // WalletRegistry.MainnetPurchaseRecipientAddress - the Squads treasury vault
             // 9wbHbKuirtKai5e3ajvdpzdRYVpuxpAH4DUnERkVtBzj, verified OFF-CURVE on chain
             // 2026-08-23 with its SKR ATA present and the official mint at 6 decimals.
-            // ⚠ That vault's multisig threshold is 1-of-1 (wallets.json:41 says so in its
-            // own words: "ACCEPTABLE FOR THE 1-SKR CANARY, NOT FOR PUBLIC SALES - raise to
-            // 2-of-3 first"). Raising it does NOT change the vault address, so it needs no
-            // edit here - but it is an open owner item, surfaced, not silently passed.
+            // That vault's multisig threshold is 2-of-3, timeLock 0 - re-verified on chain
+            // 2026-08-24 by tools/treasury-verify.mjs --multisig. No open treasury item.
+            // ⚠ This comment claimed a 1-of-1 blocker until 2026-08-24 and was STALE. Raising
+            // the threshold changes no address and no code, which is exactly why nothing here
+            // needed editing when it happened - and exactly why the stale claim survived.
             // On devnet transfers land in the documented dev/staging smoke-test wallet.
 #endif
             var recipient = network == WalletNetwork.Mainnet
