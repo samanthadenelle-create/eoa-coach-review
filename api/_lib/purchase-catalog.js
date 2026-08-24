@@ -121,10 +121,53 @@ function mainnetCanaryEnabled() {
     return String(process.env.MAINNET_CANARY_ENABLED || '').trim().toLowerCase() === 'true';
 }
 
+/**
+ * Who may transact on a network.
+ *
+ * ⛔ DEVNET IS OPEN, MAINNET IS NOT. Everything below is the mainnet half.
+ *
+ * ⭐ WIDENED 2026-08-23 (owner ruling, WO-1159 phase 2). Until now mainnet allowed
+ * EXACTLY ONE SKU — the 1-SKR canary — for one wallet. That was correct while the
+ * canary was the only thing being proven, but it silently blocked the whole ladder:
+ * the client shipped go-live (RealmStorePurchase ON, the mainnet payment refusal
+ * replaced) while THIS function still answered canary-only, so every store card read
+ * "Price unavailable" and the two halves of go-live disagreed with the server winning.
+ *
+ * The owner's risk argument, and it holds: the published dApp Store build is still on
+ * the OLD client (Devnet, purchase flag off), so the only mainnet client in existence
+ * is her own sideloaded APK — and every payout resolves to her own treasury.
+ *
+ * ⛔ SO THE WIDENING IS DELIBERATELY NARROW, IN TWO LAYERS:
+ *   1. The OWNER WALLET may buy any sold SKU on mainnet. That is what unblocks her
+ *      test, and it can reach nobody else.
+ *   2. EVERY OTHER WALLET still needs MAINNET_SALES_ENABLED=true — an ENV switch, so
+ *      public mainnet sales can be opened (or shut) without a code change or a deploy
+ *      of this file. It defaults CLOSED: absent env == refused.
+ *
+ * ⚠ The canary keeps its ORIGINAL, STRICTER gate untouched — owner wallet AND
+ * MAINNET_CANARY_ENABLED. It is a proof-of-rail, not a sale, and widening sales must
+ * never widen it.
+ *
+ * ⚠ BEFORE FLIPPING MAINNET_SALES_ENABLED FOR THE PUBLIC, the treasury item is still
+ * open: the revenue vault's Squads threshold is 1-of-1 (wallets.json — "ACCEPTABLE FOR
+ * THE 1-SKR CANARY, NOT FOR PUBLIC SALES - raise to 2-of-3 first"). One key, no
+ * co-signer, all revenue.
+ */
+function mainnetSalesEnabled() {
+    return String(process.env.MAINNET_SALES_ENABLED || '').trim().toLowerCase() === 'true';
+}
+
 function walletAllowed(network, sku, wallet) {
     if (network !== 'mainnet-beta') return true;
-    return sku === MAINNET_CANARY_SKU && mainnetCanaryEnabled() &&
-        String(wallet || '').trim() === MAINNET_CANARY_OWNER;
+    const w = String(wallet || '').trim();
+
+    // The canary is a proof-of-rail, not a sale. Its gate is unchanged and stricter.
+    if (sku === MAINNET_CANARY_SKU) {
+        return mainnetCanaryEnabled() && w === MAINNET_CANARY_OWNER;
+    }
+
+    // A real sale: the owner always; anyone else only behind the env switch.
+    return w === MAINNET_CANARY_OWNER || mainnetSalesEnabled();
 }
 
 /** True when the backend PINS this SKU's on-chain amount (canary, not a sale). */
