@@ -59,7 +59,23 @@ namespace DeNelle.Wallet
         [JsonProperty("recipient")] public string Recipient;
         [JsonProperty("recipientAta")] public string RecipientAta;
         /// <summary>The authored USD ladder anchor (2.99, 4.99 ...). Displayed with a "≈".</summary>
-        [JsonProperty("usdAnchor")] public double UsdAnchor;
+        /// <summary>
+        /// The authored USD ladder anchor (2.99, 4.99 ...). NULLABLE, and it must stay nullable.
+        /// <para>
+        /// ⛔ THIS FIELD WAS <c>double</c> AND IT BLANKED THE WHOLE STORE (fixed 2026-08-24). The
+        /// server's LIST puts the PINNED CANARY row on the shelf beside the real ladder, and
+        /// <c>wirePinned</c> sets <c>usdAnchor: usdAnchor(sku)</c> — which is legitimately NULL for
+        /// the canary, because the canary is deliberately absent from USD_ANCHORS (it is a
+        /// proof-of-rail, not a sale). Newtonsoft cannot put null into a non-nullable double, so it
+        /// threw <c>JsonSerializationException</c> on the WHOLE RESPONSE.
+        /// </para>
+        /// <para>
+        /// ⚠ ONE NULL ON ONE ROW THEREFORE PRICED NOTHING — every pack read "Price unavailable"
+        /// because a single unpriceable canary poisoned the entire list. The row-level guard in
+        /// RefreshPricesAsync exists so that can never again be an all-or-nothing failure.
+        /// </para>
+        /// </summary>
+        [JsonProperty("usdAnchor")] public double? UsdAnchor;
         /// <summary>USD per SKR behind this quote. Null on a pinned canary.</summary>
         [JsonProperty("rate")] public double? Rate;
         /// <summary>WHICH oracle produced the rate — shown at the confirm step.</summary>
@@ -117,7 +133,10 @@ namespace DeNelle.Wallet
             BaseUnits <= 0 ? StoreStringsUnavailable : $"{UiAmount:0.######} SKR";
 
         /// <summary>The USD anchor, marked APPROXIMATE — the dollars float, the SKR does not.</summary>
-        public string UsdApproxLabel => UsdAnchor > 0d ? $"~ ${UsdAnchor:0.00}" : string.Empty;
+        // A null anchor is the pinned canary, which has no USD price by design — render nothing
+        // rather than "~ $0.00", which would read as free.
+        public string UsdApproxLabel =>
+            UsdAnchor.HasValue && UsdAnchor.Value > 0d ? $"~ ${UsdAnchor.Value:0.00}" : string.Empty;
 
         internal const string StoreStringsUnavailable = "Price unavailable";
     }
@@ -186,7 +205,22 @@ namespace DeNelle.Wallet
         public static double UsdAnchorFor(string sku)
         {
             var quote = DisplayPrice(sku);
-            return quote != null ? quote.UsdAnchor : 0d;
+            // A null anchor (the pinned canary) reads as 0 here, same as "no quote" — callers
+            // already treat 0 as "the server did not price this", so the meaning is unchanged.
+            return quote != null && quote.UsdAnchor.HasValue ? quote.UsdAnchor.Value : 0d;
+        }
+
+        /// <summary>
+        /// The list response with its rows still UNPARSED, so each can be converted individually.
+        /// The envelope is strongly typed; only the rows are deferred — a malformed envelope is a
+        /// genuine refusal, while a malformed ROW should cost only that row.
+        /// </summary>
+        private sealed class ListEnvelope
+        {
+            [JsonProperty("success")] public bool Success;
+            [JsonProperty("rate")] public double Rate;
+            [JsonProperty("rateSource")] public string RateSource;
+            [JsonProperty("prices")] public List<Newtonsoft.Json.Linq.JObject> Prices;
         }
 
         private sealed class ListResponse
@@ -229,14 +263,58 @@ namespace DeNelle.Wallet
             var text = await PostAsync(body, playerId, "price list");
             if (text == null) return false;
 
-            ListResponse response = null;
-            try { response = JsonConvert.DeserializeObject<ListResponse>(text); }
-            catch (Exception ex) { FlowTrace.Warn("Store", $"quote list unreadable: {ex.GetType().Name}."); }
-            if (response == null || !response.Success || response.Prices == null)
+            // ⛔ ROW-LEVEL, NOT ALL-OR-NOTHING (2026-08-24). This used to deserialize the whole
+            // response in one call, so ONE unreadable row threw and priced NOTHING. That is exactly
+            // what happened: the server's LIST carries the pinned canary beside the real ladder, the
+            // canary's usdAnchor is legitimately null, the client field was a non-nullable double,
+            // and the resulting JsonSerializationException blanked EVERY pack on the shelf.
+            //
+            // The field is nullable now, so that specific throw is gone — but the SHAPE of the
+            // failure is the real defect and it is the one CLAUDE.md §12 names: "one bad object logs
+            // and is skipped, never silently blanks a screen". A future field the server adds, or a
+            // SKU with an odd value, must cost its own row and nothing more.
+            ListEnvelope envelope = null;
+            try { envelope = JsonConvert.DeserializeObject<ListEnvelope>(text); }
+            catch (Exception ex)
+            {
+                FlowTrace.Warn("Store", $"quote list envelope unreadable: {ex.GetType().Name} — " +
+                                        "no display prices this pass.");
+            }
+            if (envelope == null || !envelope.Success || envelope.Prices == null)
             {
                 FlowTrace.Warn("Store", "quote list REFUSED by the server — no display prices this pass.");
                 return false;
             }
+
+            // Convert each row on its own so a single bad one is logged and skipped.
+            var response = new ListResponse
+            {
+                Success = envelope.Success,
+                Rate = envelope.Rate,
+                RateSource = envelope.RateSource,
+                Prices = new List<PurchaseQuote>(envelope.Prices.Count),
+            };
+            int skipped = 0;
+            for (int i = 0; i < envelope.Prices.Count; i++)
+            {
+                try
+                {
+                    var parsed = envelope.Prices[i]?.ToObject<PurchaseQuote>();
+                    if (parsed != null) response.Prices.Add(parsed);
+                }
+                catch (Exception ex)
+                {
+                    skipped++;
+                    // NEVER SILENT: name the row AND the reason, so the next contract drift is one
+                    // read away instead of a blank shelf with no explanation.
+                    string sku = null;
+                    try { sku = envelope.Prices[i]?["sku"]?.ToString(); } catch { /* best effort */ }
+                    FlowTrace.Warn("Store", $"quote row {i} (sku='{sku ?? "?"}') unreadable: " +
+                                            $"{ex.GetType().Name} — skipped; the rest of the shelf still prices.");
+                }
+            }
+            if (skipped > 0)
+                FlowTrace.Warn("Store", $"{skipped} of {envelope.Prices.Count} quote row(s) were skipped.");
 
             _displayPrices.Clear();
             _displayNetwork = network;
