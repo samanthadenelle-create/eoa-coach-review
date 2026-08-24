@@ -51,10 +51,19 @@ module.exports = async (req, res) => {
         return quietFail(res, 400, AuthCode.WALLET_MALFORMED, ref);
     }
 
+    // ⛔ EVERY 500 BELOW USED TO BE `catch (_)` WITH NO LOG (fixed 2026-08-24). CLAUDE.md §12:
+    // "a catch that swallows without logging is forbidden". The cost was exact and immediate — on
+    // 2026-08-24 this endpoint returned 500 on the owner's device, the client reported
+    // "[BackendAuth] Session mint threw (500)", and the Vercel runtime entry for it was COMPLETELY
+    // EMPTY. Three different failures (DB connect / verify / issue) all looked identical from the
+    // outside, so the one thing needed to diagnose it — WHICH STEP — was the one thing discarded.
+    // The reason string stays out of the RESPONSE (quietFail is deliberate: a 500 must not describe
+    // the server's internals to a caller). It belongs in the log.
     let sql;
     try {
         sql = neon(process.env.DATABASE_URL);
-    } catch (_) {
+    } catch (err) {
+        console.error(`[auth/session] ref=${ref} step=db-connect FAILED:`, err && err.message ? err.message : err);
         return quietFail(res, 500, AuthCode.SERVER_ERROR, ref);
     }
 
@@ -68,7 +77,11 @@ module.exports = async (req, res) => {
     let auth;
     try {
         auth = await verifyWallet(sql, headers, null, wallet);
-    } catch (_) {
+    } catch (err) {
+        // ⚠ A THROW HERE IS USUALLY THE NONCE TABLE, NOT THE SIGNATURE. A bad signature returns
+        // {ok:false} and lands on the 401 below; only an infrastructure fault reaches this catch.
+        console.error(`[auth/session] ref=${ref} step=verify-wallet FAILED:`,
+            err && err.message ? err.message : err);
         return quietFail(res, 500, AuthCode.SERVER_ERROR, ref);
     }
 
@@ -81,7 +94,14 @@ module.exports = async (req, res) => {
     try {
         // auth.wallet, NOT the header — the proven identity, not the claimed one.
         session = await issueSession(sql, auth.wallet);
-    } catch (_) {
+    } catch (err) {
+        // ⚠ PRIME SUSPECT: `auth_sessions` missing from the deployed schema. It is a WO-1157
+        // addition, and this database is already known to be behind — /api/dungeon-status fails with
+        // `relation "dungeon_status" does not exist`, another recent table. A Postgres 42P01 here
+        // means the schema needs applying (psql "$DATABASE_URL" -f api/schema.sql), NOT a code fix.
+        // The code is named in the log so that distinction is one read away instead of a guess.
+        console.error(`[auth/session] ref=${ref} step=issue-session FAILED:`,
+            err && err.code ? `[${err.code}] ` : '', err && err.message ? err.message : err);
         return quietFail(res, 500, AuthCode.SERVER_ERROR, ref);
     }
 
