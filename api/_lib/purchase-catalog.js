@@ -62,10 +62,24 @@ const SKR_DECIMALS_BY_NETWORK = Object.freeze({ 'devnet': 9, 'mainnet-beta': 6 }
 // figure is DERIVED from it at purchase time and is never authored anywhere.
 //
 // ⚠ MIRROR LAW: this table must equal the `pricing.usd` of the canonical client
-// packs.json exactly. test/purchases.verify.test.js proves it on every run. If
-// the two ever disagree, the SERVER's figure is what the player is charged
-// against and what the card must display (§5: two prices on one screen is worse
-// than a stale one).
+// authoring EXACTLY. test/purchases.quote.test.js proves it on every run. If the
+// two ever disagree, the SERVER's figure is what the player is charged against
+// and what the card must display (§5: two prices on one screen is worse than a
+// stale one).
+//
+// ⛔ THE MIRROR HAS TWO SOURCE FILES, NOT ONE — corrected 2026-08-24 (WO-1165 §2).
+// This comment named packs.json alone, and named the wrong test file. Because of
+// that, the Monthly Ledger cards — authored with real `pricing.usd` in
+// battle_monthly.json, 30 days of grants each — sat OUTSIDE this table and
+// outside any check that would have noticed: usdAnchor() -> null ->
+// buildQuoteBody() -> null -> no quote -> unbuyable, silently, on the live rail.
+// The client sources are:
+//   * Assets/{Resources,StreamingAssets}/Data/Canonical/packs.json  -> packs[]
+//   * Assets/{Resources,StreamingAssets}/Data/Canonical/battle_monthly.json
+//                                                        -> monthlyCards[]
+// Adding a sellable SKU to EITHER file without a row here now FAILS the mirror
+// test. Do not add a third authoring file without extending that test in the
+// same edit — an unenforced mirror is a hope, not a law.
 const USD_ANCHORS = Object.freeze({
     'hearth-spark': 1.99,
     'keepers-satchel': 4.99,
@@ -92,6 +106,12 @@ const USD_ANCHORS = Object.freeze({
     'impulse-crystals-small': 1.99,
     'impulse-crystals-medium': 2.99,
     'impulse-crystals-large': 4.99,
+    // ── Monthly Ledger cards (battle_monthly.json `monthlyCards[]`, WO-1165 §2) ──
+    // Read off the canonical file, not off a doc or a work order. A 30-claim pool,
+    // so the grant drips BELOW the storage cap over 30 sessions instead of dumping
+    // above it once, where the overflow is discarded (WO-1165 §3).
+    'monthly-wayfarer': 4.99,
+    'monthly-keeper': 9.99,
 });
 
 // ── Quote lifetime ──────────────────────────────────────────────────────────
