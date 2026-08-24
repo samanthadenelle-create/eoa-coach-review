@@ -179,12 +179,29 @@ function usdAnchor(sku) {
  * This is EXACTLY what the client did before WO-1158 (`SkrValuationOracle
  * .SkrForUsd`) and it is implemented here UNCHANGED so the move to server-issued
  * quotes changes WHO decides the number and not WHAT the number is. It is
- * carried forward, not endorsed: WO-1158 §3 flags the rule as the owner's to
- * rule on and that ruling is still owed. Whoever changes it changes a price.
+ * carried forward, not endorsed: WO-1158 §3 flagged the rule as the owner's to
+ * rule on. Whoever changes it changes a price.
  *
  * The rate used is the 24h LOW, which compounds the same direction: a low
- * denominator yields MORE SKR. Both halves of that are deliberate and both are
+ * denominator yields MORE SKR. Both halves of that are deliberate and both were
  * on the same ruling.
+ *
+ * ⭐ THE RULING LANDED 2026-08-23 (owner, verbatim: "i think low over 24 is ok").
+ * BOTH HALVES STAND — the 24h-low rate source AND the ceil()-to-a-whole-SKR
+ * rounding. This is no longer carried-forward-unendorsed behaviour; it is the
+ * authored pricing policy, and this comment is the record of that.
+ *
+ * The decision was made against measured numbers, not in the abstract. Live at
+ * ruling time: low_24h $0.00755954 vs current_price $0.00803436, so a $2.99 pack
+ * priced at 396 SKR under this policy against 373 SKR at spot — about 6% more,
+ * before ceil() adds its share. WO-1162 §2 proposed replacing this with a short-
+ * lived current/executable quote; that proposal is DECLINED and the ticket's §2
+ * is closed. Re-opening it needs a NEW owner ruling, not a refactor.
+ *
+ * ⛔ WHAT THIS RULING DOES NOT LICENSE: silently drifting the policy in either
+ * direction. It is now pinned by the pricing regressions (freshness, expiry,
+ * rounding, source identity, fail-closed). If a future seat believes spot pricing
+ * is better, that is an argument to put to the owner — not a change to make.
  *
  * @returns {{skr:number, amountBaseUnits:string}|null} base units as a decimal
  *          STRING — the exact integer the client must transfer, never re-derived.
