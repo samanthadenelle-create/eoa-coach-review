@@ -42,6 +42,12 @@ const ALLOWED_HEADERS = [
     'X-Wallet',
     'X-Nonce',
     'X-Signature',
+    // WO-1157 session rail. Read by _lib/wallet-auth.verifyWallet (headers['x-session'])
+    // and probed by save.js / referral/claim.js / promo/redeem.js / bug-report.js.
+    // Missing here, EVERY authenticated web request that offers a session token was
+    // blocked at the preflight before the function ran -- the exact class of bug the
+    // comment above names. Android is a native socket and never saw it.
+    'X-Session',
     'X-Guest-Id',
     'X-Client-Version',
     'X-Trace-Session',

@@ -150,6 +150,66 @@ function quoteRejection(res, code, ref) {
         message: QUOTE_MESSAGES[code] || undefined, ref });
 }
 
+// ============================================================================
+// THE POST-SETTLEMENT DB FAULT -- a THIRD outcome, not a flavour of rejection.
+// ----------------------------------------------------------------------------
+// Every sql call in handler() below runs AFTER the SPL transfer has settled. An
+// SPL transfer CANNOT be reversed. So a database fault at any of those sites
+// lands with the player's money already gone, and it used to surface as a bare
+// unhandled 500 with NO row written anywhere -- the player paid and there was
+// nothing to reconcile from.
+//
+// "The money moved and we failed to record it" is NOT the same outcome as "the
+// payment was invalid", and it must never be reported as one:
+//   rejected      -> state:'rejected', 4xx  -- nothing was granted AND nothing was
+//                    validly paid; the remedy is a fresh quote.
+//   record_failed -> state:'record_failed', 503 -- the payment stands; the remedy
+//                    is RETRY (every write below is idempotent or conflict-safe),
+//                    and failing that, reconciliation by `ref`.
+// 503 is deliberate: it is the only status here that says "transient, retry",
+// and it is distinct from the 400/401/403/409 refusals and the 500s that mean
+// the request never got as far as chain.
+const RECORD_FAILED_MESSAGE =
+    'Your payment went through, but we could not finish recording it just now. ' +
+    'You have NOT been charged twice and nothing is lost -- do not pay again. ' +
+    'Try once more in a moment; if it keeps happening, quote the reference below.';
+
+/**
+ * Run one post-settlement sql call without letting a fault escape as a 500.
+ * Returns {ok:true, rows} or {ok:false, err} -- never throws.
+ */
+async function tryDb(run) {
+    try { return { ok: true, rows: await run() }; }
+    catch (err) { return { ok: false, err: err }; }
+}
+
+/**
+ * Capture a post-settlement DB fault and answer with the retryable outcome.
+ *
+ * NEVER a silent catch (CLAUDE.md 12.2): one console.error for the runtime log
+ * -- readable without DATABASE_URL, which matters because the DB is the thing
+ * that just failed -- plus one durable analytics row. logApiEvent is itself
+ * fully guarded in _lib/audit.js and never throws, so this second attempt at
+ * durability cannot mask the first failure.
+ *
+ * `stage` is what makes the fault ATTRIBUTABLE: it names which of the sites
+ * died, which is the difference between "retry it" and "a payment exists with
+ * no entitlement row, go look".
+ */
+async function recordFailure(sql, res, playerId, ref, stage, err, extra) {
+    let detail = 'unknown';
+    try { detail = String((err && (err.message || err.code)) || 'unknown').slice(0, 400); }
+    catch (_) { /* an unreadable error is still a recorded one */ }
+    try {
+        console.error('[purchase_record_failed] stage=' + stage + ' ref=' + ref +
+            ' id=' + String(playerId || '').slice(0, 12) + ' detail=' + detail);
+    } catch (_) { /* logging must never break the response */ }
+    await logApiEvent(sql, playerId, 'purchase_record_failed',
+        Object.assign({ ref: ref, stage: stage, detail: detail }, extra || {}));
+    return res.status(503).json({ success: false, state: 'record_failed',
+        code: 'record_failed', stage: stage, message: RECORD_FAILED_MESSAGE, ref: ref });
+}
+
 async function handler(req, res) {
     if (applyCors(req, res, 'POST, OPTIONS')) return;
     const ref = newRef();
@@ -196,9 +256,15 @@ async function handler(req, res) {
         return quietFail(res, 401, auth.code, ref);
     }
 
-    const existing = await sql`
+    // SITE 1 -- the idempotency read. Pure SELECT, so a fault here has written
+    // nothing; but the player has already paid, so it is a retry, not a refusal.
+    const existingQ = await tryDb(() => sql`
         SELECT entitlement_id, wallet, sku, network, status, currency, expected_lamports, chain_slot
-        FROM purchase_entitlements WHERE tx_signature = ${signature} LIMIT 1`;
+        FROM purchase_entitlements WHERE tx_signature = ${signature} LIMIT 1`);
+    if (!existingQ.ok)
+        return recordFailure(sql, res, playerId, ref, 'lookup_existing_entitlement',
+            existingQ.err, { sku: sku, network: network });
+    const existing = existingQ.rows;
     if (existing.length) {
         const row = existing[0];
         if (!entitlementMatches(row, playerId, sku, network))
@@ -215,12 +281,20 @@ async function handler(req, res) {
         if (!contract) return quietFail(res, 503, AuthCode.SERVER_ERROR, ref);
     } else {
         if (!QUOTE_REF_RE.test(quoteId)) return quoteRejection(res, 'quote_required', ref);
-        const rows = await sql`
+        // SITE 2 -- the quote read. Pure SELECT. The critical distinction: an
+        // UNREADABLE quote is not an INVALID quote. Letting this fall through to
+        // evaluateQuoteRow(null, ...) would answer 'quote_unknown' and tell a
+        // player who has already paid that their price quote does not exist.
+        const rowsQ = await tryDb(() => sql`
             SELECT quote_ref, wallet, sku, network, currency, amount_base_units, decimals,
                    mint, recipient, recipient_ata, usd_anchor, usd_rate, rate_source,
                    discount_bps, discount_reason,
                    expires_at, consumed_at, consumed_tx
-            FROM purchase_quotes WHERE quote_ref = ${quoteId} LIMIT 1`;
+            FROM purchase_quotes WHERE quote_ref = ${quoteId} LIMIT 1`);
+        if (!rowsQ.ok)
+            return recordFailure(sql, res, playerId, ref, 'lookup_quote',
+                rowsQ.err, { sku: sku, network: network, quoteId: quoteId });
+        const rows = rowsQ.rows;
         quote = rows.length ? rows[0] : null;
         const usable = evaluateQuoteRow(quote, playerId, sku, network, signature);
         if (!usable.ok) {
@@ -255,7 +329,12 @@ async function handler(req, res) {
             // The transfer matched the quoted contract exactly; only the clock is
             // wrong. The money HAS moved, so this is recorded for review rather
             // than dropped on the floor — a lost payment is worse than a slow one.
-            await sql`
+            // SITE 3 -- the WORST of the six. This row IS the reconciliation
+            // record for a payment we are about to refuse to grant on. If it does
+            // not land, the refusal below tells the player "not granted" with
+            // nothing anywhere saying they paid. Idempotent (ON CONFLICT DO
+            // NOTHING), so a retry is safe.
+            const reviewQ = await tryDb(() => sql`
                 INSERT INTO purchase_entitlements
                     (tx_signature, wallet, sku, rail, network, currency, expected_lamports,
                      observed_lamports, recipient, observed_recipient, chain_slot, status,
@@ -264,7 +343,12 @@ async function handler(req, res) {
                         ${contract.amountBaseUnits}, ${contract.amountBaseUnits}, ${contract.recipient},
                         ${contract.recipientAta}, ${chain.slot}, 'manual_review', NOW(),
                         ${quote.quote_ref}, ${quote.usd_anchor}, ${quote.usd_rate}, ${quote.rate_source})
-                ON CONFLICT (tx_signature) DO NOTHING`;
+                ON CONFLICT (tx_signature) DO NOTHING`);
+            if (!reviewQ.ok)
+                return recordFailure(sql, res, playerId, ref, 'record_manual_review',
+                    reviewQ.err, { sku: sku, network: network, quoteId: quoteId,
+                        chainSlot: chain.slot, txSignature: signature,
+                        amountBaseUnits: String(contract.amountBaseUnits) });
             await logApiEvent(sql, playerId, 'purchase_quote_expired_after_payment',
                 { ref, sku, network, quoteId, blockTimeMs: chain.blockTimeMs,
                   expiresAt: quote.expires_at });
@@ -274,12 +358,22 @@ async function handler(req, res) {
         // SINGLE-USE, enforced atomically. The pre-check above is the fast, worded
         // refusal; THIS is the authority — two concurrent verifies for different
         // signatures cannot both win, whatever they each read a moment earlier.
-        const consumed = await sql`
+        // SITE 4 -- the atomic single-use claim. A FAULT here is not a LOST RACE:
+        // zero rows means someone else won, a throw means we never asked. Reporting
+        // the fault as 'quote_already_used' would accuse a paid player of double-
+        // spending a quote nobody consumed. Safe to retry -- the WHERE clause
+        // re-admits this same signature.
+        const consumedQ = await tryDb(() => sql`
             UPDATE purchase_quotes
                SET consumed_at = COALESCE(consumed_at, NOW()), consumed_tx = ${signature}
              WHERE quote_ref = ${quoteId}
                AND (consumed_tx IS NULL OR consumed_tx = ${signature})
-            RETURNING quote_ref`;
+            RETURNING quote_ref`);
+        if (!consumedQ.ok)
+            return recordFailure(sql, res, playerId, ref, 'consume_quote',
+                consumedQ.err, { sku: sku, network: network, quoteId: quoteId,
+                    chainSlot: chain.slot, txSignature: signature });
+        const consumed = consumedQ.rows;
         if (!consumed.length) {
             await logApiEvent(sql, playerId, 'purchase_quote_refused',
                 { ref, sku, network, quoteId, reason: 'quote_already_used' });
@@ -290,7 +384,12 @@ async function handler(req, res) {
     // The row records AMOUNT, RATE, RATE SOURCE and QUOTE ID — the owner's
     // requirement verbatim ("they buy for 3 skr at X price so thats what resolves
     // on db"), and what makes revenue reporting truthful rather than reconstructed.
-    const inserted = await sql`
+    // SITE 5 -- the grant itself. The quote is already consumed at this point, so
+    // a fault here leaves a spent quote, a settled transfer and no entitlement:
+    // the single most expensive state this file can produce. Idempotent
+    // (ON CONFLICT DO NOTHING) and the quote's WHERE re-admits this signature, so
+    // the whole request is safely retryable end to end.
+    const insertedQ = await tryDb(() => sql`
         INSERT INTO purchase_entitlements
             (tx_signature, wallet, sku, rail, network, currency, expected_lamports,
              observed_lamports, recipient, observed_recipient, chain_slot, status, verified_at,
@@ -300,16 +399,31 @@ async function handler(req, res) {
                 ${contract.recipientAta}, ${chain.slot}, 'verified', NOW(),
                 ${quote ? quote.quote_ref : null}, ${quote ? quote.usd_anchor : null},
                 ${quote ? quote.usd_rate : null}, ${quote ? quote.rate_source : 'server-pinned'})
-        ON CONFLICT (tx_signature) DO NOTHING RETURNING entitlement_id`;
+        ON CONFLICT (tx_signature) DO NOTHING RETURNING entitlement_id`);
+    if (!insertedQ.ok)
+        return recordFailure(sql, res, playerId, ref, 'record_entitlement',
+            insertedQ.err, { sku: sku, network: network, quoteId: quoteId || null,
+                chainSlot: chain.slot, txSignature: signature,
+                amountBaseUnits: String(contract.amountBaseUnits) });
+    const inserted = insertedQ.rows;
     // A wallet retry and the original request can verify the same finalized
     // signature concurrently. The UNIQUE constraint is the authority; losing
     // that harmless race must read back the winner, not tell an honest client
     // its already-recorded payment is a conflict.
     if (!inserted.length) {
-        const raced = await sql`
+        // SITE 6 -- the read-back of the race winner. Pure SELECT; the grant row
+        // exists (that is why the insert conflicted), we simply could not read it.
+        // Falling through would answer 409 BAD_PAYLOAD and tell a paid, RECORDED
+        // player their payment conflicts -- the exact confusion this outcome split
+        // exists to prevent.
+        const racedQ = await tryDb(() => sql`
             SELECT entitlement_id, wallet, sku, network, status, currency,
                    expected_lamports, chain_slot
-            FROM purchase_entitlements WHERE tx_signature = ${signature} LIMIT 1`;
+            FROM purchase_entitlements WHERE tx_signature = ${signature} LIMIT 1`);
+        if (!racedQ.ok)
+            return recordFailure(sql, res, playerId, ref, 'readback_raced_entitlement',
+                racedQ.err, { sku: sku, network: network, txSignature: signature });
+        const raced = racedQ.rows;
         if (!raced.length || !entitlementMatches(raced[0], playerId, sku, network))
             return quietFail(res, 409, AuthCode.BAD_PAYLOAD, ref);
         return res.status(200).json(entitlementResponse(raced[0], signature, sku));
@@ -327,4 +441,5 @@ async function handler(req, res) {
 module.exports = handler;
 module.exports.config = { api: { bodyParser: false } };
 module.exports._test = { readFinalizedTransfer, rpcUrl, entitlementMatches, entitlementResponse,
-    evaluateQuoteRow, evaluatePaidQuote, QUOTE_MESSAGES, QUOTE_REF_RE };
+    evaluateQuoteRow, evaluatePaidQuote, QUOTE_MESSAGES, QUOTE_REF_RE,
+    tryDb, recordFailure, RECORD_FAILED_MESSAGE };

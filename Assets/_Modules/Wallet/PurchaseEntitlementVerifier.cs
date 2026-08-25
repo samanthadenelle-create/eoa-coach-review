@@ -1,6 +1,7 @@
 using System;
 using System.Text;
 using Cysharp.Threading.Tasks;
+using DeNelle.Core.Diagnostics;
 using DeNelle.Core.Web3;
 using Newtonsoft.Json;
 using UnityEngine;
@@ -70,6 +71,12 @@ namespace DeNelle.Wallet
             [JsonProperty("txSignature")] public string TxSignature;
             [JsonProperty("entitlementId")] public string EntitlementId;
             [JsonProperty("code")] public string Code;
+            // WO-1076 wave, 2026-08-25: /verify's post-settlement DB guards answer 503 with
+            // state 'record_failed' plus these two. They are the ONLY handle support has on a
+            // payment that settled on chain and failed to write its entitlement row, so they
+            // are carried into the error string rather than dropped.
+            [JsonProperty("stage")] public string Stage;
+            [JsonProperty("ref")] public string Ref;
         }
 
         public static bool HasPending(string sku) =>
@@ -175,6 +182,22 @@ namespace DeNelle.Wallet
                 return new EntitlementVerificationResult(response.State == "fulfilled"
                         ? EntitlementVerificationState.Fulfilled : EntitlementVerificationState.Verified,
                     pending.txSignature, response.EntitlementId);
+            }
+
+            // The money moved and the server could not write its record. This lands as Pending
+            // ANYWAY via the >= 500 branch below, but it is matched EXPLICITLY here for two
+            // reasons: relying on "503 happens to be >= 500" is an implicit coupling that a
+            // later status-code change would silently break into Rejected - i.e. into telling a
+            // player who HAS paid that they have not - and the stage/ref are the only handle
+            // support has for reconciling a settled transfer with no entitlement row.
+            if (string.Equals(response?.State, "record_failed", StringComparison.Ordinal))
+            {
+                string reference = string.IsNullOrEmpty(response.Ref) ? "(no ref)" : response.Ref;
+                FlowTrace.Warn("Store", "verify: payment SETTLED but the server could not record it. "
+                    + "stage=" + (response.Stage ?? "?") + " ref=" + reference
+                    + " tx=" + pending.txSignature + " - retryable, NEVER a rejection.");
+                return new EntitlementVerificationResult(EntitlementVerificationState.Pending,
+                    pending.txSignature, error: "record_failed ref " + reference);
             }
 
             return new EntitlementVerificationResult(

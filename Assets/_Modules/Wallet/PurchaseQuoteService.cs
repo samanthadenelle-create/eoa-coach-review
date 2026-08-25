@@ -136,11 +136,46 @@ namespace DeNelle.Wallet
         public string ExactSkrLabel =>
             BaseUnits <= 0 ? StoreStringsUnavailable : $"{UiAmount:0.######} SKR";
 
+        /// <summary>
+        /// True when the SERVER applied a discount to this quote. The bps figure is the fact;
+        /// <see cref="DiscountLabel"/> is only the copy that describes it, so decisions read the
+        /// number. Mirrors the server's own test (<c>buildQuoteBody</c>): an integer strictly
+        /// between 0 and 10000.
+        /// </summary>
+        public bool IsDiscounted =>
+            DiscountBps.HasValue && DiscountBps.Value > 0 && DiscountBps.Value < 10000;
+
         /// <summary>The USD anchor, marked APPROXIMATE — the dollars float, the SKR does not.</summary>
         // A null anchor is the pinned canary, which has no USD price by design — render nothing
         // rather than "~ $0.00", which would read as free.
-        public string UsdApproxLabel =>
-            UsdAnchor.HasValue && UsdAnchor.Value > 0d ? $"~ ${UsdAnchor.Value:0.00}" : string.Empty;
+        //
+        // ⛔ AND WHEN A DISCOUNT APPLIES THE ANCHOR IS NOT THE PRICE. UsdAnchor is the UNDISCOUNTED
+        // ladder figure: the server computes `quotedUsd = usd * (10000 - bps) / 10000`, prices the
+        // SKR off THAT, and then sends back only `usdAnchor: usd` (api/_lib/purchase-catalog.js
+        // buildQuoteBody). Rendered bare, the confirm screen therefore stated THREE contradictory
+        // numbers at once — a discounted SKR amount, a FULL-PRICE dollar figure, and a line saying a
+        // discount was applied — on the one screen where the player commits real money.
+        //
+        // The fix asserts the OUTCOME, not the intent (docs/INSTRUMENTATION_STANDARD.md §1.4b): the
+        // dollar figure is now WORDED as the pre-discount reference it actually is, so the screen
+        // can no longer state a price the player is not paying.
+        //
+        // ⚠ WHY NOT JUST SHOW THE DISCOUNTED DOLLARS: that would be client price arithmetic, which
+        // is the one thing this file exists to forbid (see the header). Both routes to it are
+        // derivations, not guards — `UsdAnchor * (10000 - DiscountBps) / 10000` is the percentage
+        // arithmetic DiscountLabel's comment already rules out, and `UiAmount * Rate` re-derives a
+        // price from a rate the client must never price against. The server already HAS the number;
+        // when it sends it (as an effective/discounted USD field) this label shows it directly and
+        // the wording below retires. Until then we say less rather than say it wrong.
+        public string UsdApproxLabel
+        {
+            get
+            {
+                if (!UsdAnchor.HasValue || UsdAnchor.Value <= 0d) return string.Empty;
+                string usd = $"~ ${UsdAnchor.Value:0.00}";
+                return IsDiscounted ? $"{usd} before discount" : usd;
+            }
+        }
 
         internal const string StoreStringsUnavailable = "Price unavailable";
     }
@@ -405,6 +440,9 @@ namespace DeNelle.Wallet
             _displayPrices[quote.Sku] = quote;   // the shelf now shows the number we will actually charge
             FlowTrace.Step("Store", $"quote ISSUED '{quote.Sku}': {quote.AmountBaseUnits} base units " +
                                     $"({quote.ExactSkrLabel}) anchor ${quote.UsdAnchor:0.00} " +
+                                    // The anchor alone reads as the price; say plainly whether the
+                                    // SKR above was priced off it or off a discounted figure.
+                                    $"{(quote.IsDiscounted ? $"DISCOUNTED {quote.DiscountBps}bps (anchor is NOT the price) " : "no discount ")}" +
                                     $"rate {(quote.Rate.HasValue ? quote.Rate.Value.ToString("0.########") : "pinned")} " +
                                     $"src '{quote.RateSource}' id {quote.QuoteId ?? "<pinned>"} expires {quote.ExpiresAt ?? "never"}.");
             return new PurchaseQuoteResult(quote);
