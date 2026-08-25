@@ -81,7 +81,7 @@ const SKR_DECIMALS_BY_NETWORK = Object.freeze({ 'devnet': 9, 'mainnet-beta': 6 }
 // test. Do not add a third authoring file without extending that test in the
 // same edit — an unenforced mirror is a hope, not a law.
 const USD_ANCHORS = Object.freeze({
-    'hearth-spark': 1.99,
+    'hearth-spark': 4.99,
     'keepers-satchel': 4.99,
     'folks-thanks': 9.99,
     'patron-of-elarion': 19.99,
