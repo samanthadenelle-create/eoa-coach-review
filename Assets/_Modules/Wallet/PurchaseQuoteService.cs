@@ -76,6 +76,14 @@ namespace DeNelle.Wallet
         /// </para>
         /// </summary>
         [JsonProperty("usdAnchor")] public double? UsdAnchor;
+        /// <summary>
+        /// Server-computed USD display price used to derive AmountBaseUnits.
+        /// Never derive it from the anchor, discount, token amount, or rate here.
+        /// Null on pinned canaries, which have no USD price by design.
+        /// </summary>
+        [JsonProperty("usdEffective")] public double? UsdEffective;
+        /// <summary>Server-computed dollar saving; null when this is not a sale.</summary>
+        [JsonProperty("usdSaving")] public double? UsdSaving;
         /// <summary>Server-issued basis points off the anchor; null means no discount.</summary>
         [JsonProperty("discountBps")] public int? DiscountBps;
         /// <summary>Server-authored display copy; the client performs no percentage arithmetic.</summary>
@@ -175,37 +183,28 @@ namespace DeNelle.Wallet
         public bool IsDiscounted =>
             DiscountBps.HasValue && DiscountBps.Value > 0 && DiscountBps.Value < 10000;
 
-        /// <summary>The USD anchor, marked APPROXIMATE — the dollars float, the SKR does not.</summary>
-        // A null anchor is the pinned canary, which has no USD price by design — render nothing
-        // rather than "~ $0.00", which would read as free.
-        //
-        // ⛔ AND WHEN A DISCOUNT APPLIES THE ANCHOR IS NOT THE PRICE. UsdAnchor is the UNDISCOUNTED
-        // ladder figure: the server computes `quotedUsd = usd * (10000 - bps) / 10000`, prices the
-        // SKR off THAT, and then sends back only `usdAnchor: usd` (api/_lib/purchase-catalog.js
-        // buildQuoteBody). Rendered bare, the confirm screen therefore stated THREE contradictory
-        // numbers at once — a discounted SKR amount, a FULL-PRICE dollar figure, and a line saying a
-        // discount was applied — on the one screen where the player commits real money.
-        //
-        // The fix asserts the OUTCOME, not the intent (docs/INSTRUMENTATION_STANDARD.md §1.4b): the
-        // dollar figure is now WORDED as the pre-discount reference it actually is, so the screen
-        // can no longer state a price the player is not paying.
-        //
-        // ⚠ WHY NOT JUST SHOW THE DISCOUNTED DOLLARS: that would be client price arithmetic, which
-        // is the one thing this file exists to forbid (see the header). Both routes to it are
-        // derivations, not guards — `UsdAnchor * (10000 - DiscountBps) / 10000` is the percentage
-        // arithmetic DiscountLabel's comment already rules out, and `UiAmount * Rate` re-derives a
-        // price from a rate the client must never price against. The server already HAS the number;
-        // when it sends it (as an effective/discounted USD field) this label shows it directly and
-        // the wording below retires. Until then we say less rather than say it wrong.
+        /// <summary>The effective server price, marked approximate - dollars float, SKR does not.</summary>
+        // A discounted quote without usdEffective fails closed to no dollar display. Falling back
+        // to UsdAnchor would resurrect the contradictory full-price label this ticket closes.
         public string UsdApproxLabel
         {
             get
             {
-                if (!UsdAnchor.HasValue || UsdAnchor.Value <= 0d) return string.Empty;
-                string usd = $"~ ${UsdAnchor.Value:0.00}";
-                return IsDiscounted ? $"{usd} before discount" : usd;
+                double? served = UsdEffective;
+                if (!served.HasValue && !IsDiscounted) served = UsdAnchor;
+                return served.HasValue && served.Value > 0d ? $"~ ${served.Value:0.00}" : string.Empty;
             }
         }
+
+        /// <summary>
+        /// Sale proof in words and digits. Every number is transported from the server;
+        /// this formatter performs no price or percentage arithmetic.
+        /// </summary>
+        public string UsdSavingLabel =>
+            IsDiscounted && UsdAnchor.HasValue && UsdAnchor.Value > 0d &&
+            UsdSaving.HasValue && UsdSaving.Value > 0d
+                ? $"was ${UsdAnchor.Value:0.00} - save ${UsdSaving.Value:0.00}"
+                : string.Empty;
 
         internal const string StoreStringsUnavailable = "Price unavailable";
     }

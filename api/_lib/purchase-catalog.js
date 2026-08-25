@@ -353,6 +353,10 @@ function buildQuoteBody(network, sku, rate, discountBps = null) {
         recipient: rail.recipient,
         recipientAta: rail.recipientAta,
         usdAnchor: usd,
+        // Display facts from the same server calculation that priced amountBaseUnits.
+        // The client may format these; it may never derive either one.
+        usdEffective: quotedUsd,
+        usdSaving: hasDiscount ? usd - quotedUsd : null,
         discountBps: hasDiscount ? bps : null,
         discountLabel: hasDiscount ? `${bps / 100}% shortfall discount` : null,
         rate: rate.usdPerSkr,
