@@ -129,6 +129,7 @@ namespace DeNelle.Wallet
             }
             catch
             {
+                FlowTrace.Fail("Store", "verify_pending: pending_record_parse_failed.");
                 return new EntitlementVerificationResult(EntitlementVerificationState.Unavailable, null,
                     error: "The pending purchase record is unreadable; contact support before paying again.");
             }
@@ -181,7 +182,11 @@ namespace DeNelle.Wallet
 
             VerifyResponse response = null;
             try { response = JsonConvert.DeserializeObject<VerifyResponse>(req.downloadHandler.text); }
-            catch { /* handled as unavailable below */ }
+            catch
+            {
+                FlowTrace.Fail("Store", "verify_pending: response_parse_failed.");
+                /* handled as unavailable below */
+            }
 
             if (req.responseCode == 202 || string.Equals(response?.State, "pending", StringComparison.Ordinal))
                 return new EntitlementVerificationResult(EntitlementVerificationState.Pending,
@@ -247,13 +252,21 @@ namespace DeNelle.Wallet
             if (!await BackendRequestSigner.TryAttachAsync(req, playerId, body))
                 return new EntitlementVerificationResult(EntitlementVerificationState.Unavailable, null);
             try { await req.SendWebRequest(); }
-            catch { return new EntitlementVerificationResult(EntitlementVerificationState.Unavailable, null); }
+            catch
+            {
+                FlowTrace.Fail("Store", "reconcile: request_failed.");
+                return new EntitlementVerificationResult(EntitlementVerificationState.Unavailable, null);
+            }
             if (req.result != UnityWebRequest.Result.Success)
                 return new EntitlementVerificationResult(EntitlementVerificationState.Unavailable, null);
 
             VerifyResponse response = null;
             try { response = JsonConvert.DeserializeObject<VerifyResponse>(req.downloadHandler.text); }
-            catch { return new EntitlementVerificationResult(EntitlementVerificationState.Unavailable, null); }
+            catch
+            {
+                FlowTrace.Fail("Store", "reconcile: response_parse_failed.");
+                return new EntitlementVerificationResult(EntitlementVerificationState.Unavailable, null);
+            }
             string expectedNetwork = WireNetwork(wallet.Network);
             if (response != null && response.Success &&
                 (response.State == "verified" || response.State == "fulfilled") &&
@@ -289,7 +302,11 @@ namespace DeNelle.Wallet
                     !string.Equals(pending.playerId, wallet.Account.Address, StringComparison.Ordinal))
                     return false;
             }
-            catch { return false; }
+            catch
+            {
+                FlowTrace.Fail("Store", "mark_fulfilled: pending_record_parse_failed.");
+                return false;
+            }
 
             byte[] body = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(new
             {
@@ -308,11 +325,19 @@ namespace DeNelle.Wallet
             req.SetRequestHeader("Accept", "application/json");
             if (!await BackendRequestSigner.TryAttachAsync(req, pending.playerId, body)) return false;
             try { await req.SendWebRequest(); }
-            catch { return false; }
+            catch
+            {
+                FlowTrace.Fail("Store", "mark_fulfilled: request_failed.");
+                return false;
+            }
 
             VerifyResponse response = null;
             try { response = JsonConvert.DeserializeObject<VerifyResponse>(req.downloadHandler.text); }
-            catch { return false; }
+            catch
+            {
+                FlowTrace.Fail("Store", "mark_fulfilled: response_parse_failed.");
+                return false;
+            }
             if (req.responseCode != 200 || req.result != UnityWebRequest.Result.Success ||
                 response == null || !response.Success || response.State != "fulfilled" ||
                 !string.Equals(response.Sku, sku, StringComparison.Ordinal) ||
