@@ -18,13 +18,27 @@ namespace DeNelle.Wallet
         public readonly string EntitlementId;
         public readonly string Error;
 
+        /// <summary>
+        /// The SERVER-ISSUED support reference for a settled-but-unrecorded payment (503
+        /// <c>state: "record_failed"</c>), and the stage its write died at.
+        /// <para>⛔ THEY ARE STRUCTURED FIELDS, NOT ONLY TEXT INSIDE <see cref="Error"/> (WO-1188).
+        /// The give-up screen has to be able to PRINT the reference to the player, and a screen that
+        /// had to substring it back out of a diagnostic sentence would silently stop printing it the
+        /// first time that sentence was reworded. Empty when the server supplied none.</para>
+        /// </summary>
+        public readonly string Reference;
+        public readonly string Stage;
+
         public EntitlementVerificationResult(EntitlementVerificationState state, string signature,
-                                             string entitlementId = null, string error = null)
+                                             string entitlementId = null, string error = null,
+                                             string reference = null, string stage = null)
         {
             State = state;
             TransactionSignature = signature;
             EntitlementId = entitlementId;
             Error = error;
+            Reference = reference;
+            Stage = stage;
         }
     }
 
@@ -197,7 +211,8 @@ namespace DeNelle.Wallet
                     + "stage=" + (response.Stage ?? "?") + " ref=" + reference
                     + " tx=" + pending.txSignature + " - retryable, NEVER a rejection.");
                 return new EntitlementVerificationResult(EntitlementVerificationState.Pending,
-                    pending.txSignature, error: "record_failed ref " + reference);
+                    pending.txSignature, error: "record_failed ref " + reference,
+                    reference: response.Ref, stage: response.Stage);
             }
 
             return new EntitlementVerificationResult(
