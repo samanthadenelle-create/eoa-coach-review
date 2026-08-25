@@ -335,11 +335,14 @@ function _resetRateCache() { _rateCache = null; _rateInFlight = null; }
  * caller persists it and stamps the id/expiry.
  * @returns {object|null} null when the SKU is not sold on this network.
  */
-function buildQuoteBody(network, sku, rate) {
+function buildQuoteBody(network, sku, rate, discountBps = null) {
     const rail = purchaseRail(network);
     const usd = usdAnchor(sku);
     if (!rail || usd == null || !rate || !(rate.usdPerSkr > 0)) return null;
-    const amount = quoteAmount(usd, rate.usdPerSkr, rail.decimals);
+    const bps = discountBps;
+    const hasDiscount = typeof bps === 'number' && Number.isInteger(bps) && bps > 0 && bps < 10_000;
+    const quotedUsd = hasDiscount ? usd * (10_000 - bps) / 10_000 : usd;
+    const amount = quoteAmount(quotedUsd, rate.usdPerSkr, rail.decimals);
     if (!amount) return null;
     return {
         sku, network, currency: 'SKR',
@@ -350,6 +353,8 @@ function buildQuoteBody(network, sku, rate) {
         recipient: rail.recipient,
         recipientAta: rail.recipientAta,
         usdAnchor: usd,
+        discountBps: hasDiscount ? bps : null,
+        discountLabel: hasDiscount ? `${bps / 100}% shortfall discount` : null,
         rate: rate.usdPerSkr,
         rateSource: rate.source,
     };

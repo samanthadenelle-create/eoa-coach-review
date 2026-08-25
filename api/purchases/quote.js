@@ -52,8 +52,17 @@ const RATE_UNAVAILABLE_MESSAGE =
     'Nothing has been charged. Try again in a moment.';
 const SKU_UNAVAILABLE_MESSAGE =
     'That pack is not on sale on this network right now. Nothing has been charged.';
+const SHORTFALL_DISCOUNT_BPS = 2000;
+const DISCOUNT_WINDOW_DAYS = 7;
+const SHORTFALL_REASON_HINT = 'repair_shortfall';
+const SHORTFALL_REASON_SERVER = 'repair_shortfall';
 
 function quoteRef() { return crypto.randomBytes(16).toString('hex'); }
+
+function discountBpsForReason(reasonHint, discountedRecently) {
+    return reasonHint === SHORTFALL_REASON_HINT && discountedRecently === false
+        ? SHORTFALL_DISCOUNT_BPS : null;
+}
 
 /** The wire shape of one priced row. Same field names in both modes on purpose. */
 function wireQuote(body, extra) {
@@ -68,6 +77,8 @@ function wireQuote(body, extra) {
         recipient: body.recipient,
         recipientAta: body.recipientAta,
         usdAnchor: body.usdAnchor,
+        discountBps: body.discountBps,
+        discountLabel: body.discountLabel,
         rate: body.rate,
         rateSource: body.rateSource,
         pinned: false,
@@ -110,6 +121,9 @@ async function handler(req, res) {
     const playerId = String(body.playerId || '').trim();
     const network = String(body.network || '').trim().toLowerCase();
     const sku = String(body.sku || '').trim();          // absent ⇒ LIST mode
+    // Logged hint, never authorization. Forging it buys the same single-window
+    // discount as a genuine shortfall and cannot summon another one.
+    const reasonHint = String(body.reason || '').trim().toLowerCase();
     if (!playerId || (network !== 'devnet' && network !== 'mainnet-beta'))
         return quietFail(res, 400, AuthCode.BAD_PAYLOAD, ref);
     if (sku && !walletAllowed(network, sku, playerId))
@@ -169,7 +183,22 @@ async function handler(req, res) {
     }
 
     // ── QUOTE mode: one binding, single-use, expiring row. ───────────────────
-    const built = buildQuoteBody(network, sku, rate);
+    const wantsShortfallDiscount = reasonHint === SHORTFALL_REASON_HINT;
+    let discountedRecently = true;
+    if (wantsShortfallDiscount) {
+        try {
+            const prior = await sql`
+                SELECT EXISTS (
+                    SELECT 1 FROM purchase_quotes
+                    WHERE wallet = ${playerId}
+                      AND discount_bps IS NOT NULL
+                      AND issued_at >= NOW() - (${DISCOUNT_WINDOW_DAYS} * INTERVAL '1 day')
+                ) AS issued`;
+            discountedRecently = !prior || !prior.length || prior[0].issued === true;
+        } catch (_) { return quietFail(res, 500, AuthCode.SERVER_ERROR, ref); }
+    }
+    let discountBps = discountBpsForReason(reasonHint, discountedRecently);
+    let built = buildQuoteBody(network, sku, rate, discountBps);
     if (!built) {
         await logApiEvent(sql, playerId, 'purchase_quote_refused',
             { ref, sku, network, reason: 'contract_unavailable' });
@@ -180,16 +209,45 @@ async function handler(req, res) {
     const quoteId = quoteRef();
     let inserted;
     try {
-        inserted = await sql`
-            INSERT INTO purchase_quotes
-                (quote_ref, wallet, sku, network, currency, amount_base_units, decimals,
-                 mint, recipient, recipient_ata, usd_anchor, usd_rate, rate_source, expires_at)
-            VALUES (${quoteId}, ${playerId}, ${sku}, ${network}, ${built.currency},
-                    ${built.amountBaseUnits}, ${built.decimals}, ${built.mint},
-                    ${built.recipient}, ${built.recipientAta}, ${built.usdAnchor},
-                    ${built.rate}, ${built.rateSource},
-                    NOW() + (${QUOTE_TTL_SECONDS} * INTERVAL '1 second'))
-            RETURNING quote_ref, expires_at`;
+        if (discountBps != null) {
+            // Serializable predicate authority: simultaneous requests that both observe an empty
+            // window cannot both commit. A serialization loser fails closed and may retry at the
+            // ordinary price after the winner is visible.
+            const discountedTx = await sql.transaction([sql`
+                INSERT INTO purchase_quotes
+                    (quote_ref, wallet, sku, network, currency, amount_base_units, decimals,
+                     mint, recipient, recipient_ata, usd_anchor, usd_rate, rate_source,
+                     discount_bps, discount_reason, expires_at)
+                SELECT ${quoteId}, ${playerId}, ${sku}, ${network}, ${built.currency},
+                       ${built.amountBaseUnits}, ${built.decimals}, ${built.mint},
+                       ${built.recipient}, ${built.recipientAta}, ${built.usdAnchor},
+                       ${built.rate}, ${built.rateSource}, ${discountBps},
+                       ${SHORTFALL_REASON_SERVER},
+                       NOW() + (${QUOTE_TTL_SECONDS} * INTERVAL '1 second')
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM purchase_quotes
+                    WHERE wallet = ${playerId}
+                      AND discount_bps IS NOT NULL
+                      AND issued_at >= NOW() - (${DISCOUNT_WINDOW_DAYS} * INTERVAL '1 day'))
+                RETURNING quote_ref, expires_at`], { isolationLevel: 'Serializable' });
+            inserted = discountedTx[0];
+        }
+        if (!inserted || !inserted.length) {
+            // Already in-window or lost a concurrent race: issue an ordinary quote.
+            discountBps = null;
+            built = buildQuoteBody(network, sku, rate, null);
+            inserted = await sql`
+                INSERT INTO purchase_quotes
+                    (quote_ref, wallet, sku, network, currency, amount_base_units, decimals,
+                     mint, recipient, recipient_ata, usd_anchor, usd_rate, rate_source,
+                     discount_bps, discount_reason, expires_at)
+                VALUES (${quoteId}, ${playerId}, ${sku}, ${network}, ${built.currency},
+                        ${built.amountBaseUnits}, ${built.decimals}, ${built.mint},
+                        ${built.recipient}, ${built.recipientAta}, ${built.usdAnchor},
+                        ${built.rate}, ${built.rateSource}, NULL, NULL,
+                        NOW() + (${QUOTE_TTL_SECONDS} * INTERVAL '1 second'))
+                RETURNING quote_ref, expires_at`;
+        }
     } catch (_) { return quietFail(res, 500, AuthCode.SERVER_ERROR, ref); }
     if (!inserted || !inserted.length) return quietFail(res, 500, AuthCode.SERVER_ERROR, ref);
 
@@ -198,7 +256,9 @@ async function handler(req, res) {
     // the row, so a disputed charge can be reconstructed months later.
     await logApiEvent(sql, playerId, 'purchase_quote_issued', { ref, sku, network,
         quoteId, amountBaseUnits: built.amountBaseUnits, usdAnchor: built.usdAnchor,
-        rate: built.rate, rateSource: built.rateSource });
+        rate: built.rate, rateSource: built.rateSource, discountBps: built.discountBps,
+        discountReason: built.discountBps != null ? SHORTFALL_REASON_SERVER : null,
+        reasonHint: reasonHint || null });
 
     return res.status(200).json({ success: true, mode: 'quote',
         quote: wireQuote(built, { quoteId,
@@ -207,4 +267,6 @@ async function handler(req, res) {
 
 module.exports = handler;
 module.exports.config = { api: { bodyParser: false } };
-module.exports._test = { wireQuote, wirePinned, RATE_UNAVAILABLE_MESSAGE, SKU_UNAVAILABLE_MESSAGE };
+module.exports._test = { wireQuote, wirePinned, RATE_UNAVAILABLE_MESSAGE, SKU_UNAVAILABLE_MESSAGE,
+    SHORTFALL_DISCOUNT_BPS, DISCOUNT_WINDOW_DAYS, SHORTFALL_REASON_HINT,
+    discountBpsForReason };

@@ -218,6 +218,7 @@ async function handler(req, res) {
         const rows = await sql`
             SELECT quote_ref, wallet, sku, network, currency, amount_base_units, decimals,
                    mint, recipient, recipient_ata, usd_anchor, usd_rate, rate_source,
+                   discount_bps, discount_reason,
                    expires_at, consumed_at, consumed_tx
             FROM purchase_quotes WHERE quote_ref = ${quoteId} LIMIT 1`;
         quote = rows.length ? rows[0] : null;

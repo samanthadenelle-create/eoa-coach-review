@@ -76,6 +76,10 @@ namespace DeNelle.Wallet
         /// </para>
         /// </summary>
         [JsonProperty("usdAnchor")] public double? UsdAnchor;
+        /// <summary>Server-issued basis points off the anchor; null means no discount.</summary>
+        [JsonProperty("discountBps")] public int? DiscountBps;
+        /// <summary>Server-authored display copy; the client performs no percentage arithmetic.</summary>
+        [JsonProperty("discountLabel")] public string DiscountLabel;
         /// <summary>USD per SKR behind this quote. Null on a pinned canary.</summary>
         [JsonProperty("rate")] public double? Rate;
         /// <summary>WHICH oracle produced the rate — shown at the confirm step.</summary>
@@ -336,7 +340,8 @@ namespace DeNelle.Wallet
         /// opened and paid against ten minutes later is the expired-after-payment case, which costs
         /// the player real money and us a manual review.</para>
         /// </summary>
-        public static async UniTask<PurchaseQuoteResult> RequestQuoteAsync(PackDef pack, WalletService wallet)
+        public static async UniTask<PurchaseQuoteResult> RequestQuoteAsync(PackDef pack, WalletService wallet,
+            string reason = null)
         {
             using var _ = FlowTrace.Enter("Store", $"PurchaseQuote.Request '{pack?.Sku ?? "<null>"}'");
             if (pack == null || string.IsNullOrEmpty(pack.Sku))
@@ -350,7 +355,7 @@ namespace DeNelle.Wallet
             string playerId = wallet.Account.Address;
             string network = WireNetwork(wallet.Network);
             byte[] body = Encoding.UTF8.GetBytes(
-                JsonConvert.SerializeObject(new { playerId, network, sku = pack.Sku }));
+                JsonConvert.SerializeObject(new { playerId, network, sku = pack.Sku, reason }));
 
             FlowTrace.Step("Store", $"quote REQUESTED for '{pack.Sku}' on {network}.");
             var text = await PostAsync(body, playerId, $"quote '{pack.Sku}'");
