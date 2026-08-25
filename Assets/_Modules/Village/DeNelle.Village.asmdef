@@ -23,6 +23,7 @@
         "Unity.AI.Navigation",
         "Unity.Addressables",
         "Unity.ResourceManager",
+        "Unity.Notifications.Unified",
         "OffsetForge.Runtime"
     ],
     "includePlatforms": [],
