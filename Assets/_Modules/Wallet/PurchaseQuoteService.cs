@@ -88,6 +88,36 @@ namespace DeNelle.Wallet
         [JsonProperty("pinned")] public bool Pinned;
         [JsonProperty("expiresAt")] public string ExpiresAt;
 
+        /// <summary>
+        /// Server ADVISORY: may this viewer buy this row? Sent on the public LIST only (WO-1190).
+        /// <para>NULLABLE ON PURPOSE. Null means the server did not say — which is every BINDING
+        /// quote, because a binding quote only exists for a row the server already agreed to sell.
+        /// So null reads as sellable (see <see cref="IsSellable"/>).</para>
+        /// <para>⛔ THIS IS NOT AUTHORIZATION AND MUST NEVER BE TREATED AS ANY. It exists so the
+        /// card can print a real price with a DISABLED buy control and a WORDED reason, instead of
+        /// vanishing from the shelf. What is actually sellable is decided by the server on the
+        /// binding quote and again at /verify, against a PROVEN wallet. A client that believed this
+        /// field and pressed Buy anyway is simply refused there, with money untouched.</para>
+        /// </summary>
+        [JsonProperty("sellable")] public bool? Sellable;
+
+        /// <summary>
+        /// The server's player-readable sentence for WHY this row cannot be bought right now.
+        /// <para>⛔ WORDS, NEVER COLOUR. The owner is red/green colourblind, so a greyed button with
+        /// no sentence conveys nothing at all. Server-authored so the shelf's wording cannot drift
+        /// from the gate that produced it.</para>
+        /// </summary>
+        [JsonProperty("sellableReason")] public string SellableReason;
+
+        /// <summary>
+        /// True when nothing the server told us forbids buying this row.
+        /// <para>Absent field ⇒ true, which is the correct default in BOTH directions: a binding
+        /// quote never carries the field, and an OLDER server that does not send it yet leaves the
+        /// shelf exactly as it behaves today — the refusal then lands at the binding quote, worded,
+        /// with nothing charged. The client never invents a sellable-SKU allowlist of its own.</para>
+        /// </summary>
+        public bool IsSellable => !Sellable.HasValue || Sellable.Value;
+
         /// <summary>Parsed base units, or 0 when the server sent something unusable.</summary>
         public long BaseUnits =>
             long.TryParse(AmountBaseUnits, out var v) && v > 0 ? v : 0L;
@@ -211,6 +241,10 @@ namespace DeNelle.Wallet
             "We could not price this pack right now. Nothing has been charged.";
         public const string WalletRequiredMessage =
             "Connect a signing wallet before we can quote a price.";
+        /// <summary>Last-resort wording when the server marked a row unsellable but sent no sentence.
+        /// ⛔ There is always a sentence — a disabled button with no words explains nothing.</summary>
+        public const string NotSellableFallbackMessage =
+            "This pack cannot be bought right now.";
 
         // The last LIST response, keyed by sku. Display only — never paid against.
         private static readonly Dictionary<string, PurchaseQuote> _displayPrices =
@@ -238,6 +272,33 @@ namespace DeNelle.Wallet
         {
             var quote = DisplayPrice(sku);
             return quote != null ? quote.UiAmount : 0d;
+        }
+
+        /// <summary>
+        /// May this viewer buy this SKU, as far as the server has said? Display gating only.
+        /// <para>⛔ TRUE HERE IS NOT PERMISSION TO CHARGE. It only decides whether the buy control
+        /// is live; the binding quote is still the authority and still refuses. A SKU we hold no
+        /// display price for reads TRUE, because "we have no price yet" is not "you may not buy" —
+        /// the card already says "Price unavailable" for that case and the till still gates it.</para>
+        /// </summary>
+        public static bool IsSellable(string sku)
+        {
+            var quote = DisplayPrice(sku);
+            return quote == null || quote.IsSellable;
+        }
+
+        /// <summary>
+        /// The server's WORDED reason this SKU cannot be bought right now, or empty when it can.
+        /// <para>⛔ THE CARD MUST PRINT THIS BESIDE THE PRICE whenever <see cref="IsSellable"/> is
+        /// false. Never a blank shelf, never a bare "Price unavailable", never a greyed control
+        /// whose only explanation is its colour (the owner is red/green colourblind).</para>
+        /// </summary>
+        public static string SellableReasonFor(string sku)
+        {
+            var quote = DisplayPrice(sku);
+            if (quote == null || quote.IsSellable) return string.Empty;
+            return string.IsNullOrEmpty(quote.SellableReason)
+                ? NotSellableFallbackMessage : quote.SellableReason;
         }
 
         /// <summary>The server's USD anchor for a SKU, or 0. §5: when they disagree, the server wins.</summary>
@@ -285,21 +346,40 @@ namespace DeNelle.Wallet
         /// Refreshes the shelf's display prices from the server. Binds nothing and charges nothing.
         /// Returns false (and leaves the cache alone) whenever the server would not price — the
         /// caller keeps showing whatever honest state it already had.
+        ///
+        /// <para>⛔ BROWSING MUST NOT AUTHENTICATE (WO-1190). This path used to REFUSE without
+        /// <c>IsRealSigningWallet</c> and then POST through <see cref="BackendRequestSigner"/>,
+        /// which mints a backend session FROM A WALLET SIGNATURE when it holds none. So opening the
+        /// store popped an authorization prompt — for a read whose own doc comment says it binds
+        /// nothing and charges nothing. A shelf shows prices; eligibility is checked at the till.</para>
+        ///
+        /// <para><paramref name="wallet"/> may be null or unconnected. When there is a real signing
+        /// wallet we still SEND its address, unsigned — not to authorize anything, but so the server
+        /// can word each row's <c>sellableReason</c> for this specific viewer. Without one we ask on
+        /// <see cref="WalletService.DefaultNetwork"/> and get the public ladder.</para>
+        ///
+        /// <para>⛔ WHAT DID NOT CHANGE: <see cref="RequestQuoteAsync"/> — the BINDING quote — is
+        /// untouched. It still demands a real signing wallet, still authenticates, and is still
+        /// called as LATE as possible. The first wallet interaction now happens when the player
+        /// commits to buying, which is exactly where it already lived.</para>
         /// </summary>
         public static async UniTask<bool> RefreshPricesAsync(WalletService wallet)
         {
-            using var _ = FlowTrace.Enter("Store", "PurchaseQuote.RefreshPrices (display only)");
-            if (wallet == null || !wallet.IsRealSigningWallet)
-            {
-                FlowTrace.Step("Store", "quote list skipped: no signing wallet — the shelf shows no SKR figure rather than an invented one.");
-                return false;
-            }
+            using var _ = FlowTrace.Enter("Store", "PurchaseQuote.RefreshPrices (display only, PUBLIC)");
 
-            string playerId = wallet.Account.Address;
-            string network = WireNetwork(wallet.Network);
-            byte[] body = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(new { playerId, network }));
+            bool signedIn = wallet != null && wallet.IsRealSigningWallet;
+            // Claimed, never proven, and never signed — the server treats it as a display hint only.
+            string playerId = signedIn ? wallet.Account.Address : null;
+            string network = WireNetwork(wallet != null ? wallet.Network : WalletService.DefaultNetwork);
+            if (!signedIn)
+                FlowTrace.Step("Store", $"quote list requested WITHOUT a wallet on {network}: " +
+                                        "browsing is public; nothing is signed and nothing binds.");
+            byte[] body = Encoding.UTF8.GetBytes(playerId == null
+                ? JsonConvert.SerializeObject(new { network })
+                : JsonConvert.SerializeObject(new { playerId, network }));
 
-            var text = await PostAsync(body, playerId, "price list");
+            // ⛔ requireAuth:false — the whole point. A signature prompt here is the defect.
+            var text = await PostAsync(body, playerId, "price list", requireAuth: false);
             if (text == null) return false;
 
             // ⛔ ROW-LEVEL, NOT ALL-OR-NOTHING (2026-08-24). This used to deserialize the whole
@@ -362,8 +442,14 @@ namespace DeNelle.Wallet
                 if (row == null || string.IsNullOrEmpty(row.Sku) || row.BaseUnits <= 0) continue;
                 _displayPrices[row.Sku] = row;
             }
+            int notSellable = 0;
+            foreach (var kv in _displayPrices) if (!kv.Value.IsSellable) notSellable++;
+            // Say BOTH numbers. "12 priced" alone cannot distinguish a healthy shelf from one where
+            // every buy button is dead, and that ambiguity is what made the blank-shelf case silent.
             FlowTrace.Step("Store", $"quote list ISSUED: {_displayPrices.Count} priced SKUs on {network} " +
-                                    $"at ${response.Rate:0.########}/SKR ({response.RateSource}).");
+                                    $"at ${response.Rate:0.########}/SKR ({response.RateSource}); " +
+                                    $"{notSellable} marked NOT sellable to this viewer" +
+                                    (notSellable > 0 ? " (cards show the price with a worded reason)." : "."));
             return _displayPrices.Count > 0;
         }
 
@@ -448,8 +534,15 @@ namespace DeNelle.Wallet
             return new PurchaseQuoteResult(quote);
         }
 
-        /// <summary>POST + wallet-proof, shared by both modes. Returns the body text, or null.</summary>
-        private static async UniTask<string> PostAsync(byte[] body, string playerId, string what)
+        /// <summary>
+        /// POST, shared by both modes. Returns the body text, or null.
+        /// <para><paramref name="requireAuth"/> is FALSE for the public price LIST and TRUE for
+        /// everything that binds. ⛔ Do not default it to true "for safety": attaching the signer is
+        /// what mints a session from a wallet signature, so a stray true here re-creates the exact
+        /// browse-time authorization prompt WO-1190 removed. The safety lives at the till.</para>
+        /// </summary>
+        private static async UniTask<string> PostAsync(byte[] body, string playerId, string what,
+            bool requireAuth = true)
         {
             using var req = new UnityWebRequest(QuoteUrl, "POST")
             {
@@ -459,10 +552,13 @@ namespace DeNelle.Wallet
             };
             req.SetRequestHeader("Content-Type", "application/json");
             req.SetRequestHeader("Accept", "application/json");
-            if (!await BackendRequestSigner.TryAttachAsync(req, playerId, body))
+            if (requireAuth)
             {
-                FlowTrace.Warn("Store", $"{what}: could not authenticate the request — no price fetched.");
-                return null;
+                if (!await BackendRequestSigner.TryAttachAsync(req, playerId, body))
+                {
+                    FlowTrace.Warn("Store", $"{what}: could not authenticate the request — no price fetched.");
+                    return null;
+                }
             }
 
             try { await req.SendWebRequest(); }

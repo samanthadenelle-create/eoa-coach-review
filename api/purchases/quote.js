@@ -15,12 +15,30 @@
 //
 // TWO MODES, ONE ENDPOINT:
 //
-//   LIST  { playerId, network }         → every sold SKU's exact SKR amount and
+//   LIST  { network, playerId? }        → every sold SKU's exact SKR amount and
 //                                         USD anchor, for the shelf. NO DB rows,
 //                                         NO quote ids — it binds nothing. It
 //                                         exists so the CARD can print an exact
 //                                         SKR figure without the client ever
 //                                         doing arithmetic (§5).
+//
+//     ⛔ LIST IS PUBLIC AND UNAUTHENTICATED (WO-1190). A shelf shows prices;
+//     eligibility is checked at the till. Before this, LIST demanded a proven
+//     wallet — so merely OPENING the store minted a backend session from a wallet
+//     signature, for a read that binds nothing and charges nothing. It also ran
+//     every candidate through walletAllowed(), so with MAINNET_SALES_ENABLED off
+//     a non-owner got an EMPTY array and every card read "Price unavailable".
+//
+//     What LIST returns now is the PUBLIC LADDER: what anyone could buy. Each row
+//     carries an ADVISORY `sellable` + `sellableReason` computed against the
+//     CLAIMED (unproven) playerId, so the card can print the price and disable the
+//     buy control with a WORDED reason instead of going blank.
+//
+//     ⛔ THE ADVISORY GRANTS NOTHING. Forging playerId here flips a client-side
+//     button and reaches no further: walletAllowed / MAINNET_SALES_ENABLED / the
+//     canary's stricter gate are UNCHANGED and still enforced on the BINDING quote
+//     below (and again at /verify), where the identity is PROVEN. Loosening the
+//     list must never loosen what can be sold.
 //
 //   QUOTE { playerId, network, sku }    → ONE binding, single-use, expiring quote
 //                                         persisted to purchase_quotes. This is
@@ -52,12 +70,35 @@ const RATE_UNAVAILABLE_MESSAGE =
     'Nothing has been charged. Try again in a moment.';
 const SKU_UNAVAILABLE_MESSAGE =
     'That pack is not on sale on this network right now. Nothing has been charged.';
+// Shown ON the card, beside a real price, when this viewer cannot buy that row.
+// ⛔ Never a blank shelf, never a bare "Price unavailable", never colour alone.
+const SALES_CLOSED_MESSAGE =
+    'Purchases are not open on this network yet. You can browse; buying unlocks when sales go live.';
+const CANARY_NOT_SELLABLE_MESSAGE =
+    'This is a rail test, not a pack for sale.';
 const SHORTFALL_DISCOUNT_BPS = 2000;
 const DISCOUNT_WINDOW_DAYS = 7;
 const SHORTFALL_REASON_HINT = 'repair_shortfall';
 const SHORTFALL_REASON_SERVER = 'repair_shortfall';
 
 function quoteRef() { return crypto.randomBytes(16).toString('hex'); }
+
+/**
+ * DISPLAY-ONLY sellability for one shelf row.
+ *
+ * ⛔ ADVISORY, NOT AUTHORIZATION. It is computed from the CLAIMED playerId on an
+ * unauthenticated LIST, so it is only ever good enough to word a disabled button.
+ * The authority is walletAllowed() on the BINDING quote (below, after
+ * authenticateGranting) and again at /verify. This function calls the SAME
+ * walletAllowed, so the shelf's wording cannot drift from the real gate — but it
+ * can never widen it, because it issues nothing.
+ *
+ * @returns {string|null} null when sellable; otherwise a player-readable reason.
+ */
+function sellableReasonFor(network, sku, wallet, pinned) {
+    if (walletAllowed(network, sku, wallet)) return null;
+    return pinned ? CANARY_NOT_SELLABLE_MESSAGE : SALES_CLOSED_MESSAGE;
+}
 
 function discountBpsForReason(reasonHint, discountedRecently) {
     return reasonHint === SHORTFALL_REASON_HINT && discountedRecently === false
@@ -124,24 +165,40 @@ async function handler(req, res) {
     // Logged hint, never authorization. Forging it buys the same single-window
     // discount as a genuine shortfall and cannot summon another one.
     const reasonHint = String(body.reason || '').trim().toLowerCase();
-    if (!playerId || (network !== 'devnet' && network !== 'mainnet-beta'))
+    // ⛔ playerId is REQUIRED for a binding quote (it is who the quote is issued
+    // to) and OPTIONAL for the public LIST — a browser has no wallet yet.
+    if (network !== 'devnet' && network !== 'mainnet-beta')
+        return quietFail(res, 400, AuthCode.BAD_PAYLOAD, ref);
+    if (sku && !playerId)
         return quietFail(res, 400, AuthCode.BAD_PAYLOAD, ref);
     if (sku && !walletAllowed(network, sku, playerId))
         return quietFail(res, 403, AuthCode.BAD_PAYLOAD, ref);
 
-    let sql;
+    let sql = null;
     try { sql = neon(process.env.DATABASE_URL); }
-    catch (_) { return quietFail(res, 500, AuthCode.SERVER_ERROR, ref); }
+    catch (_) {
+        // The public shelf must not go blank because the audit database is away —
+        // LIST persists nothing and reads nothing from it. The money path still
+        // fails closed: without sql there is no auth and no quote row.
+        if (sku) return quietFail(res, 500, AuthCode.SERVER_ERROR, ref);
+    }
 
     // A quote is a commitment to a price, on the money path. It is issued to a
     // PROVEN wallet, never a claimed one — the same bar the grant path uses.
-    let auth;
-    try { auth = await authenticateGranting(sql, req, rawBody, playerId); }
-    catch (_) { return quietFail(res, 500, AuthCode.SERVER_ERROR, ref); }
-    if (!auth.ok) {
-        await logAuthReject(sql, req, { code: auth.code, ref, identity: auth.identity,
-            mode: auth.mode, detail: auth.detail });
-        return quietFail(res, 401, auth.code, ref);
+    //
+    // ⛔ THE LIST DELIBERATELY SKIPS THIS (WO-1190) and NOTHING ELSE DOES. Browsing
+    // is a read that binds nothing; requiring a proven wallet here is what made
+    // opening the store pop a signature prompt. Every path that issues, grants or
+    // persists remains behind authenticateGranting.
+    if (sku) {
+        let auth;
+        try { auth = await authenticateGranting(sql, req, rawBody, playerId); }
+        catch (_) { return quietFail(res, 500, AuthCode.SERVER_ERROR, ref); }
+        if (!auth.ok) {
+            await logAuthReject(sql, req, { code: auth.code, ref, identity: auth.identity,
+                mode: auth.mode, detail: auth.detail });
+            return quietFail(res, 401, auth.code, ref);
+        }
     }
 
     // ── The canaries: a protocol constant, not a sale. No rate is consulted. ──
@@ -158,8 +215,9 @@ async function handler(req, res) {
     // ── The rate. FAIL CLOSED. ───────────────────────────────────────────────
     const rate = await fetchSkrUsdRate();
     if (!rate) {
-        await logApiEvent(sql, playerId, 'purchase_quote_refused',
-            { ref, sku: sku || null, network, reason: 'rate_unavailable' });
+        if (sql && playerId)
+            await logApiEvent(sql, playerId, 'purchase_quote_refused',
+                { ref, sku: sku || null, network, reason: 'rate_unavailable' });
         return res.status(503).json({ ok: false, code: 'PURCHASE_RATE_UNAVAILABLE',
             message: RATE_UNAVAILABLE_MESSAGE, ref });
     }
@@ -167,16 +225,31 @@ async function handler(req, res) {
     // ── LIST mode: display prices. Binds nothing, persists nothing. ──────────
     if (!sku) {
         const rows = [];
+        // ⛔ THE SOLD LADDER IS LISTED UNFILTERED — this is the public ladder, what
+        // ANYONE could buy. The walletAllowed() filter that used to sit here is now
+        // an ADVISORY FIELD instead of a deletion, because deleting the row deleted
+        // the price with it: with MAINNET_SALES_ENABLED off a non-owner received an
+        // empty array and every card read "Price unavailable" with no badge and no
+        // message. A shelf with no prices explains nothing; a priced card with a
+        // disabled button and a sentence explains everything. Nothing is sellable
+        // that was sellable before — see sellableReasonFor().
         for (const candidate of quotableSkus(network)) {
-            if (!walletAllowed(network, candidate, playerId)) continue;
             const built = buildQuoteBody(network, candidate, rate);
-            if (built) rows.push(wireQuote(built, { quoteId: null, expiresAt: null }));
+            if (!built) continue;
+            const reason = sellableReasonFor(network, candidate, playerId, false);
+            rows.push(wireQuote(built, { quoteId: null, expiresAt: null,
+                sellable: reason == null, sellableReason: reason }));
         }
-        // The canaries still belong on the shelf, at their pinned amount.
+        // ⚠ The canaries stay FILTERED, and that is not an oversight. A canary is a
+        // proof-of-rail, not a sale, so it is NOT part of the public ladder — it
+        // must not appear on a stranger's shelf as a 1-SKR "pack". It surfaces only
+        // for a claimed wallet that already passes its own stricter gate, and the
+        // binding quote re-checks that against a PROVEN wallet.
         for (const candidate of pinnedSkus(network)) {
-            if (!walletAllowed(network, candidate, playerId)) continue;
+            if (sellableReasonFor(network, candidate, playerId, true) != null) continue;
             const contract = purchaseContract(network, candidate);
-            if (contract) rows.push(wirePinned(contract));
+            if (contract) rows.push(Object.assign(wirePinned(contract),
+                { sellable: true, sellableReason: null }));
         }
         return res.status(200).json({ success: true, mode: 'list', network,
             rate: rate.usdPerSkr, rateSource: rate.source, prices: rows });
@@ -268,5 +341,6 @@ async function handler(req, res) {
 module.exports = handler;
 module.exports.config = { api: { bodyParser: false } };
 module.exports._test = { wireQuote, wirePinned, RATE_UNAVAILABLE_MESSAGE, SKU_UNAVAILABLE_MESSAGE,
+    SALES_CLOSED_MESSAGE, CANARY_NOT_SELLABLE_MESSAGE, sellableReasonFor,
     SHORTFALL_DISCOUNT_BPS, DISCOUNT_WINDOW_DAYS, SHORTFALL_REASON_HINT,
     discountBpsForReason };
