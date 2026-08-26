@@ -232,13 +232,30 @@ namespace DeNelle.Wallet
         // foundation runs devnet, and flipping the realm to mainnet is ONE edit
         // here — and an edit the agent never makes. It ships, and stays, Devnet.
         // Mainnet requires explicit written owner approval (Part 10).
-        // ⚠ TEMPORARILY MAINNET — flipped 2026-08-23 on EXPLICIT owner instruction ("lets do the
-        // mainnet test", then confirmed against this exact line) for the MON002 1-SKR canary.
-        // ⛔ REVERT TO Devnet THE MOMENT THE CANARY IS DONE. This is the single line that points
-        // the game at real money. It is committed ON ITS OWN so reverting is one commit.
-        // Safety does NOT rest on this line alone: SolanaWalletProvider.SendPayment refuses every
-        // mainnet payment that is not the canary SKU, in SKR, signed by the owner wallet, and the
-        // backend independently allowlists the same SKU+wallet. This flip widens nothing by itself.
+        // ⛔ MAINNET IS THE RULED, PERMANENT STATE. DO NOT REVERT THIS LINE.
+        //
+        // ⚠ THE COMMENT THAT STOOD HERE UNTIL 2026-08-25 SAID THE OPPOSITE, AND FOLLOWING IT WOULD
+        // NOW KILL LIVE SALES. It read "TEMPORARILY MAINNET ... REVERT TO Devnet THE MOMENT THE
+        // CANARY IS DONE", and described safety as resting on a canary-only allowlist: one SKU, one
+        // wallet. That was TRUE on 2026-08-23 and every clause of it is now FALSE:
+        //   * the owner ruled the FULL authored ladder live (WO-1159) - 27 SKUs, $1.99-$49.99;
+        //   * the server quotes every one of them on mainnet-beta (verified live 2026-08-25);
+        //   * two real ladder purchases SETTLED (391 SKR each) into the 2-of-3 treasury vault;
+        //   * the owner has since WITHDRAWN that revenue on chain.
+        // A seat obeying the old instruction would have reverted a live, paying game to devnet while
+        // believing it was following canon - the exact failure class CLAUDE.md sec.15 exists to stop,
+        // and the reason a stale instruction is more dangerous than no instruction at all.
+        //
+        // ⛔ THE MATCHED PAIR STILL GOVERNS (CANON_GROUND_TRUTH_2026-08-23): this constant is safe at
+        // Mainnet ONLY while FeatureFlags.RealmStorePurchase is true, and that flag is safe ONLY
+        // while this is Mainnet. On Devnet the tokens are free test tokens and the purchase chain
+        // COMPLETES - real packs granted for worthless SKR, with purchase_completed events
+        // indistinguishable from real revenue. MonetizationActivationRegression pins BOTH; moving
+        // either one alone turns the suite red, on purpose. Move them together or not at all.
+        //
+        // Depth beyond this line is unchanged: SolanaWalletProvider.SendPayment still requires the
+        // SKR rail and a positive SERVER-QUOTED amount, and carries no SKU allowlist of its own
+        // because the server quote is the single authority on what is sellable.
         public const WalletNetwork DefaultNetwork = WalletNetwork.Mainnet;
 
         // ── Treasury (devnet display only) ───────────────────────────────────
