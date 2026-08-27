@@ -60,6 +60,9 @@ const crypto = require('crypto');
 const { AuthCode, authenticateGranting, WALLET_MAX_BODY_BYTES } = require('../_lib/wallet-auth');
 const { applyCors, newRef, quietFail, readBodyExact } = require('../_lib/http');
 const { logAuthReject, logApiEvent } = require('../_lib/audit');
+// WO-1243 operator kill switches. `enforce` answers the request itself and
+// returns true when the caller must stop. Fail-OPEN by ruling — see _lib/maintenance.js.
+const { enforce: maintenanceEnforce, AREA_STORE } = require('../_lib/maintenance');
 const { buildQuoteBody, fetchSkrUsdRate, isPinnedSku, pinnedSkus, purchaseContract,
     quotableSkus, usdAnchor, walletAllowed, QUOTE_TTL_SECONDS } = require('../_lib/purchase-catalog');
 
@@ -204,6 +207,24 @@ async function handler(req, res) {
             return quietFail(res, 401, auth.code, ref);
         }
     }
+
+    // ── OPERATOR KILL SWITCH: the store seal (WO-1243) ─────────────────────
+    //
+    // ⭐ THIS IS THE PRE-PAYMENT GATE, AND IT IS THE ONLY PLACE IN THE PURCHASE
+    // RAIL THE SEAL MAY SIT. A quote is the last step before the player's wallet
+    // signs anything, so refusing here costs a player nothing.
+    //
+    // ⛔ NEVER ADD THIS GUARD TO purchases/verify.js, purchases/fulfill.js OR
+    // purchases/reconcile.js. Those three run AFTER the chain has settled — the
+    // money is already gone and an SPL transfer has no refund route. Sealing them
+    // would take real money and then refuse to record the entitlement, which is
+    // exactly the disaster tools/schema-parity.mjs was written about. Closing the
+    // store must stop NEW purchases and must never strand a paid one.
+    //
+    // The LIST path (no sku) is deliberately still served: a browser opening the
+    // shelf during a seal should see the shelf and the banner, not a dead screen.
+    // Nothing is issued, granted or persisted without a sku.
+    if (sku && await maintenanceEnforce(sql, req, res, AREA_STORE, playerId, ref)) return;
 
     // ── The canaries: a protocol constant, not a sale. No rate is consulted. ──
     if (sku && isPinnedSku(network, sku)) {
