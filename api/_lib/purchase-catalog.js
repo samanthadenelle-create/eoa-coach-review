@@ -106,6 +106,7 @@ const USD_ANCHORS = Object.freeze({
     'impulse-crystals-small': 1.99,
     'impulse-crystals-medium': 2.99,
     'impulse-crystals-large': 4.99,
+    'permanent-builder': 9.99,
     // ── Monthly Ledger cards (battle_monthly.json `monthlyCards[]`, WO-1165 §2) ──
     // Read off the canonical file, not off a doc or a work order. A 30-claim pool,
     // so the grant drips BELOW the storage cap over 30 sessions instead of dumping
