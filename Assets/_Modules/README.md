@@ -15,6 +15,7 @@ Each module folder has its own README with purpose + key files. **Read the modul
 | `Audio/` | `DeNelle.Audio` | AudioService, SFX library, music selection, WebGL unlock |
 | `BattleATB/` | `DeNelle.BattleATB` (+Tests) | ATB combat: pure-C# engine + Unity controllers |
 | `Characters/` | — (empty) | Reserved slot, no code/asmdef yet. Character code lives in `Village/` + `Editor/` |
+| `Commerce/` | `DeNelle.Commerce` | **Rail-NEUTRAL** store/grant contracts + pure data (WO-1282): `PackCatalog`/`PackDef`/`PackContents`/`PackPricing`/`PackEconomy`/`ConvenienceItemDef`/`BoostSpec`/`StoreBand`, `ShortfallPackOffer`/`ShortfallOffer`, and the three seams that let non-Wallet assemblies reach the storefront without naming it (`StoreFocusRequest`, `StorefrontRegistry`, `ArenaOutcomeRelay`). ⛔ **It may NEVER reference `DeNelle.Wallet` or `DeNelle.Web3`** — that ban is the whole reason it exists: a Google Play artifact excludes the Solana rail whole, and `GooglePlayPackagingGate.AssertSourceIsolation()` checks it. Wallet references Commerce, one way. ⚠ Its types keep the **`DeNelle.Wallet` NAMESPACE** on purpose — `Core/Promo/PromoCodeService.cs` resolves `"DeNelle.Wallet.PackContents"` as a reflection STRING LITERAL, so the namespace is a live runtime contract; the ASSEMBLY is what moved. See `Commerce/README.md` |
 | `Core/` | `DeNelle.Core`, `DeNelle.AI` (+Tests) | Interfaces, enums, save/state, services, behavior-tree AI. **Owns `Core/Jobs/`** — the shared "Obsidian" multi-channel work queue (WO-773, `ObsidianQueueEngine`/`ObsidianQueueState`, plus `JobKind`/`JobRushPolicy`/`IJobEffect`; landed at save v35 — **never quote the live schema here, read `Core/State/SaveSchema.cs:CurrentVersion`**; a copied number is how this row went stale at v36). Also owns **`Core/Catalog/`** — catalog registry + placement/timer config, and the dungeon payout data types `DungeonRunGrade` / `DungeonRunPayout` / `DungeonExclusiveItems` / `PolishBonusProvider` |
 | `Cosmetics/` | `DeNelle.Cosmetics` | Battle pass, cosmetic catalog, Glimmer currency |
 | `Data/` | Assembly-CSharp | `MasterAssetCatalog` only |
@@ -39,9 +40,18 @@ Each module folder has its own README with purpose + key files. **Read the modul
   reflection *because* the asmdef forbids the reference — that is evidence of the rule, not a breach.
 - ⚠ The old line here — *"Village → Core only. HUD → Core only"* — **was FALSE and is RETIRED**
   (CLAUDE.md §5). `DeNelle.Village.asmdef` legitimately references `DeNelle.BattleATB`, `DeNelle.AI`,
-  `DeNelle.Cosmetics`, `DeNelle.Data`, `DeNelle.Pets`, `DeNelle.Wallet` and `DeNelle.Audio` besides
+  `DeNelle.Cosmetics`, `DeNelle.Data`, `DeNelle.Pets`, `DeNelle.Commerce` and `DeNelle.Audio` besides
   `DeNelle.Core`. **Read the `.asmdef` — it is the authority on what may reference what.** The table
   above is a convenience map, never the dependency graph.
+- ⛔ **`DeNelle.Village` NEVER references `DeNelle.Wallet`** (WO-1282, 2026-08-30). It went through
+  `DeNelle.Commerce` instead, and that removal is what lets a Google Play artifact exclude the Solana
+  rail. `GooglePlayPackagingGate.InspectSourceIsolation()` FAILS the AAB build the moment the
+  reference comes back. If Village needs something from Wallet, the answer is a Commerce seam, never
+  the reference. (⚠ The line above still names Wallet for a different reason: `DeNelle.Village.asmdef`
+  did reference it, legitimately, until this change.)
+- ⛔ **`DeNelle.Commerce` NEVER references `DeNelle.Wallet` or `DeNelle.Web3`, in either direction of
+  reasoning.** Wallet -> Commerce only. A `CurrencyKind` (`Sol`/`Usdc`/`Skr`) in a Commerce file is
+  the tell that the boundary has been crossed.
 - Cross-module calls go through `CoreServices.Hud` / `CoreServices.Audio` with `?.`
 - Key interfaces live in Core: `IDamageableStructure`, `IVillageHud`, `IAudioService`
 

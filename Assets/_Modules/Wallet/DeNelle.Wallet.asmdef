@@ -3,6 +3,7 @@
     "rootNamespace": "DeNelle.Wallet",
     "references": [
         "DeNelle.Core",
+        "DeNelle.Commerce",
         "DeNelle.Data",
         "Unity.Localization",
         "UniTask",

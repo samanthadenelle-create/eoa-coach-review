@@ -3,6 +3,7 @@
     "rootNamespace": "DeNelle.Web3",
     "references": [
         "DeNelle.Core",
+        "DeNelle.Commerce",
         "DeNelle.Wallet",
         "UniTask"
     ],
