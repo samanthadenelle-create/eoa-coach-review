@@ -17,7 +17,9 @@
     "overrideReferences": false,
     "precompiledReferences": [],
     "autoReferenced": true,
-    "defineConstraints": [],
+    "defineConstraints": [
+        "!GOOGLE_PLAY"
+    ],
     "versionDefines": [
         {
             "name": "com.solana.unity_sdk",
