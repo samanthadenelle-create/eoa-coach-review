@@ -1,8 +1,8 @@
 // =============================================================================
 // api/_lib/wallet-auth.js — the auth gate for /api/game/save + /api/game/load
 // -----------------------------------------------------------------------------
-// TWO RAILS, chosen by the SHAPE OF THE PLAYER ID being touched — never by what
-// headers the caller happens to send:
+// THREE RAILS (two until 2026-08-30), chosen by the SHAPE OF THE PLAYER ID being
+// touched — never by what headers the caller happens to send:
 //
 //   WALLET RAIL  playerId matches ^[1-9A-HJ-NP-Za-km-z]{32,44}$ (base58 Solana
 //                address). Requires X-Wallet + X-Nonce + X-Signature: an ed25519
@@ -18,9 +18,20 @@
 //                on verifyGuest: this is BEARER-TOKEN trust, deliberately and
 //                explicitly second-class.
 //
-// The two id shapes are lexically DISJOINT (a guest id is 76 chars, contains '-'
-// and hex '0', all of which fail base58), so no value can ever be routed to the
-// wrong rail, and no guest header can influence a wallet-keyed row.
+//   PLAY RAIL    playerId matches ^play-[0-9a-f]{64}$ — added 2026-08-30 (WO-1282
+//                PIN-1b) so a GOOGLE PLAY player, who has no wallet, can key a save
+//                and an entitlement. The id is HMAC-SHA256(GOOGLE_IDENTITY_KEY,
+//                google_sub) computed SERVER-SIDE from a Google-signed ID token; the
+//                client cannot mint one. Requires X-Session, issued only by
+//                api/auth/google-session.js. DORMANT unless GOOGLE_IDENTITY_ENABLED.
+//                ⛔ THE WALLET REMAINS THE SOLE IDENTITY ON THE SEEKER/APK ARTIFACT
+//                   (owner ruling 2026-08-30). This rail is for the Play/AAB artifact
+//                   only, and nothing above it is weakened by its existence.
+//
+// The three id shapes are lexically DISJOINT (a guest id is 76 chars and a play- id
+// 69, both containing '-' and hex '0', all of which fail base58; the two prefixes
+// differ), so no value can ever be routed to the wrong rail, and no guest header can
+// influence a wallet-keyed or play-keyed row.
 //
 // ── A THIRD RULE, ADDED 2026-08-18 (and the one the shape-disjointness above does
 //    NOT give you for free) ──────────────────────────────────────────────────────
@@ -97,9 +108,41 @@ const WALLET_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 // Mirrors the client EXACTLY: GuestWalletPrefix ("guest-local-") + Sha256Hex(...)
 // = 12 + 64 chars, lowercase hex.
 const GUEST_RE = /^guest-local-[0-9a-f]{64}$/;
+// ── A THIRD SHAPE, ADDED 2026-08-30 (WO-1282 PIN-1b): the GOOGLE PLAY rail. ──
+// "play-" + HMAC-SHA256(GOOGLE_IDENTITY_KEY, google_sub) as 64 lowercase hex.
+//
+// ⛔ THE CLIENT CANNOT MINT ONE. Unlike a guest id (which the device computes and is
+//    therefore worth a bearer token and nothing more), this id is derived SERVER-SIDE
+//    in _lib/google-identity.derivePlayerId from the `sub` of a Google ID token whose
+//    RS256 signature was verified against Google's JWKS. Without GOOGLE_IDENTITY_KEY
+//    the value cannot be computed, so an attacker cannot mint players — which is the
+//    single property that lets this rail stand next to the wallet on a GRANTING route.
+//
+// ⛔ AND IT IS LEXICALLY DISJOINT FROM BOTH EXISTING SHAPES, by construction:
+//    * fails WALLET_RE — 69 chars (>44), and contains '-' and '0', none of them base58.
+//    * fails GUEST_RE  — different literal prefix.
+//    Re-checked against both regexes at source on 2026-08-30, and api/auth/google-session.js
+//    additionally refuses to issue a session for any derived id that fails PLAY_RE.
+//    Disjointness is what stops a Play id being routed to the guest rail's bearer-token
+//    trust, or a wallet-keyed row being reachable from this one.
+const PLAY_RE = /^play-[0-9a-f]{64}$/;
 
 function isWalletId(id) { return typeof id === 'string' && WALLET_RE.test(id); }
 function isGuestId(id) { return typeof id === 'string' && GUEST_RE.test(id); }
+function isPlayId(id) { return typeof id === 'string' && PLAY_RE.test(id); }
+
+/**
+ * "May an id of this SHAPE ever be handed real value?"
+ *
+ * The one place the answer lives, so a value-granting route and an entitlement read
+ * cannot drift apart (they did: sku-entitlement-read.js hardcoded isWalletId, which is
+ * exactly how a Play player would have read an empty entitlement list forever).
+ *
+ * ⛔ A GUEST IS NEVER IN THIS SET. A guest id is SELF-ASSERTED by the client; a wallet
+ *    id is proven by an ed25519 signature and a play- id is proven by a Google-signed
+ *    token plus a server-only HMAC key. Proven-by-somebody-else is the membership rule.
+ */
+function isProvenValueId(id) { return isWalletId(id) || isPlayId(id); }
 
 // ── Stable failure codes ─────────────────────────────────────────────────────
 // Non-secret by construction: a code names a CLASS of failure and never reveals
@@ -128,7 +171,9 @@ const AuthCode = {
     GUEST_MISMATCH:         'GUEST_MISMATCH',           // X-Guest-Id != the guest playerId
     GUEST_RATE_LIMITED:     'GUEST_RATE_LIMITED',       // guest exceeded its window budget
     GUEST_DISABLED:         'GUEST_DISABLED',           // guest rail switched off by env
-    WALLET_REQUIRED:        'AUTH_WALLET_REQUIRED',     // guest rail authenticated, but this route GRANTS VALUE
+    WALLET_REQUIRED:        'AUTH_WALLET_REQUIRED',     // an UNPROVEN rail authenticated, but this route GRANTS VALUE
+
+    GOOGLE_DISABLED:        'GOOGLE_IDENTITY_DISABLED', // play- id presented while the Play rail is switched off
 
     PAYLOAD_TOO_LARGE:      'PAYLOAD_TOO_LARGE',
     BAD_PAYLOAD:            'BAD_PAYLOAD',
@@ -147,6 +192,12 @@ const GUEST_MAX_PER_WINDOW = 30;
 // is a proven identity; a guest is a stranger with a device hash.
 const GUEST_MAX_BODY_BYTES  = 256 * 1024;
 const WALLET_MAX_BODY_BYTES = 1024 * 1024;
+
+// The Google Play identity rail's arm switch. Deliberately NOT a second copy of the
+// env read: _lib/google-identity.js owns that rule (default OFF, explicit 'true' to
+// arm), and duplicating it here is precisely how two halves of one switch drift apart.
+// google-identity.js requires nothing from this file, so there is no require cycle.
+const { identityEnabled: googleIdentityEnabled } = require('./google-identity');
 
 /** Guests can be switched off entirely with GUEST_SAVE_ENABLED=false (no redeploy of logic). */
 function guestEnabled() {
@@ -219,8 +270,18 @@ const SESSION_RE = /^[A-Za-z0-9_-]{40,90}$/;
  * responsible for having proven wallet ownership first -- call it only after a
  * successful verifyWallet(). Calling it on an unproven wallet hands out that wallet's
  * identity, which is the one mistake here that matters.
+ *
+ * WO-1282 PIN-1b: `subject` may now also be a `play-<64hex>` id, minted ONLY by
+ * api/auth/google-session.js after it verified a Google-signed ID token. The rule above
+ * is unchanged and applies identically: this function mints, it never proves. The
+ * optional `identityKind` records WHICH proof stood behind the mint, defaulting to
+ * 'wallet' so api/auth/session.js needs no edit and behaves byte-identically.
+ *
+ * @param {string} subject       the PROVEN identity (base58 wallet, or a play- id)
+ * @param {string} identityKind  'wallet' | 'google' — audit only; never an authorization input
  */
-async function issueSession(sql, wallet) {
+async function issueSession(sql, wallet, identityKind) {
+    const kind = identityKind === 'google' ? 'google' : 'wallet';
     const token = crypto.randomBytes(32).toString('base64url');
 
     // Housekeeping: drop this wallet's dead sessions so the table cannot grow unbounded.
@@ -230,8 +291,8 @@ async function issueSession(sql, wallet) {
     } catch (_) { /* housekeeping only */ }
 
     const rows = await sql`
-        INSERT INTO auth_sessions (token, wallet, expires_at)
-        VALUES (${token}, ${wallet}, NOW() + (${SESSION_TTL_SECONDS} * INTERVAL '1 second'))
+        INSERT INTO auth_sessions (token, wallet, identity_kind, expires_at)
+        VALUES (${token}, ${wallet}, ${kind}, NOW() + (${SESSION_TTL_SECONDS} * INTERVAL '1 second'))
         RETURNING token, expires_at
     `;
     return { token: rows[0].token, expiresAt: rows[0].expires_at, ttlSeconds: SESSION_TTL_SECONDS };
@@ -571,6 +632,25 @@ async function authenticate(sql, req, payload, claimedPlayerId) {
             : { ok: false, mode: 'wallet', identity: id, code: r.code, detail: r.detail };
     }
 
+    // GOOGLE PLAY RAIL (WO-1282 PIN-1b). A play- id is proven the same way a wallet
+    // proves itself between signatures: by a session token this server issued. The
+    // ONLY minting path is api/auth/google-session.js, which verifies a Google-signed
+    // ID token first — so a session here is a proxy for that proof, exactly as a wallet
+    // session is a proxy for an ed25519 signature. verifySession is UNCHANGED and
+    // already binds the token to the subject being acted on (SESSION_WRONG_WALLET).
+    if (isPlayId(id)) {
+        if (!googleIdentityEnabled()) {
+            // Fail CLOSED, and say which switch. Turning the rail off is an operator
+            // kill switch, not a downgrade — there is deliberately no weaker fallback.
+            return { ok: false, mode: 'google', identity: id, code: AuthCode.GOOGLE_DISABLED, detail: {} };
+        }
+        const token = headers['x-session'] != null ? String(headers['x-session']).trim() : '';
+        const r = await verifySession(sql, token, id);
+        return r.ok
+            ? { ok: true, mode: 'google', identity: r.wallet }
+            : { ok: false, mode: 'google', identity: id, code: r.code, detail: r.detail };
+    }
+
     if (isGuestId(id)) {
         const r = await verifyGuest(sql, headers, id);
         return r.ok
@@ -618,9 +698,17 @@ async function authenticateGranting(sql, req, payload, claimedPlayerId) {
     const r = await authenticate(sql, req, payload, claimedPlayerId);
     if (!r.ok) return r;
 
-    // Belt AND braces: require the mode we expect AND re-test the id shape, so a
-    // future edit to authenticate()'s routing cannot quietly open this door.
-    if (r.mode !== 'wallet' || !isWalletId(String(r.identity || ''))) {
+    // Belt AND braces: require a mode on the ALLOWLIST **and** re-test that mode's id
+    // shape, so a future edit to authenticate()'s routing cannot quietly open this door.
+    //
+    // ⛔ IT IS AN ALLOWLIST AND MUST STAY ONE. Widened 2026-08-30 (WO-1282 PIN-1b) from
+    //    `mode === 'wallet'` to {wallet, google} — two entries, both PROVEN-BY-A-THIRD-PARTY
+    //    identities. A future mode is refused by DEFAULT until someone adds it here on
+    //    purpose; a denylist would have granted it by default, which is the whole reason
+    //    the check is written this way. GUEST IS STILL REFUSED, and always will be: the
+    //    client mints a guest id, so an attacker mints as many "players" as they like.
+    const shapeCheck = GRANTING_MODES[String(r.mode || '')];
+    if (typeof shapeCheck !== 'function' || !shapeCheck(String(r.identity || ''))) {
         return {
             ok: false,
             mode: r.mode,
@@ -632,6 +720,19 @@ async function authenticateGranting(sql, req, payload, claimedPlayerId) {
     return r;
 }
 
+/**
+ * THE ALLOWLIST ITSELF: mode → the shape predicate that mode's identity must satisfy.
+ *
+ * Pairing the mode with its OWN shape check (rather than one generic "is it provable")
+ * means a bug that routes a wallet id out of the google branch, or vice versa, is a
+ * refusal rather than a grant.
+ */
+const GRANTING_MODES = {
+    wallet: isWalletId,   // ed25519 signature over a single-use nonce
+    google: isPlayId,     // Google-signed ID token + a server-only HMAC key
+    // guest: ⛔ NEVER. See the honesty note on verifyGuest.
+};
+
 module.exports = {
     issueSession, verifySession, SESSION_TTL_SECONDS,
     NONCE_TTL_SECONDS,
@@ -642,9 +743,13 @@ module.exports = {
     AuthCode,
     WALLET_RE,
     GUEST_RE,
+    PLAY_RE,
     isWalletId,
     isGuestId,
+    isPlayId,
+    isProvenValueId,
     guestEnabled,
+    googleIdentityEnabled,
     buildSignedMessage,
     issueNonce,
     verifySignature,
