@@ -24,6 +24,7 @@ namespace DeNelle.Editor
             "phantom wallet", "app.phantom", "solflare", "seed vault", "connect wallet",
             "$skr", "spend $skr", "skr is a real", "stake.solanamobile",
             "usdc", "blockchain", "crypto", "web3",
+            "pi network", "sign in with pi", "api.minepi.com", "sdk.minepi.com",
             "SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3",
             "3BwWSAUZmyngXDSZiCawEnP7iLgY5ANNopBDz94AB77N"
         };
@@ -38,6 +39,7 @@ namespace DeNelle.Editor
             "solflare", "seed vault", "connect wallet", "stake.solanamobile",
             "skr is a real", "spend $skr",
             "Solana.Unity.",
+            "pi network", "sign in with pi", "api.minepi.com", "sdk.minepi.com",
             "SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3",
             "3BwWSAUZmyngXDSZiCawEnP7iLgY5ANNopBDz94AB77N"
         };
