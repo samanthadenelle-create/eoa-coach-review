@@ -118,6 +118,92 @@
         if (e.touches && e.touches.length > 1) e.preventDefault();  // multi-finger = game gesture, not page scroll
       }, { passive: false });
 
+      // ===================================================================================
+      // PROD-022 Lane A: get the [PiLifecycle] crumbs INTO THE DATABASE.
+      // ===================================================================================
+      // These crumbs are the ONLY signal that separates "the webview jettisoned the tab" from
+      // "the app tore itself down" - and until now they were console.info ONLY. A grep of every
+      // recorded Pi Browser session returned ZERO [PiLifecycle] lines while the published app
+      // cold-booted every 30-60s, so the P0 could not be rooted. A diagnostic that never leaves
+      // the device is not instrumentation (CLAUDE.md sec.12).
+      //
+      // They POST to the SAME sink the Unity client uses (WebTrace.cs -> /api/trace ->
+      // analytics_events) in the SAME { sessionId, buildId, entries[] } shape, so they come back
+      // out of the SAME reader: ?view=traces&session=<id>. Every line carries the [PiLifecycle]
+      // prefix, so one grep finds them.
+      //
+      // THE BOOT LINE MUST POST BEFORE UNITY STARTS. Its whole value is describing a boot whose
+      // PREDECESSOR died; by definition the interesting case is the one where the runtime never
+      // got there, so it cannot depend on the runtime being alive.
+      //
+      // Content-Type is text/plain DELIBERATELY. text/plain is a CORS-safelisted request type, so
+      // neither the fetch nor the sendBeacon needs a preflight OPTIONS round-trip - and
+      // sendBeacon CANNOT preflight at all, so an application/json beacon would simply never be
+      // sent. api/trace.js JSON.parses a string body and reads sessionId/buildId out of the body
+      // (the X-Trace-* headers are optional there, and sendBeacon cannot set headers).
+      var PI_TRACE_ENDPOINT = 'https://defenders-of-the-realm-v2.vercel.app/api/trace';
+      var PI_TRACE_SCENE    = 'PiTemplate';
+      // Mirrors WebTrace.MakeSessionId ("wt-" + hex) and MakeBuildId ("<version>@<host>") so these
+      // rows attribute to a deployment exactly like the Unity ones. The "wt-pi" prefix marks a
+      // session that the TEMPLATE opened, before/without any Unity runtime.
+      //
+      // THE TEMPLATE SESSION IS DELIBERATELY INDEPENDENT OF UNITY'S, AND IS NOT CORRELATED BY ID.
+      // Unity mints its own session id inside the runtime, so the page cannot know it in advance;
+      // the only way to learn it is to read the runtime's console announcement, which NEVER
+      // ARRIVES in the exact failure being instrumented (Unity dying during load). A correlation
+      // mechanism that fails precisely when it is needed is worse than none, and sniffing the
+      // console would put a page-layer hook inside the runtime's hot path for the whole doomed
+      // session (docs/ARCHITECTURE_PRINCIPLES.md: presentation never reaches into the objects).
+      // Correlate by TIME instead: every crumb is timestamped and carries the same buildId, which
+      // is how the PROD-022 diagnosis was built in the first place - and time correlation still
+      // works when Unity never boots at all.
+      var piTraceSession = 'wt-pi' + Math.random().toString(16).slice(2, 12);
+      var piTraceBuild   = '{{{ PRODUCT_VERSION }}}';
+      try {
+        if (location && location.hostname) piTraceBuild += '@' + location.hostname;
+      } catch (e) {
+        console.info('[PiLifecycle] build host unavailable (trace rows carry the bare version): ' + e);
+      }
+
+      // Fire-and-forget one crumb at the trace sink. NEVER throws: this file owns the global JS
+      // error surface (WO-678), and telemetry must not be able to stop a boot.
+      function piTraceEmit(message, useBeacon) {
+        try {
+          var payload = JSON.stringify({
+            sessionId: piTraceSession,
+            buildId:   piTraceBuild,
+            entries: [{
+              utcMs:   Date.now(),
+              kind:    'log',
+              tag:     'PiLifecycle',
+              message: '' + message,
+              scene:   PI_TRACE_SCENE
+            }]
+          });
+          // pagehide/hidden are TEARDOWN events: a normal fetch is cancelled together with the
+          // document, so sendBeacon - which the browser queues and delivers after the page is
+          // gone - is the only transport that actually lands. keepalive fetch is the fallback
+          // for a browser without sendBeacon.
+          if (useBeacon && navigator.sendBeacon) {
+            var blob = new Blob([payload], { type: 'text/plain;charset=UTF-8' });
+            if (navigator.sendBeacon(PI_TRACE_ENDPOINT, blob)) return;
+            console.info('[PiLifecycle] sendBeacon refused the crumb - falling back to keepalive fetch');
+          }
+          fetch(PI_TRACE_ENDPOINT, {
+            method: 'POST',
+            body: payload,
+            headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+            keepalive: true,
+            mode: 'cors',
+            credentials: 'omit'
+          })['catch'](function (e) {
+            console.info('[PiLifecycle] crumb POST failed (fire-and-forget, dropped): ' + e);
+          });
+        } catch (e) {
+          console.info('[PiLifecycle] crumb emit skipped: ' + e);
+        }
+      }
+
       // --- Boot breadcrumbs: DIAGNOSTIC ONLY, and they must NEVER be able to stop the boot ------
       // A browser with site data blocked (Pi Browser can be configured this way, as can any
       // private/hardened mode) THROWS on the mere ACCESS of window.localStorage. This file owns
@@ -136,7 +222,12 @@
         try {
           return window.localStorage.getItem('eoa.pi.boot');
         } catch (e) {
-          console.info('[PiLifecycle] breadcrumb read unavailable (storage blocked): ' + e);
+          // Forwarded: a blocked read means `previous=` is permanently null, which would
+          // otherwise read in the trace as "the last boot left no crumb" - the opposite
+          // conclusion. It fires once, at boot, never during teardown.
+          var line = '[PiLifecycle] breadcrumb read unavailable (storage blocked): ' + e;
+          console.info(line);
+          piTraceEmit(line, false);
           return null;
         }
       }
@@ -192,7 +283,11 @@
       try {
         piNavType = (performance.getEntriesByType('navigation')[0] || {}).type || 'unknown';
       } catch (e) { /* older/hardened browsers: navigation timing is a nicety, not a boot dependency */ }
-      console.info('[PiLifecycle] boot=' + bootId + ' previous=' + previousBoot + ' navigation=' + piNavType);
+      var piBootLine = '[PiLifecycle] boot=' + bootId + ' previous=' + previousBoot + ' navigation=' + piNavType;
+      console.info(piBootLine);
+      // Posted HERE, before startUnityOnce() ever appends the loader script - this line has to
+      // survive the case where the runtime never comes up at all.
+      piTraceEmit(piBootLine, false);
 
       // The gate must be ESCAPABLE. Some Pi WebViews never report innerWidth >= innerHeight
       // (misreported viewport, or a tablet/desktop-shaped window), which hard-blocked the player
@@ -471,11 +566,17 @@
         recheckLandscape();
       });
       window.addEventListener('pagehide', function (e) {
-        console.info('[PiLifecycle] pagehide boot=' + bootId + ' persisted=' + !!e.persisted);
+        var line = '[PiLifecycle] pagehide boot=' + bootId + ' persisted=' + !!e.persisted;
+        console.info(line);
         piBootCrumb('pagehide');
+        piTraceEmit(line, true);   // beacon: a plain fetch does not survive teardown
       });
       document.addEventListener('visibilitychange', function () {
-        console.info('[PiLifecycle] visibility boot=' + bootId + ' state=' + document.visibilityState);
+        var line = '[PiLifecycle] visibility boot=' + bootId + ' state=' + document.visibilityState;
+        console.info(line);
+        // 'hidden' is the last event some webviews deliver before jettisoning the tab, so that
+        // one goes out by beacon too - a fetch issued here can be cancelled with the document.
+        piTraceEmit(line, document.visibilityState === 'hidden');
         if (document.visibilityState === 'visible') recheckLandscape();
       });
       piApplyOrientation();
