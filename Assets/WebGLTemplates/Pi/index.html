@@ -24,12 +24,31 @@
       #unity-canvas { width: 100%; height: 100%; background: #0d0a14; display: block;
         touch-action: none; -ms-touch-action: none; }
       #unity-loading-bar { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); color: #b39ddb; font-family: sans-serif; }
+      #pi-landscape-gate { display: none; position: fixed; inset: 0; z-index: 99999;
+        align-items: center; justify-content: center; flex-direction: column; gap: 18px;
+        padding: 28px; box-sizing: border-box; text-align: center; color: #f4e5b5;
+        background: #0d0a14; font: 600 20px/1.4 sans-serif; }
+      #pi-landscape-gate button { min-width: 260px; min-height: 64px; padding: 12px 24px;
+        color: #17100a; background: #d9ad38; border: 2px solid #f4d16b; border-radius: 8px;
+        font: 700 18px sans-serif; }
+      /* Escape hatch. Secondary by POSITION (below the primary) and by WEIGHT/SIZE, never by
+         colour alone — the owner is red/green colourblind (CLAUDE.md house rule). It stays
+         display:none until the bounded timeout reveals it. */
+      #pi-landscape-continue { display: none; min-height: 52px; margin-top: 4px;
+        color: #f4e5b5; background: transparent; border: 2px solid #6b5a2e;
+        font: 600 16px sans-serif; }
     </style>
   </head>
   <body>
     <div id="unity-container">
       <canvas id="unity-canvas" tabindex="-1"></canvas>
       <div id="unity-loading-bar">Loading {{{ PRODUCT_NAME }}}…</div>
+    </div>
+    <div id="pi-landscape-gate" role="dialog" aria-modal="true" aria-label="Landscape required">
+      <div>Echoes of Elarion plays in landscape.<br />Rotate your device, then enter landscape.</div>
+      <button id="pi-landscape-button" type="button">ENTER LANDSCAPE</button>
+      <small id="pi-landscape-status">If rotation is locked, enable Auto-rotate in device settings.</small>
+      <button id="pi-landscape-continue" type="button">CONTINUE ANYWAY (SKIP ROTATION)</button>
     </div>
     <script>
       // --- WO-678: own the global JS error surface --------------------------------------
@@ -93,6 +112,29 @@
         if (e.touches && e.touches.length > 1) e.preventDefault();  // multi-finger = game gesture, not page scroll
       }, { passive: false });
 
+      // --- Boot breadcrumbs: DIAGNOSTIC ONLY, and they must NEVER be able to stop the boot ------
+      // A browser with site data blocked (Pi Browser can be configured this way, as can any
+      // private/hardened mode) THROWS on the mere ACCESS of window.localStorage. This file owns
+      // the global JS error surface (WO-678), so an unguarded throw at module scope meant Unity
+      // never started and the player saw a blank page. Every read and write goes through these
+      // two helpers, and both swallow-with-a-log (console.info is the record — CLAUDE.md §12
+      // no-silent-failure) rather than propagate.
+      function piBootCrumb(phase) {
+        try {
+          window.localStorage.setItem('eoa.pi.boot', JSON.stringify({ id: bootId, phase: phase, at: Date.now() }));
+        } catch (e) {
+          console.info('[PiLifecycle] breadcrumb write unavailable (storage blocked) phase=' + phase + ': ' + e);
+        }
+      }
+      function piReadBootCrumb() {
+        try {
+          return window.localStorage.getItem('eoa.pi.boot');
+        } catch (e) {
+          console.info('[PiLifecycle] breadcrumb read unavailable (storage blocked): ' + e);
+          return null;
+        }
+      }
+
       var buildUrl = "Build";
       var loaderUrl = buildUrl + "/{{{ LOADER_FILENAME }}}";
       var config = {
@@ -128,12 +170,102 @@
           if (loadingBar) loadingBar.textContent = "Loading… " + Math.round(progress * 100) + "%";
         }).then(function (unityInstance) {
           window.unityInstance = unityInstance; // SendMessage targets this
+          piBootCrumb('unity-running');
+          console.info('[PiLifecycle] unity-running boot=' + bootId);
           if (loadingBar) loadingBar.style.display = "none";
         }).catch(function (message) {
           if (loadingBar) loadingBar.textContent = "Load error: " + message;
         });
       };
-      document.body.appendChild(script);
+      var piBrowser = /PiBrowser/i.test(navigator.userAgent || '');
+      var unityStarted = false;
+      var bootId = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+      var previousBoot = piReadBootCrumb();
+      piBootCrumb('template');
+      var piNavType = 'unknown';
+      try {
+        piNavType = (performance.getEntriesByType('navigation')[0] || {}).type || 'unknown';
+      } catch (e) { /* older/hardened browsers: navigation timing is a nicety, not a boot dependency */ }
+      console.info('[PiLifecycle] boot=' + bootId + ' previous=' + previousBoot + ' navigation=' + piNavType);
+
+      // The gate must be ESCAPABLE. Some Pi WebViews never report innerWidth >= innerHeight
+      // (misreported viewport, or a tablet/desktop-shaped window), which hard-blocked the player
+      // behind the modal forever with no way through. After this many ms with the gate still up,
+      // a secondary "continue anyway" control appears and boots the game as-is.
+      var PI_GATE_ESCAPE_MS = 9000;
+      var piGateEscapeTimer = null;
+
+      function armLandscapeEscape() {
+        if (piGateEscapeTimer !== null || unityStarted) return;
+        piGateEscapeTimer = window.setTimeout(function () {
+          if (unityStarted) return;
+          var escapeButton = document.querySelector('#pi-landscape-continue');
+          var status = document.querySelector('#pi-landscape-status');
+          if (escapeButton) escapeButton.style.display = 'inline-block';
+          if (status) status.textContent = 'Still stuck? Rotation is the best experience, but you ' +
+            'can start the game anyway with the button below.';
+          console.info('[PiOrientation] escape hatch revealed after ' + PI_GATE_ESCAPE_MS + 'ms boot=' + bootId);
+        }, PI_GATE_ESCAPE_MS);
+      }
+      function disarmLandscapeEscape() {
+        if (piGateEscapeTimer === null) return;
+        window.clearTimeout(piGateEscapeTimer);
+        piGateEscapeTimer = null;
+      }
+
+      function startUnityOnce() {
+        if (unityStarted) return;
+        unityStarted = true;
+        disarmLandscapeEscape();
+        document.querySelector('#pi-landscape-gate').style.display = 'none';
+        piBootCrumb('unity-loading');
+        document.body.appendChild(script);
+      }
+      function isLandscape() { return window.innerWidth >= window.innerHeight; }
+      function showLandscapeGate(message) {
+        var gate = document.querySelector('#pi-landscape-gate');
+        gate.style.display = 'flex';
+        if (message) document.querySelector('#pi-landscape-status').textContent = message;
+        armLandscapeEscape();
+      }
+      async function requestLandscape() {
+        var status = document.querySelector('#pi-landscape-status');
+        try {
+          if (!document.fullscreenElement && document.documentElement.requestFullscreen)
+            await document.documentElement.requestFullscreen({ navigationUI: 'hide' });
+          if (screen.orientation && screen.orientation.lock)
+            await screen.orientation.lock('landscape');
+        } catch (e) {
+          console.warn('[PiOrientation] landscape request rejected: ' + e);
+          status.textContent = 'Pi Browser refused rotation. Enable Auto-rotate, rotate the device, then tap again.';
+        }
+        if (isLandscape()) startUnityOnce(); else showLandscapeGate();
+      }
+      document.querySelector('#pi-landscape-button').addEventListener('click', requestLandscape);
+      document.querySelector('#pi-landscape-continue').addEventListener('click', function () {
+        console.info('[PiOrientation] escape hatch taken — booting without a landscape report boot=' + bootId);
+        piBootCrumb('landscape-escape');
+        startUnityOnce();
+      });
+      function recheckLandscape() {
+        if (!piBrowser || unityStarted) return;
+        if (isLandscape()) startUnityOnce(); else showLandscapeGate();
+      }
+      window.addEventListener('orientationchange', recheckLandscape);
+      window.addEventListener('resize', recheckLandscape);
+      window.addEventListener('pageshow', function (e) {
+        console.info('[PiLifecycle] pageshow boot=' + bootId + ' persisted=' + !!e.persisted);
+        recheckLandscape();
+      });
+      window.addEventListener('pagehide', function (e) {
+        console.info('[PiLifecycle] pagehide boot=' + bootId + ' persisted=' + !!e.persisted);
+        piBootCrumb('pagehide');
+      });
+      document.addEventListener('visibilitychange', function () {
+        console.info('[PiLifecycle] visibility boot=' + bootId + ' state=' + document.visibilityState);
+        if (document.visibilityState === 'visible') recheckLandscape();
+      });
+      if (piBrowser && !isLandscape()) showLandscapeGate(); else startUnityOnce();
     </script>
   </body>
 </html>
