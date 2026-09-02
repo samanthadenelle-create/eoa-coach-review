@@ -7,18 +7,24 @@
 
     <!-- Pi Network SDK. Provides window.Pi (only resolves inside Pi Browser).
          Pi.init + Pi.authenticate are driven from C# via PiBridge.jslib /
-         PiSignInController — we only LOAD the SDK here so window.Pi exists. -->
+         PiSignInController - we only LOAD the SDK here so window.Pi exists. -->
     <script src="https://sdk.minepi.com/pi-sdk.js"></script>
 
     <link rel="shortcut icon" href="TemplateData/favicon.ico" />
     <link rel="stylesheet" href="TemplateData/style.css" />
     <style>
       html, body { margin: 0; padding: 0; height: 100%; background: #0d0a14;
-        /* The browser must NOT claim pan/pinch/scroll gestures over the game — else build-mode
+        /* The browser must NOT claim pan/pinch/scroll gestures over the game - else build-mode
            camera drag/pinch is dead on mobile web while it works in the native APK (RCA 2026-07-16). */
         touch-action: none; overscroll-behavior: none; overflow: hidden;
         -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
       #unity-container { position: absolute; width: 100%; height: 100%; }
+      /* WO-1312: Pi Browser is a portrait-locked WebView that REFUSES orientation.lock, so we
+         render the game rotated instead of asking the player to rotate. The wrapper is sized in
+         px from JS (width = innerHeight, height = innerWidth) before this class is applied.
+         See the derivation in the script block - the input shim below is NOT optional. */
+      #unity-container.pi-rotated { position: fixed; top: 0; left: 0;
+        transform-origin: top left; transform: rotate(90deg) translateY(-100%); }
       /* touch-action:none on the canvas itself is the load-bearing line: without it a mobile
          browser eats multi-finger gestures before Unity's canvas receives them. */
       #unity-canvas { width: 100%; height: 100%; background: #0d0a14; display: block;
@@ -32,7 +38,7 @@
         color: #17100a; background: #d9ad38; border: 2px solid #f4d16b; border-radius: 8px;
         font: 700 18px sans-serif; }
       /* Escape hatch. Secondary by POSITION (below the primary) and by WEIGHT/SIZE, never by
-         colour alone — the owner is red/green colourblind (CLAUDE.md house rule). It stays
+         colour alone - the owner is red/green colourblind (CLAUDE.md house rule). It stays
          display:none until the bounded timeout reveals it. */
       #pi-landscape-continue { display: none; min-height: 52px; margin-top: 4px;
         color: #f4e5b5; background: transparent; border: 2px solid #6b5a2e;
@@ -42,7 +48,7 @@
   <body>
     <div id="unity-container">
       <canvas id="unity-canvas" tabindex="-1"></canvas>
-      <div id="unity-loading-bar">Loading {{{ PRODUCT_NAME }}}…</div>
+      <div id="unity-loading-bar">Loading {{{ PRODUCT_NAME }}}...</div>
     </div>
     <div id="pi-landscape-gate" role="dialog" aria-modal="true" aria-label="Landscape required">
       <div>Echoes of Elarion plays in landscape.<br />Rotate your device, then enter landscape.</div>
@@ -55,10 +61,10 @@
       // pi-sdk.js loads in ANY browser and tracks host-channel requests by promise id with
       // an internal 120s timeout. Outside Pi Browser the host never answers, so Pi.init
       // spawns a promise that rejects ~120s later as a GLOBAL unhandledrejection
-      // ("Promise with id 0 timed out after 120000 ms") — long after our C# 20s/30s
+      // ("Promise with id 0 timed out after 120000 ms") - long after our C# 20s/30s
       // timeouts already settled. That class is expected/benign: suppress ONLY it, log one
       // quiet console.info, and forward it into Unity telemetry. Unknown errors ALWAYS
-      // pass through (no blanket swallow — CLAUDE.md §5 no-silent-failure).
+      // pass through (no blanket swallow - CLAUDE.md sec.5 no-silent-failure).
       var PI_BENIGN_SIGNATURES = [
         /promise with id \d+ timed out/i,          // the SDK's internal host-channel timeout
         /not (running )?in (the )?pi browser/i,    // the SDK's own not-in-Pi-Browser class
@@ -79,22 +85,22 @@
               data: { where: 'sdk-global', message: '' + msg }
             }));
           }
-        } catch (e) { /* Unity not ready — the console.info at the call site is the record */ }
+        } catch (e) { /* Unity not ready - the console.info at the call site is the record */ }
       }
       window.addEventListener('unhandledrejection', function (event) {
         var reason = event && event.reason;
         var msg = '' + ((reason && (reason.message || reason)) || '');
         if (piIsBenign(msg)) {
           event.preventDefault();
-          console.info('[Pi] SDK host-channel timeout (expected outside Pi Browser) — suppressed: ' + msg);
+          console.info('[Pi] SDK host-channel timeout (expected outside Pi Browser) - suppressed: ' + msg);
           piForwardToUnity(msg);
         }
-        // Anything else stays unhandled → surfaces normally (never blanket-swallow).
+        // Anything else stays unhandled -> surfaces normally (never blanket-swallow).
       });
       window.onerror = function (message, source, lineno, colno, error) {
         var msg = '' + (message || (error && error.message) || '');
         if (piIsBenign(msg)) {
-          console.info('[Pi] SDK error (expected outside Pi Browser) — suppressed: ' + msg);
+          console.info('[Pi] SDK error (expected outside Pi Browser) - suppressed: ' + msg);
           piForwardToUnity(msg);
           return true; // suppress ONLY the known-benign Pi class
         }
@@ -117,7 +123,7 @@
       // private/hardened mode) THROWS on the mere ACCESS of window.localStorage. This file owns
       // the global JS error surface (WO-678), so an unguarded throw at module scope meant Unity
       // never started and the player saw a blank page. Every read and write goes through these
-      // two helpers, and both swallow-with-a-log (console.info is the record — CLAUDE.md §12
+      // two helpers, and both swallow-with-a-log (console.info is the record - CLAUDE.md sec.12
       // no-silent-failure) rather than propagate.
       function piBootCrumb(phase) {
         try {
@@ -145,7 +151,7 @@
         companyName: "{{{ COMPANY_NAME }}}",
         productName: "{{{ PRODUCT_NAME }}}",
         productVersion: "{{{ PRODUCT_VERSION }}}",
-        // WO-678: own the loader's message surface — never a raw alert()/default banner.
+        // WO-678: own the loader's message surface - never a raw alert()/default banner.
         // Genuine loader ERRORS go to console.error + the loading-bar element; warnings and
         // the benign Pi timeout class route to console only.
         showBanner: function (msg, type) {
@@ -167,7 +173,7 @@
       script.src = loaderUrl;
       script.onload = function () {
         createUnityInstance(document.querySelector("#unity-canvas"), config, function (progress) {
-          if (loadingBar) loadingBar.textContent = "Loading… " + Math.round(progress * 100) + "%";
+          if (loadingBar) loadingBar.textContent = "Loading... " + Math.round(progress * 100) + "%";
         }).then(function (unityInstance) {
           window.unityInstance = unityInstance; // SendMessage targets this
           piBootCrumb('unity-running');
@@ -192,6 +198,8 @@
       // (misreported viewport, or a tablet/desktop-shaped window), which hard-blocked the player
       // behind the modal forever with no way through. After this many ms with the gate still up,
       // a secondary "continue anyway" control appears and boots the game as-is.
+      // WO-1312: the gate is now only reachable on the FALLBACK path (a browser that cannot
+      // synthesize touch events, so the rotated surface would have broken input). It stays.
       var PI_GATE_ESCAPE_MS = 9000;
       var piGateEscapeTimer = null;
 
@@ -228,7 +236,196 @@
         if (message) document.querySelector('#pi-landscape-status').textContent = message;
         armLandscapeEscape();
       }
+
+      // ===================================================================================
+      // WO-1312: Pi Browser is a PORTRAIT-LOCKED native WebView.
+      // ===================================================================================
+      // screen.orientation.lock('landscape') is REFUSED there and no web API can force the host
+      // activity to rotate (requestLandscape below already caught and logged that). So we stop
+      // asking the player to solve a page problem, and render the game rotated ourselves.
+      //
+      // THE TRAP: Unity WebGL maps a pointer into canvas space from canvas.getBoundingClientRect()
+      // plus a linear scale. getBoundingClientRect() returns the AXIS-ALIGNED BOUNDING BOX of a
+      // transformed element, so a bare CSS rotation leaves the game LOOKING correct while every
+      // tap lands somewhere else - a failure no screenshot check can see. The rotation and the
+      // input shim therefore ship TOGETHER or not at all.
+      //
+      // DERIVATION. Portrait viewport: W = innerWidth, H = innerHeight (W < H). The wrapper is
+      // laid out UNROTATED as H wide by W tall, position:fixed at the viewport origin, then
+      //     transform-origin: top left;  transform: rotate(90deg) translateY(-100%)
+      // CSS applies the transform list right-to-left, so for a wrapper-local point (u, v)
+      // (u along the game's x axis, v along the game's y axis, both in CSS px):
+      //     translateY(-100%)  ->  (u, v - W)          [100% = the element's own height = W]
+      //     rotate(90deg)      ->  CSS rotation is CLOCKWISE in screen coords (y grows down):
+      //                              x' = x*cos90 - y*sin90 = -(v - W) = W - v
+      //                              y' = x*sin90 + y*cos90 = u
+      // giving      clientX = W - v ,   clientY = u
+      // and the INVERSE, which is what the shim needs:
+      //             u = clientY ,       v = W - clientX
+      //
+      // Corner check: game top-left (u=0,v=0) -> client (W, 0), the screen's TOP-RIGHT; game
+      // bottom-left (u=0,v=W) -> client (0, 0), the screen's TOP-LEFT; game top-right (u=H,v=0)
+      // -> client (W, H), the screen's BOTTOM-RIGHT. The game's "up" therefore points at the
+      // screen's RIGHT edge, so the player turns the phone COUNTER-CLOCKWISE (top edge to the
+      // left) to read it. That is Android's default landscape (ROTATION_90).
+      // Range check: u in [0,H] and v in [0,W] map onto exactly the viewport box [0,W]x[0,H].
+      //
+      // We hand Unity the (u, v) pair as clientX/clientY on a synthetic event AND override the
+      // canvas's getBoundingClientRect() to report the UNROTATED logical rect (0, 0, H, W). That
+      // pair is self-consistent under every formula Unity could be using - raw rect-relative
+      // subtraction, scaling by rect.width, or scaling by canvas.clientWidth - because (u, v) is
+      // exactly the coordinate an unrotated H x W canvas at the viewport origin would produce.
+      // (canvas.clientWidth/clientHeight are already the UNROTATED layout size; CSS transforms
+      // do not change them. Only getBoundingClientRect lies, and that is the one we correct.)
+      var piCanvas = document.querySelector('#unity-canvas');
+      var piContainer = document.querySelector('#unity-container');
+      var piGateEl = document.querySelector('#pi-landscape-gate');
+      var piRotationActive = false;
+      var piRotW = 0;   // portrait viewport width  == the rotated surface's HEIGHT
+      var piRotH = 0;   // portrait viewport height == the rotated surface's WIDTH
+      var PI_SHIM_TOUCH = ['touchstart', 'touchmove', 'touchend', 'touchcancel'];
+      var PI_SHIM_MOUSE = ['mousedown', 'mousemove', 'mouseup'];
+      var PI_SHIM_POINTER = ['pointerdown', 'pointermove', 'pointerup', 'pointercancel'];
+
+      // Can this browser build the synthetic events the shim depends on? If not we MUST NOT
+      // rotate: a rotated surface with a dead shim is WORSE than no rotation, because the
+      // breakage is invisible. We fall back to today's gate + escape hatch instead.
+      var piSynthTouchOk = (function () {
+        try {
+          if (typeof window.Touch !== 'function' || typeof window.TouchEvent !== 'function') return false;
+          var t = new window.Touch({ identifier: 0, target: document.body, clientX: 0, clientY: 0 });
+          var probe = new window.TouchEvent('touchstart', { touches: [t], targetTouches: [t], changedTouches: [t] });
+          return !!probe && probe.touches.length === 1;
+        } catch (err) {
+          console.warn('[PiOrientation] synthetic Touch unavailable, rotation disabled: ' + err);
+          return false;
+        }
+      })();
+      var piSynthPointerOk = (typeof window.PointerEvent === 'function');
+      var piRotationAvailable = piSynthTouchOk;
+
+      function piLogicalRect() {
+        // The rect the canvas WOULD have if the wrapper were not rotated.
+        return { x: 0, y: 0, left: 0, top: 0, right: piRotH, bottom: piRotW,
+                 width: piRotH, height: piRotW, toJSON: function () { return this; } };
+      }
+      function piMapTouches(list) {
+        var out = [];
+        for (var i = 0; i < list.length; i++) {
+          var t = list[i];
+          var u = t.clientY;
+          var v = piRotW - t.clientX;
+          out.push(new window.Touch({
+            identifier: t.identifier,
+            target: piCanvas,
+            clientX: u, clientY: v,
+            pageX: u, pageY: v,
+            screenX: u, screenY: v,
+            // the contact ellipse rotates with the surface, so its axes swap
+            radiusX: (typeof t.radiusY === 'number') ? t.radiusY : 1,
+            radiusY: (typeof t.radiusX === 'number') ? t.radiusX : 1,
+            rotationAngle: 0,
+            force: (typeof t.force === 'number') ? t.force : 1
+          }));
+        }
+        return out;
+      }
+      function piShimHandler(e) {
+        if (!piRotationActive) return;
+        if (e.piShim) return;                                            // our own re-dispatch
+        if (piGateEl && e.target && piGateEl.contains(e.target)) return; // never eat the gate's UI
+        var synth = null;
+        try {
+          if (e.touches) {
+            // Multi-finger touchmove is a GAME gesture, not a page scroll (RCA 2026-07-16). The
+            // document-level listener above cannot see this event any more (we stop it below),
+            // so the preventDefault has to happen right here.
+            if (e.type === 'touchmove' && e.touches.length > 1 && e.cancelable) e.preventDefault();
+            var target = (e.targetTouches && e.targetTouches.length) ? e.targetTouches : e.touches;
+            synth = new window.TouchEvent(e.type, {
+              bubbles: true, cancelable: e.cancelable, composed: true,
+              touches: piMapTouches(e.touches),                // ALL points, never touches[0]
+              targetTouches: piMapTouches(target),
+              changedTouches: piMapTouches(e.changedTouches),
+              ctrlKey: e.ctrlKey, altKey: e.altKey, shiftKey: e.shiftKey, metaKey: e.metaKey
+            });
+          } else {
+            var mu = e.clientY;
+            var mv = piRotW - e.clientX;
+            var init = {
+              bubbles: true, cancelable: e.cancelable, composed: true, view: window,
+              detail: e.detail, clientX: mu, clientY: mv, screenX: mu, screenY: mv,
+              button: e.button, buttons: e.buttons,
+              ctrlKey: e.ctrlKey, altKey: e.altKey, shiftKey: e.shiftKey, metaKey: e.metaKey
+            };
+            if (piSynthPointerOk && typeof e.pointerId === 'number') {
+              init.pointerId = e.pointerId;
+              init.pointerType = e.pointerType;
+              init.isPrimary = e.isPrimary;
+              init.pressure = e.pressure;
+              init.width = e.height;   // the contact box rotates with the surface
+              init.height = e.width;
+              synth = new window.PointerEvent(e.type, init);
+            } else {
+              synth = new window.MouseEvent(e.type, init);
+            }
+          }
+        } catch (err) {
+          // Could not rebuild it: let the ORIGINAL through (wrong coords) rather than drop the
+          // input entirely, and say so loudly - CLAUDE.md sec.12, no silent failures.
+          console.warn('[PiOrientation] shim could not rebuild ' + e.type + ': ' + err);
+          return;
+        }
+        e.stopImmediatePropagation();
+        synth.piShim = true;
+        piCanvas.dispatchEvent(synth);
+      }
+      function piEachShimType(fn) {
+        PI_SHIM_TOUCH.forEach(fn);
+        PI_SHIM_MOUSE.forEach(fn);
+        if (piSynthPointerOk) PI_SHIM_POINTER.forEach(fn);
+      }
+      function piAddShim() {
+        piEachShimType(function (t) {
+          window.addEventListener(t, piShimHandler, { capture: true, passive: false });
+        });
+      }
+      function piRemoveShim() {
+        piEachShimType(function (t) {
+          window.removeEventListener(t, piShimHandler, { capture: true });
+        });
+      }
+      function piActivateRotation() {
+        // Dimensions are refreshed on EVERY call (the URL bar hiding fires a resize).
+        piRotW = window.innerWidth;
+        piRotH = window.innerHeight;
+        piContainer.style.width = piRotH + 'px';
+        piContainer.style.height = piRotW + 'px';
+        if (piRotationActive) return;
+        piRotationActive = true;
+        piContainer.classList.add('pi-rotated');
+        piCanvas.getBoundingClientRect = piLogicalRect;
+        piAddShim();
+        console.info('[PiOrientation] rotated surface ON ' + piRotH + 'x' + piRotW + ' boot=' + bootId);
+      }
+      function piDeactivateRotation() {
+        if (!piRotationActive) return;
+        piRotationActive = false;
+        piContainer.classList.remove('pi-rotated');
+        piContainer.style.width = '';
+        piContainer.style.height = '';
+        try {
+          delete piCanvas.getBoundingClientRect;   // restore the prototype implementation
+        } catch (err) {
+          piCanvas.getBoundingClientRect = Element.prototype.getBoundingClientRect;
+        }
+        piRemoveShim();
+        console.info('[PiOrientation] rotated surface OFF boot=' + bootId);
+      }
+
       async function requestLandscape() {
+        // Legacy path only (see piApplyOrientation): reachable when the browser cannot
+        // synthesize touch events, so the rotated surface is unsafe to use.
         var status = document.querySelector('#pi-landscape-status');
         try {
           if (!document.fullscreenElement && document.documentElement.requestFullscreen)
@@ -239,18 +436,34 @@
           console.warn('[PiOrientation] landscape request rejected: ' + e);
           status.textContent = 'Pi Browser refused rotation. Enable Auto-rotate, rotate the device, then tap again.';
         }
-        if (isLandscape()) startUnityOnce(); else showLandscapeGate();
+        piApplyOrientation();
       }
       document.querySelector('#pi-landscape-button').addEventListener('click', requestLandscape);
       document.querySelector('#pi-landscape-continue').addEventListener('click', function () {
-        console.info('[PiOrientation] escape hatch taken — booting without a landscape report boot=' + bootId);
+        console.info('[PiOrientation] escape hatch taken - booting without a landscape report boot=' + bootId);
         piBootCrumb('landscape-escape');
         startUnityOnce();
       });
-      function recheckLandscape() {
-        if (!piBrowser || unityStarted) return;
-        if (isLandscape()) startUnityOnce(); else showLandscapeGate();
+
+      // The single orientation decision, evaluated at boot and on every orientation/size event.
+      function piApplyOrientation() {
+        if (!piBrowser) {                       // non-Pi browsers: unchanged, straight to Unity
+          if (!unityStarted) startUnityOnce();
+          return;
+        }
+        if (isLandscape()) {                    // a genuinely landscape viewport takes the old path
+          piDeactivateRotation();
+          if (!unityStarted) startUnityOnce();
+          return;
+        }
+        if (!piRotationAvailable) {             // fallback: no working shim, so do NOT rotate
+          if (!unityStarted) showLandscapeGate();
+          return;
+        }
+        piActivateRotation();
+        if (!unityStarted) startUnityOnce();
       }
+      function recheckLandscape() { piApplyOrientation(); }
       window.addEventListener('orientationchange', recheckLandscape);
       window.addEventListener('resize', recheckLandscape);
       window.addEventListener('pageshow', function (e) {
@@ -265,7 +478,7 @@
         console.info('[PiLifecycle] visibility boot=' + bootId + ' state=' + document.visibilityState);
         if (document.visibilityState === 'visible') recheckLandscape();
       });
-      if (piBrowser && !isLandscape()) showLandscapeGate(); else startUnityOnce();
+      piApplyOrientation();
     </script>
   </body>
 </html>
