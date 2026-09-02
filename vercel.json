@@ -13,6 +13,10 @@
   ],
   "headers": [
     {
+      "source": "/Build/:file(.*\\.unityweb)",
+      "headers": [{ "key": "Content-Encoding", "value": "br" }]
+    },
+    {
       "source": "/",
       "headers": [{ "key": "Cache-Control", "value": "no-store, must-revalidate" }]
     },
