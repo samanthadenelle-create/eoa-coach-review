@@ -92,6 +92,30 @@ const TUNABLE_KEYS = [
     { key: 'combat.overTimeTickMs', kind: 'int' },
     { key: 'combat.overTimeMagnitudePct', kind: 'int' },
     { key: 'combat.overTimeDurationPct', kind: 'int' },
+    // WO-1343 - NOT PROD-022 knobs, and not balance either: this is a CREATIVE
+    // choice the owner has explicitly not made. She tagged one Night Store aura,
+    // then a second ("i added another option for REalm store, not sure which will
+    // be best"), then asked whether the seven Aura_* spell prefabs could cycle
+    // "slowly one after another instead ... IF THE OTHER ONE DOESNT LOOK GOOD".
+    // Three candidates and a conditional, all of which need to be seen on a
+    // device. Building one and discarding the rest would either pick for her or
+    // cost a 30-minute rebuild per opinion, so all of it ships and the choice is
+    // a row here. Her FIRST pick is the build default; nothing promotes the others.
+    //   vfx.nightStoreAuraMode        - build default 0: her first tagged key
+    //     (NightStoreoption_Aura). 1 = her second (Store_Aura). 2 = walk the seven
+    //     Aura_* prefabs one at a time. 3 = the Marker8 ring this build replaced.
+    //   vfx.nightStoreAuraCadenceMin  - build default 30: her "every 30~min". In a
+    //     burst mode a tick re-fires the burst; in rotate mode it advances the walk.
+    //   vfx.nightStoreAuraFamilyMask  - build default 127: which of the seven may
+    //     be selected (1 Arcane, 2 Dark, 4 Fire, 8 Ice, 16 Light, 32 Nature,
+    //     64 Storm). Inert unless mode is 2.
+    //   vfx.nightStoreAuraBurstRepeatSec - build default 0 (OFF): extra re-fires of
+    //     the burst inside one cadence period. Both store candidates are MEASURED
+    //     one-shots, so 0 is her spec read literally.
+    { key: 'vfx.nightStoreAuraMode', kind: 'int' },
+    { key: 'vfx.nightStoreAuraCadenceMin', kind: 'int' },
+    { key: 'vfx.nightStoreAuraFamilyMask', kind: 'int' },
+    { key: 'vfx.nightStoreAuraBurstRepeatSec', kind: 'int' },
 ];
 
 /** How long one warm lambda may reuse a read of the table. */
