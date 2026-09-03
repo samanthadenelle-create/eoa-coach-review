@@ -61,6 +61,37 @@ const TUNABLE_KEYS = [
     { key: 'assets.maxRequestAttempts', kind: 'int' },
     { key: 'visuals.missLogCap', kind: 'int' },
     { key: 'trace.assetVerbosity', kind: 'int' },
+    // WO-1306 - NOT a PROD-022 knob. The mage's drain return rate, as an integer
+    // percent of the damage actually dealt. Build default 100 = today (heal ==
+    // damage dealt). Owner ruling 2026-09-02: "be smart, dont make it need a code
+    // change, make it tweakable from a db call" - so balance rides the SAME rail
+    // rather than growing a second configuration mechanism.
+    { key: 'combat.drainReturnPct', kind: 'int' },
+    // WO-1327 - NOT PROD-022 knobs either. Two VFX FEEL/PERF dials that had to be
+    // code-side because the numbers they replace are baked into a prefab inside a
+    // GITIGNORED art pack (Assets/Spells Pack/), where a hand-edit cannot be
+    // reviewed, cannot be committed, and is erased by the next re-import.
+    //   vfx.particleBouncePct  - build default 0: a world-colliding VFX particle
+    //     stops at the surface it hits and dies, instead of ricocheting off every
+    //     layer with zero energy loss and coming back to the caster. 100 = leave
+    //     the pack's authored collision alone.
+    //   vfx.maxParticleLights  - build default 4: concurrent real-time point
+    //     lights ONE spawned VFX host may drive. Spell_Fire_9 authored 25.
+    { key: 'vfx.particleBouncePct', kind: 'int' },
+    { key: 'vfx.maxParticleLights', kind: 'int' },
+    // WO-1330 - NOT PROD-022 knobs. The THREE levers of the one over-time engine
+    // (DeNelle.Core.Combat.OverTimeEngine), shared by every damage-over-time and
+    // every heal-over-time effect rather than duplicated per ability.
+    //   combat.overTimeTickMs        - build default 1000: milliseconds between
+    //     pulses. Exactly the "const float tick = 1f" the two shipped DoT
+    //     coroutines hardcoded. Cadence only - total delivery is invariant.
+    //   combat.overTimeMagnitudePct  - build default 100: percent scale on each
+    //     pulse's size, both signs.
+    //   combat.overTimeDurationPct   - build default 100: percent scale on each
+    //     effect's duration, both signs.
+    { key: 'combat.overTimeTickMs', kind: 'int' },
+    { key: 'combat.overTimeMagnitudePct', kind: 'int' },
+    { key: 'combat.overTimeDurationPct', kind: 'int' },
 ];
 
 /** How long one warm lambda may reuse a read of the table. */
