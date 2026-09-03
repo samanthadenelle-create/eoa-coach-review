@@ -562,7 +562,20 @@
       window.addEventListener('orientationchange', recheckLandscape);
       window.addEventListener('resize', recheckLandscape);
       window.addEventListener('pageshow', function (e) {
-        console.info('[PiLifecycle] pageshow boot=' + bootId + ' persisted=' + !!e.persisted);
+        // PROD-022: persisted IS the discriminator, and it is the one crumb the 2026-09-02 triage
+        // was missing. Five post-deploy sessions showed previous.phase='unity-running' with
+        // navigation='navigate'/'back_forward' and NO pagehide crumb anywhere - which matches no row
+        // of the WO's diagnostic table. persisted=true means this document came back from the
+        // bfcache (Pi Browser navigated away and returned; the process lived). persisted=false on a
+        // back_forward means the document was REBUILT - i.e. the content process was killed while it
+        // was in the back/forward list. That distinction is not derivable from any other line we
+        // capture, which is why console.info alone left the root unproven.
+        var line = '[PiLifecycle] pageshow boot=' + bootId + ' persisted=' + !!e.persisted +
+                   ' navigation=' + piNavType;
+        console.info(line);
+        // NOT a beacon: pageshow is a restore, not a teardown, so an ordinary fetch survives and
+        // keeps this off the beacon queue that pagehide/hidden depend on.
+        piTraceEmit(line, false);
         recheckLandscape();
       });
       window.addEventListener('pagehide', function (e) {
