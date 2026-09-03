@@ -8,6 +8,8 @@
     { "path": "/api/admin/google-play-voided-reconcile", "schedule": "30 4 * * *" }
   ],
   "rewrites": [
+    { "source": "/privacy", "destination": "/privacy.html" },
+    { "source": "/terms", "destination": "/terms.html" },
     { "source": "/.well-known/assetlinks.json", "destination": "/api/assetlinks" },
     { "source": "/icon.png", "destination": "/api/icon" }
   ],
