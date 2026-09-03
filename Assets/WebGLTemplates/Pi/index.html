@@ -289,6 +289,107 @@
       // survive the case where the runtime never comes up at all.
       piTraceEmit(piBootLine, false);
 
+      // ===================================================================================
+      // PROD-022 Lane C: separate "the MAIN THREAD wedged" from "the CONTENT PROCESS was killed".
+      // ===================================================================================
+      // The 2026-09-03T00:21-00:28Z capture pinned FORTY consecutive deaths to unity-running
+      // +0.85..4.21s (median 1.35s) with NOT ONE pagehide and NOT ONE visibilitychange - on an
+      // instrument proven working in the SAME dataset (six pagehide rows landed by sendBeacon in
+      // that same window, from the same build on the same device). So the document is destroyed
+      // without any teardown event firing at all. Exactly two mechanisms produce that shape, and
+      // no crumb we currently capture can tell them apart:
+      //   (a) the CONTENT PROCESS is terminated from outside (memory kill / renderer crash) -
+      //       nothing runs afterwards because there is no process left to run it;
+      //   (b) the MAIN THREAD is wedged (an unbounded spin inside the runtime), so no handler CAN
+      //       run - a lifecycle listener is not "not firing", it is not being reached - and the
+      //       host tears the page down afterwards.
+      // (a) is a build/footprint problem. (b) is OUR code. They have opposite fixes, which is why
+      // guessing between them is forbidden (CLAUDE.md sec.12).
+      //
+      // A Worker has ITS OWN THREAD. The main thread does nothing but stamp its liveness every
+      // 500ms; the worker does all the posting. Read the LAST rows of a dead session:
+      //   w rising while m is FROZEN and mAgeMs climbing  -> (b) the main thread wedged first
+      //   w and m stop in the same instant, mAgeMs small   -> (a) the whole process died at once
+      // Cost is one worker (~1-2MB) and one POST/sec against a 165MB data file - too small to be
+      // the thing that tips a memory ceiling, but it is a real addition and is stated, not hidden.
+      var piMainTick = 0, piMainAt = Date.now(), piBootAt = piMainAt, piWorker = null;
+      function piHeartbeatLine(w, m, age, vis, el) {
+        return '[PiLifecycle] hb w=' + w + ' m=' + m + ' mAgeMs=' + age + ' vis=' + vis + ' upMs=' + el;
+      }
+      try {
+        // Built from a string so there is no second file to deploy and no second fetch to fail.
+        // Cadence: 1s for the first 60 beats (the whole crash window is 8.7s, so this is the part
+        // that matters), then 10s forever - which also makes the >10-minute acceptance criterion
+        // measurable directly, without depending on Unity's own sink being alive.
+        var piWorkerSrc =
+          "var m=-1,mAt=0,vis='?',b=0,ep='',s='',bd='',t0=Date.now();" +
+          "onmessage=function(e){var d=e.data||{};" +
+            "if(d.cfg){ep=d.ep;s=d.s;bd=d.bd;setTimeout(tick,1000);}" +
+            "else{m=d.m;mAt=d.at;vis=d.vis;}};" +
+          "function post(msg){try{fetch(ep,{method:'POST',keepalive:true,mode:'cors',credentials:'omit'," +
+            "headers:{'Content-Type':'text/plain;charset=UTF-8'}," +
+            "body:JSON.stringify({sessionId:s,buildId:bd,entries:[{utcMs:Date.now(),kind:'log'," +
+            "tag:'PiLifecycle',message:msg,scene:'PiTemplate'}]})})['catch'](function(){});}catch(x){}}" +
+          "function tick(){b++;var now=Date.now();" +
+            "post('[PiLifecycle] hb w='+b+' m='+m+' mAgeMs='+(mAt?now-mAt:-1)+' vis='+vis+' upMs='+(now-t0));" +
+            "setTimeout(tick,b<60?1000:10000);}";
+        piWorker = new Worker(URL.createObjectURL(new Blob([piWorkerSrc], { type: 'text/javascript' })));
+        piWorker.postMessage({ cfg: 1, ep: PI_TRACE_ENDPOINT, s: piTraceSession, bd: piTraceBuild });
+      } catch (e) {
+        // A hardened webview can refuse blob: workers outright. That is a REPORTED outcome, not a
+        // silent one - without this line a reader would see no hb rows and conclude the page died
+        // instantly, which is the opposite of what happened.
+        piWorker = null;
+        var piWorkerLine = '[PiLifecycle] heartbeat worker unavailable: ' + e;
+        console.info(piWorkerLine);
+        piTraceEmit(piWorkerLine, false);
+      }
+      setInterval(function () {
+        piMainTick++; piMainAt = Date.now();
+        if (piWorker) {
+          try { piWorker.postMessage({ m: piMainTick, at: piMainAt, vis: document.visibilityState }); } catch (e) { }
+        }
+      }, 500);
+      if (!piWorker) {
+        // No worker: a main-thread-only heartbeat still measures LIFETIME, which the >10-minute
+        // acceptance criterion needs. It CANNOT separate a wedge from a kill, and it says so by
+        // reporting w=NA rather than a number - so no reader is misled into believing a second
+        // thread confirmed anything.
+        (function () {
+          var b = 0;
+          function beat() {
+            b++;
+            piTraceEmit(piHeartbeatLine('NA', b, Date.now() - piMainAt, document.visibilityState,
+                                        Date.now() - piBootAt), false);
+            setTimeout(beat, b < 60 ? 1000 : 10000);
+          }
+          setTimeout(beat, 1000);
+        })();
+      }
+
+      // WebGL CONTEXT LOSS is the door WebKit uses to reclaim GPU resources under pressure, often
+      // BEFORE it resorts to killing the process. If it fires, it names GPU/memory reclamation
+      // directly and the death is a footprint problem; if a session dies with no such line, the
+      // death did not come through that door. Purely observational: preventDefault() is NOT called,
+      // so the browser's own restore behaviour is unchanged.
+      try {
+        var piCanvas = document.querySelector('#unity-canvas');
+        if (piCanvas) {
+          piCanvas.addEventListener('webglcontextlost', function () {
+            var l = '[PiLifecycle] webglcontextlost boot=' + bootId + ' upMs=' + (Date.now() - piBootAt);
+            console.info(l);
+            piTraceEmit(l, true);   // beacon: context loss frequently immediately precedes teardown
+          }, false);
+          piCanvas.addEventListener('webglcontextrestored', function () {
+            var l = '[PiLifecycle] webglcontextrestored boot=' + bootId + ' upMs=' + (Date.now() - piBootAt);
+            console.info(l);
+            piTraceEmit(l, false);
+          }, false);
+        }
+      } catch (e) {
+        console.info('[PiLifecycle] canvas context listeners not installed: ' + e);
+      }
+
       // The gate must be ESCAPABLE. Some Pi WebViews never report innerWidth >= innerHeight
       // (misreported viewport, or a tablet/desktop-shaped window), which hard-blocked the player
       // behind the modal forever with no way through. After this many ms with the gate still up,
