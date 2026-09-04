@@ -685,6 +685,14 @@
         piBootCrumb('pagehide');
         piTraceEmit(line, true);   // beacon: a plain fetch does not survive teardown
       });
+      window.addEventListener('beforeunload', function (e) {
+        // WO-1324: Final flush on unload. beforeunload is the last event before the page dies
+        // (before pagehide on some browsers). Fire a beacon with a final-flush marker so we can
+        // measure how many buffered entries exist at the moment of death.
+        var line = '[WebTrace] final-flush-on-unload boot=' + bootId + ' upMs=' + (Date.now() - piBootAt);
+        console.info(line);
+        piTraceEmit(line, true);   // beacon: must survive unload
+      });
       document.addEventListener('visibilitychange', function () {
         var line = '[PiLifecycle] visibility boot=' + bootId + ' state=' + document.visibilityState;
         console.info(line);
