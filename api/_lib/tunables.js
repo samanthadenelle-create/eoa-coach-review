@@ -116,6 +116,62 @@ const TUNABLE_KEYS = [
     { key: 'vfx.nightStoreAuraCadenceMin', kind: 'int' },
     { key: 'vfx.nightStoreAuraFamilyMask', kind: 'int' },
     { key: 'vfx.nightStoreAuraBurstRepeatSec', kind: 'int' },
+    // WO-1374 - NOT PROD-022 knobs. THE RAID REWARD TABLE, from the north-star map
+    // docs/PROGRAM_RAID_ECONOMY_2026-09-04.md, whose section 12.7 says in capitals
+    // that every number in it is a tunable. This is the curve the owner sets BY
+    // FEEL: how much a raid pays, and how much better raiding has to get before it
+    // pays more.
+    //   raid.lootWoodBase   - build default 1800: wood at a PERFECT run (3 stars
+    //     AND 100% razed) on a Camp I-tier base, before the camp multiplier.
+    //   raid.lootIronBase   - build default 1100: the same for iron.
+    //   the five ladder rungs - percent of that base by result, per the map:
+    //     failed 18 (the middle of its stated 15-20 band, and deliberately not 0),
+    //     1 star 50, 2 stars 75, 3 stars 100, 3 stars + 100% destruction 110.
+    // (!) These two bases are the ONE place in this file where a default is NOT
+    // today's shipped behaviour - today a raid pays zero wood and zero iron, which
+    // is the defect the work order exists to close, and the map states the target
+    // outright. Same shape as combat.drainReturnPct shipping at her 60. Setting
+    // both bases to 0 restores the old food-and-crystals-only payout exactly.
+    // (!) GOLD IS HERE NOW. The fork WO-1374 was blocked on was CLOSED at commit
+    // 281902df0: troops cost GOLD, they ALSO take time, and a second gold spend
+    // hires mercenaries to skip the clock. Gold is FOUR knobs, not one, because
+    // the map publishes a DESIGNED target per camp (2200 / 3100 / 4500 / 6500)
+    // sized at 125-140% of that camp's expected army replacement cost - and it is
+    // deliberately NOT multiplied by the camp's rewardMultiplier, since x1.5 of
+    // 2200 is 3300 and her Camp II number is 3100.
+    //   raid.lootCrystalsBase / ...PerStar - build defaults 20 and 2: a perfect
+    //     clear pays 26 crystals, DOWN from the 55 this build used to pay, and not
+    //     multiplied by the camp multiplier either. "Crystals are timer
+    //     compression" - it is the one reward in the map's table that decreases.
+    { key: 'raid.lootWoodBase', kind: 'int' },
+    { key: 'raid.lootIronBase', kind: 'int' },
+    { key: 'raid.lootFailPct', kind: 'int' },
+    { key: 'raid.lootOneStarPct', kind: 'int' },
+    { key: 'raid.lootTwoStarPct', kind: 'int' },
+    { key: 'raid.lootThreeStarPct', kind: 'int' },
+    { key: 'raid.lootPerfectPct', kind: 'int' },
+    { key: 'raid.lootCoinsBaseCamp1', kind: 'int' },
+    { key: 'raid.lootCoinsBaseCamp2', kind: 'int' },
+    { key: 'raid.lootCoinsBaseCamp3', kind: 'int' },
+    { key: 'raid.lootCoinsBaseBastion', kind: 'int' },
+    { key: 'raid.lootCrystalsBase', kind: 'int' },
+    { key: 'raid.lootCrystalsPerStar', kind: 'int' },
+    //   raid.starterArmySize - build default 3: free Footmen granted the first time
+    //     a save has a Barracks (map section 2, "the first army is free"). Once per
+    //     save, so a rebuilt Barracks is not a troop faucet. 0 disables it.
+    { key: 'raid.starterArmySize', kind: 'int' },
+    // WO-1379 HEARTFIRE - the raid PACING charge, and it is a CHARGE, NOT A
+    // CURRENCY: never earned, traded, stored, gifted or bought, so neither key
+    // below is a price and neither may ever be joined to a wallet or a purchase.
+    //   raid.heartfireMaxCharges   - build default 3: how many expeditions the
+    //     Heart can sustain at once. Charges STACK to this ceiling so a player who
+    //     sleeps or works is not punished.
+    //   raid.heartfireRegenSeconds - build default 14400 (4 h) per charge. It
+    //     ships EQUAL to the shortest authored per-camp cooldown on purpose, which
+    //     is what keeps "a player holding Heartfire always has somewhere to spend
+    //     it" true. Raising it past that shortest cooldown breaks the criterion.
+    { key: 'raid.heartfireMaxCharges', kind: 'int' },
+    { key: 'raid.heartfireRegenSeconds', kind: 'int' },
 ];
 
 /** How long one warm lambda may reuse a read of the table. */
