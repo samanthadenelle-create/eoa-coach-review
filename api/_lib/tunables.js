@@ -172,6 +172,24 @@ const TUNABLE_KEYS = [
     //     it" true. Raising it past that shortest cooldown breaks the criterion.
     { key: 'raid.heartfireMaxCharges', kind: 'int' },
     { key: 'raid.heartfireRegenSeconds', kind: 'int' },
+    // WO-1388 BUILDER'S HOUR - NOT a PROD-022 knob. How long the +1 Builder crew
+    // sold by the $1.99 'builders-hour' pack lasts, in seconds.
+    //   economy.packTemporaryBuilderSeconds - build default 21600 (6 h, the owner's
+    //     number). A charge bought while a window is running is DEFERRED behind it,
+    //     never stacked and never burned. 0 refuses the grant and keeps the charge
+    //     deferred. Convenience compresses TIME, never sells power - this is a
+    //     duration and nothing else.
+    { key: 'economy.packTemporaryBuilderSeconds', kind: 'int' },
+    // WO-1384b NIGHT MARKET GLOW - NOT PROD-022 knobs. Three FEEL levers on the
+    // HUD's permanent store card: a soft rounded ring plus three comets chasing
+    // the card's perimeter. Read when the HUD builds the card; clamped there.
+    //   hud.nightMarketGlowLapSec      - build default 5 (seconds per lap, 1..60).
+    //   hud.nightMarketGlowAlphaPct    - build default 35 (peak alpha %, 0..100).
+    //   hud.nightMarketGlowPaletteMask - build default 7 (Gold=1|Amber=2|Rose=4,
+    //     0..7; an empty mask resolves to Gold alone, never to nothing).
+    { key: 'hud.nightMarketGlowLapSec', kind: 'int' },
+    { key: 'hud.nightMarketGlowAlphaPct', kind: 'int' },
+    { key: 'hud.nightMarketGlowPaletteMask', kind: 'int' },
 ];
 
 /** How long one warm lambda may reuse a read of the table. */
