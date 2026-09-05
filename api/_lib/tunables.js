@@ -190,6 +190,19 @@ const TUNABLE_KEYS = [
     { key: 'hud.nightMarketGlowLapSec', kind: 'int' },
     { key: 'hud.nightMarketGlowAlphaPct', kind: 'int' },
     { key: 'hud.nightMarketGlowPaletteMask', kind: 'int' },
+    // WO-1366 ARENA WAGER - NOT PROD-022 knobs. PRICES: the Crystals staked per
+    // opponent tier and the purse a win pays. Read live by ArenaWagerTunables,
+    // which owns the clamps; the defaults are exactly what ArenaCatalog.cs
+    // hardcoded, deliberately not re-picked.
+    //   arena.wagerTier1  - build default 50  (Crystals, 1..100000).
+    //   arena.wagerTier2  - build default 100 (Crystals, 1..100000).
+    //   arena.wagerTier3  - build default 200 (Crystals, 1..100000).
+    //   arena.winPursePct - build default 200 (percent of the wager, 100..1000;
+    //     100 returns only the stake, below that a win would lose money).
+    { key: 'arena.wagerTier1', kind: 'int' },
+    { key: 'arena.wagerTier2', kind: 'int' },
+    { key: 'arena.wagerTier3', kind: 'int' },
+    { key: 'arena.winPursePct', kind: 'int' },
 ];
 
 /** How long one warm lambda may reuse a read of the table. */
