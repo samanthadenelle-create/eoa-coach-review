@@ -45,6 +45,14 @@
 //
 // See the corrected honesty note on verifyGuest for the exploit this closed.
 //
+// ⚠ ONE SCOPED EXCEPTION, ADDED 2026-09-06 (WO-1440, owner ruling): /api/promo/redeem
+//   — and ONLY that route — calls authenticatePromoRedeem(), which admits a guest and
+//   marks the result `unproven:true` so the caller must clear a non-client-choosable
+//   IP budget before paying. The rule above is otherwise untouched: referral claim,
+//   entitlements and every other granting route still call authenticateGranting() and
+//   still refuse guests. The exception is a NAMED FUNCTION with exactly one caller so
+//   that it cannot spread by being the default.
+//
 // EVERY failure returns a STABLE MACHINE CODE (AuthCode). Before this, all nine
 // distinct ways to fail collapsed into one opaque 401 with a prose "reason" sent
 // to the PLAYER and nothing kept server-side — you could not tell no-header from
@@ -541,6 +549,13 @@ async function verifyAndConsume(sql, headers, payload, claimedPlayerId) {
  * Value-granting routes call authenticateGranting() (below), not authenticate().
  * Do not "simplify" them back — the distinction IS the fix.
  *
+ * ⚠ AMENDED 2026-09-06 (WO-1440), and the amendment is narrow: the owner ruled that
+ * /api/promo/redeem — that route alone — may admit a guest, via the separate
+ * authenticatePromoRedeem() below. The Sybil property described above is NOT denied
+ * by that ruling; it is accepted as a bounded cost, and answered with a global cap
+ * plus an IP budget rather than with the guest id. /api/referral/claim, named in the
+ * paragraph above, is UNCHANGED and still refuses guests.
+ *
  * @returns {Promise<{ok:boolean, guestId?:string, code?:string, detail?:object}>}
  */
 async function verifyGuest(sql, headers, claimedPlayerId) {
@@ -673,6 +688,9 @@ async function authenticate(sql, req, payload, claimedPlayerId) {
 /**
  * THE ENTRY POINT EVERY VALUE-GRANTING ROUTE CALLS (added 2026-08-18).
  *
+ * ⚠ EXCEPT ONE, since 2026-09-06: /api/promo/redeem calls authenticatePromoRedeem()
+ *   on the owner's ruling. Nothing else does, and nothing else should.
+ *
  * Identical to authenticate(), then ONE extra, deliberately blunt rule:
  *
  *   ⛔ the proven identity must be a WALLET. A guest is refused, always.
@@ -730,8 +748,89 @@ async function authenticateGranting(sql, req, payload, claimedPlayerId) {
 const GRANTING_MODES = {
     wallet: isWalletId,   // ed25519 signature over a single-use nonce
     google: isPlayId,     // Google-signed ID token + a server-only HMAC key
-    // guest: ⛔ NEVER. See the honesty note on verifyGuest.
+    // guest: ⛔ NEVER through THIS function. See the honesty note on verifyGuest,
+    //        and see authenticatePromoRedeem below for the ONE scoped exception the
+    //        owner ruled on 2026-09-06 — which is a DIFFERENT function precisely so
+    //        that this allowlist stays exactly as strict as it reads.
 };
+
+// ── THE ONE SCOPED EXCEPTION — /api/promo/redeem ONLY (owner ruling 2026-09-06) ──
+/**
+ * Guests can be locked back out of promo redemption with
+ * PROMO_GUEST_REDEEM_ENABLED=false, with no redeploy of logic and WITHOUT killing
+ * guest saves the way GUEST_SAVE_ENABLED=false would. Default ON, because the
+ * campaign this was built for is live.
+ *
+ * ⛔ This switch governs ONE route. It is not a general "guests may be paid" flag
+ *    and must never be read by a second endpoint.
+ */
+function promoGuestRedeemEnabled() {
+    const v = process.env.PROMO_GUEST_REDEEM_ENABLED;
+    if (v == null || v === '') return true;             // default ON
+    return !/^(0|false|off|no)$/i.test(String(v).trim());
+}
+
+/**
+ * THE PROMO-REDEEM GATE. Used by api/promo/redeem.js and by NOTHING ELSE.
+ *
+ * ── WHY THIS EXISTS, AND WHY IT IS A SEPARATE FUNCTION ───────────────────────────
+ * On 2026-08-18 this file made value-granting routes call authenticateGranting(),
+ * which refuses a guest, because a guest id is MINTED BY THE CLIENT and an attacker
+ * is a client: every fresh `guest-local-<64 hex>` is a brand-new "player". That
+ * reasoning is still true and is NOT retracted.
+ *
+ * On 2026-09-06 the owner reversed the CONCLUSION for promo redemption alone, with
+ * that risk stated to her explicitly: an acquisition promo that refuses everyone it
+ * exists to acquire is worth nothing, the live FIRSTWATCH campaign points at the
+ * PUBLISHED dApp-Store build (which cannot be changed inside the campaign's life),
+ * and the exposure is bounded by the code's own global cap rather than being an
+ * unbounded drain. See api/promo/redeem.js's header for the full record, including
+ * the residual risk.
+ *
+ * ⛔ IT IS A SEPARATE FUNCTION, NOT A FLAG ON authenticateGranting(), for exactly the
+ *    reason authenticateGranting() is itself separate from authenticate(): a boolean
+ *    parameter makes the safe answer the one you have to remember to ask for. Every
+ *    other value-granting route keeps calling authenticateGranting() and keeps
+ *    refusing guests. `grep authenticatePromoRedeem` returns one caller, forever.
+ *
+ * ⛔ A GUEST RESULT IS MARKED `unproven: true`. The caller MUST apply an extra,
+ *    non-client-choosable budget (an IP budget) before granting. Authenticating a
+ *    guest here means "this request may proceed to the abuse gates", never "this
+ *    caller has earned a payout".
+ */
+async function authenticatePromoRedeem(sql, req, payload, claimedPlayerId) {
+    const r = await authenticate(sql, req, payload, claimedPlayerId);
+    if (!r.ok) return r;
+
+    const mode = String(r.mode || '');
+    const identity = String(r.identity || '');
+
+    // Proven rails first and unchanged: a wallet holder still redeems as a wallet
+    // holder, through exactly the same allowlist every other granting route uses.
+    const provenShapeCheck = GRANTING_MODES[mode];
+    if (typeof provenShapeCheck === 'function' && provenShapeCheck(identity)) {
+        return Object.assign({}, r, { unproven: false });
+    }
+
+    // The scoped exception. Belt AND braces, same as authenticateGranting: the mode
+    // must be 'guest' AND the identity must still satisfy the guest shape.
+    if (mode === 'guest' && isGuestId(identity)) {
+        if (!promoGuestRedeemEnabled()) {
+            return {
+                ok: false, mode: mode, identity: identity,
+                code: AuthCode.WALLET_REQUIRED,
+                detail: { grantingRoute: true, provenMode: mode, promoGuestSwitch: 'off' },
+            };
+        }
+        return Object.assign({}, r, { unproven: true });
+    }
+
+    return {
+        ok: false, mode: r.mode, identity: r.identity,
+        code: AuthCode.WALLET_REQUIRED,
+        detail: { grantingRoute: true, provenMode: r.mode },
+    };
+}
 
 module.exports = {
     issueSession, verifySession, SESSION_TTL_SECONDS,
@@ -749,6 +848,7 @@ module.exports = {
     isPlayId,
     isProvenValueId,
     guestEnabled,
+    promoGuestRedeemEnabled,
     googleIdentityEnabled,
     buildSignedMessage,
     issueNonce,
@@ -759,5 +859,6 @@ module.exports = {
     verifyGuest,
     verifyAndConsume,   // back-compat
     authenticate,          // ← self-service routes (own row): save, load, generate, tower-swap
-    authenticateGranting,  // ← ANY route that hands out value: promo redeem, referral claim
+    authenticateGranting,  // ← ANY route that hands out value: referral claim, entitlements, …
+    authenticatePromoRedeem, // ← /api/promo/redeem ONLY (owner ruling 2026-09-06). One caller.
 };
