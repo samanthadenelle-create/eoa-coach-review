@@ -464,6 +464,12 @@ namespace DeNelle.Wallet
 
             SetStatus(WalletStatus.Connecting);
             LastConnectError = string.Empty;
+
+            // WO-1420: the ONLY way to tell "our deadline expired" from "the provider threw a
+            // TimeoutException as its refusal shape" is to measure. Unscaled real time, because the
+            // Timeout below uses UnscaledDeltaTime and a paused/slowed game must not skew the branch.
+            float connectStartedAt = Time.realtimeSinceStartup;
+            DateTime associationCloseBefore = TargetedLocalAssociationScenario.LastAssociationCloseUtc;
             try
             {
                 // TIME-BOUNDED (security audit 2026-08-02): an unanswered MWA handshake
@@ -506,13 +512,49 @@ namespace DeNelle.Wallet
 
                 return account;
             }
-            catch (TimeoutException)
+            // ⛔ WO-1420 — A TimeoutException HERE HAS TWO VERY DIFFERENT CAUSES, AND REPORTING THE
+            // WRONG ONE MIS-STEERS EVERY FUTURE TRIAGE OF THIS SEAM.
+            //   (a) OUR deadline expired: the wallet never answered for ConnectTimeoutSeconds.
+            //   (b) The provider/MWA layer threw TimeoutException as its REFUSAL shape, long before
+            //       our deadline, and UniTask.Timeout re-surfaced it (the delay promise never won
+            //       the race).
+            // Device capture seq 4683, 2026-09-06 00:49:31 (build 2026.09.06.357453): Connect at
+            // 31.425, Fail at 31.822 - FOUR HUNDRED MILLISECONDS - while the message asserted 30 s.
+            // Five wallet handlers were installed and one of them ANSWERED, closing the association
+            // endpoint at 31.538. The old copy sent a reader looking for a missing wallet app.
+            // Branch on measured elapsed time; nothing else can tell (a) from (b).
+            catch (TimeoutException ex)
             {
-                LastConnectError = "Your wallet did not respond in " + (int)ConnectTimeoutSeconds +
-                                   " seconds. Open your wallet app and try again.";
-                FlowTrace.Fail("Wallet",
-                    $"Connect TIMED OUT after {ConnectTimeoutSeconds}s (no wallet app installed, or the " +
-                    "handshake was never answered) — staying disconnected.");
+                float elapsed = Time.realtimeSinceStartup - connectStartedAt;
+                bool ourDeadline = elapsed >= ConnectTimeoutSeconds;
+
+                // WO-1420 item 2: name the association close in the SAME line when it happened
+                // during THIS attempt, so a triage never again has to correlate two threads by
+                // timestamp. Correlation only - see LastAssociationCloseUtc's remarks.
+                DateTime closedAt = TargetedLocalAssociationScenario.LastAssociationCloseUtc;
+                string closeNote = closedAt > associationCloseBefore
+                    ? " A wallet closed its one-shot association endpoint during this attempt, so the " +
+                      "wallet app WAS reachable and answered."
+                    : string.Empty;
+
+                if (ourDeadline)
+                {
+                    LastConnectError = "Your wallet did not respond in " + (int)ConnectTimeoutSeconds +
+                                       " seconds. Open your wallet app and try again.";
+                    FlowTrace.Fail("Wallet",
+                        $"Connect TIMED OUT after {elapsed:F1}s (our {ConnectTimeoutSeconds}s deadline expired - " +
+                        "no wallet app installed, or the handshake was never answered) — staying disconnected." +
+                        closeNote);
+                }
+                else
+                {
+                    LastConnectError = "Your wallet refused the connection. Open your wallet app and try again.";
+                    FlowTrace.Fail("Wallet",
+                        $"Connect REFUSED by the wallet after {elapsed:F1}s (TimeoutException raised INSIDE the " +
+                        $"provider, not our {ConnectTimeoutSeconds}s deadline): {ex.Message} — staying disconnected." +
+                        closeNote);
+                }
+
                 SetStatus(WalletStatus.Disconnected);
                 return default;
             }
