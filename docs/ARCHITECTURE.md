@@ -105,16 +105,26 @@ Breach (Village2/dungeon) ► GoBattle(BattleParams) ► ATBBattle ► returns t
 > `Assets/Editor/WorldMergeBuilder.cs`), NOT a separate `MainCastle_Hall` hub with `OuterWorld` streamed
 > additively. `MainCastle_Hall` references below are STALE.
 
-- **Home/start hub = `MainCastle_Hall`** (the 2026-06-08 castle-start pivot; built by
-  `Assets/Editor/CastleHubBuilder.cs`, owner hand-dialed + committed — **do not regen, it reverts
-  owner offsets**). Stale "…→ Village" prose lingers in `PetSelectController`/`SceneRouter` headers;
-  trust the code — onboarding lands in `MainCastle_Hall`.
-- **`Village2`** = generated TD town / raid-target stronghold (canonical). **`Village.unity` =
-  ABANDONED / corruption-cursed — never use or re-save it.** `SceneRouter.Village = "Village2"`,
-  `Castle = "MainCastle_Hall"`.
-- **`OuterWorld` streams additively over any hub** via `WorldSceneLoader` (`HubScenes.IsHub` is the
-  single source of hub truth, read by the loader + HUD). Every load guards
-  `Application.CanStreamedLevelBeLoaded`.
+- **Home/start hub = `Main_Castle_Overworld`** (corrected 2026-09-06). ⛔ The old line here said
+  `MainCastle_Hall` flat, and that has been wrong since WO-608. `SceneRouter.Castle` is a **property,
+  not a const** — `Assets/_Modules/Core/SceneRouter.cs:151-153` resolves
+  `FeatureFlags.MergedWorld ? CastleCandidates[0] : CastleCandidates[1]`, and
+  `SceneRouter.cs:168` declares `CastleCandidates = { "Main_Castle_Overworld", "MainCastle_Hall" }` as
+  **the only place either name is spelled out**. With `MergedWorld` ON the hub is the single merged
+  `Main_Castle_Overworld` scene (castle + outer world, one continuous navmesh, no additive stream and
+  no seam warp). **`MainCastle_Hall` is the LEGACY flag-OFF fallback** — it still exists on disk
+  (`Assets/Scenes/MainCastle_Hall.unity`, verified today) which is exactly what keeps re-seeding stale
+  docs, but it is not the hub. Never re-type either name in a doc or a gate; iterate `CastleCandidates`.
+  Built by `Assets/Editor/CastleHubBuilder.cs`, owner hand-dialed + committed — **do not regen, it
+  reverts owner offsets**.
+- **`Village2`** = generated TD town / raid-target stronghold (canonical). **`Village.unity` is DELETED
+  from the tree** (verified 2026-09-06: no `Village.unity` under `Assets/`; it was abandoned and
+  corruption-cursed before removal — never resurrect it). `SceneRouter.Village = "Village2"`.
+- ⛔ **`OuterWorld.unity` IS DELETED** (verified 2026-09-06: no such file under `Assets/`). The old line
+  here said it "streams additively over any hub" via `WorldSceneLoader`; with the merged world that
+  additive stream is gone, and a seat following the retired sentence goes looking for a scene that is
+  not in the repo. `HubScenes.IsHub` remains the single source of hub truth for the loader + HUD, and
+  every load still guards `Application.CanStreamedLevelBeLoaded`.
 - **Two-scene NavMesh seam reality:** a navmesh baked in one scene does **not** auto-connect to the
   neighbor's. Crossing is a **confirm-to-cross seam + WarpTo**: `SceneTransitionTrigger.WarpTo`
   disables → warps → re-enables the hero's `NavMeshAgent` across the seam (hero locomotion is
