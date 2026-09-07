@@ -108,6 +108,20 @@ const NONCE_TTL_SECONDS = 300; // 5 minutes
 // turn it into a permanent login: the whole justification is the size of the window.
 const SESSION_TTL_SECONDS = 900; // 15 minutes
 
+// WO-1441. THE CEILING ON RENEWAL. A session may be exchanged for a fresh one without a
+// new wallet signature (renewSession), which is what stops cloud save dying mid-raid --
+// but sliding a window forever IS the "permanent login" the block above forbids. So the
+// chain is capped in ABSOLUTE time from the signature that started it: past this, the
+// player signs again, no exceptions and no renewal path around it.
+//
+// ⛔ THE TWO NUMBERS DO DIFFERENT JOBS AND MUST NOT BE CONFLATED. SESSION_TTL_SECONDS is
+// how long a STOLEN BEARER TOKEN is useful -- the security window, and it stays at 15
+// minutes because renewal ROTATES the token (the old one is revoked on every renew), so
+// a captured token still dies in at most a quarter hour. This constant is how long the
+// player goes without seeing a wallet sheet -- the UX window. Raising the first weakens
+// the system; raising this one only decides how often she signs.
+const SESSION_ABSOLUTE_TTL_SECONDS = 43200; // 12 hours from the original signature
+
 // ── Identity shapes ──────────────────────────────────────────────────────────
 // The wallet regex is deliberately IDENTICAL to the one api/auth/nonce.js applies
 // and to the client's GameStateService.IsCloudIdentityShaped — three copies of
@@ -288,7 +302,7 @@ const SESSION_RE = /^[A-Za-z0-9_-]{40,90}$/;
  * @param {string} subject       the PROVEN identity (base58 wallet, or a play- id)
  * @param {string} identityKind  'wallet' | 'google' — audit only; never an authorization input
  */
-async function issueSession(sql, wallet, identityKind) {
+async function issueSession(sql, wallet, identityKind, signedAt) {
     const kind = identityKind === 'google' ? 'google' : 'wallet';
     const token = crypto.randomBytes(32).toString('base64url');
 
@@ -298,12 +312,105 @@ async function issueSession(sql, wallet, identityKind) {
         await sql`DELETE FROM auth_sessions WHERE wallet = ${wallet} AND (revoked = TRUE OR expires_at < NOW())`;
     } catch (_) { /* housekeeping only */ }
 
+    // WO-1441: `signed_at` is the clock the ABSOLUTE cap is measured from. A fresh mint
+    // stamps NOW (this session chain begins at this signature); a RENEWAL passes the
+    // original forward, which is the only reason the cap cannot be reset by renewing.
+    // NULL => NOW() in SQL, so the existing callers keep byte-identical behaviour.
     const rows = await sql`
-        INSERT INTO auth_sessions (token, wallet, identity_kind, expires_at)
-        VALUES (${token}, ${wallet}, ${kind}, NOW() + (${SESSION_TTL_SECONDS} * INTERVAL '1 second'))
-        RETURNING token, expires_at
+        INSERT INTO auth_sessions (token, wallet, identity_kind, expires_at, signed_at)
+        VALUES (${token}, ${wallet}, ${kind},
+                NOW() + (${SESSION_TTL_SECONDS} * INTERVAL '1 second'),
+                COALESCE(${signedAt || null}::timestamptz, NOW()))
+        RETURNING token, expires_at, signed_at
     `;
-    return { token: rows[0].token, expiresAt: rows[0].expires_at, ttlSeconds: SESSION_TTL_SECONDS };
+    return {
+        token: rows[0].token,
+        expiresAt: rows[0].expires_at,
+        ttlSeconds: SESSION_TTL_SECONDS,
+        signedAt: rows[0].signed_at,
+    };
+}
+
+/**
+ * WO-1441. Exchange a STILL-VALID session for a fresh one WITHOUT a wallet signature.
+ *
+ * ⛔ WHY THIS EXISTS. SESSION_TTL_SECONDS is 15 minutes and nothing renewed it, so a
+ * player who signed the handshake at boot lost cloud save a quarter of an hour later --
+ * `why` flipped from `missing` to `expired` and no path re-minted, because the save route
+ * deliberately may not raise SignMessage mid-play (WO-1157). The fix cannot be a longer
+ * TTL (that lengthens the stolen-token window); it has to be rotation.
+ *
+ * ⛔ THIS PROVES NOTHING NEW AND MUST NOT PRETEND TO. It does not verify a signature and
+ * it never accepts an expired, revoked or unknown token -- it only CARRIES FORWARD proof
+ * that already stands, and only inside the absolute cap. Three properties do the work:
+ *   1. INSIDE THE WINDOW ONLY. An expired session cannot be renewed; the player re-signs.
+ *      (Otherwise a token leaked yesterday would be a permanent credential.)
+ *   2. ROTATES. The old token is REVOKED as the new one is issued, so the number of live
+ *      tokens per chain stays one and a captured token still dies within 15 minutes.
+ *   3. CAPPED IN ABSOLUTE TIME. signed_at travels to the new row, so a chain cannot
+ *      outlive SESSION_ABSOLUTE_TTL_SECONDS from the ORIGINAL signature no matter how
+ *      many times it renews. This is what keeps it a session and not a login.
+ *
+ * @returns {Promise<{ok:boolean, code?:string, token?:string, expiresAt?:string,
+ *                    ttlSeconds?:number, wallet?:string, detail?:object}>}
+ */
+async function renewSession(sql, token) {
+    if (!token || !SESSION_RE.test(String(token))) {
+        return { ok: false, code: AuthCode.SESSION_MALFORMED, detail: { len: String(token || '').length } };
+    }
+
+    let rows;
+    try {
+        rows = await sql`
+            SELECT wallet, identity_kind, revoked,
+                   (expires_at < NOW()) AS expired,
+                   signed_at,
+                   (signed_at + (${SESSION_ABSOLUTE_TTL_SECONDS} * INTERVAL '1 second') < NOW()) AS past_absolute
+            FROM auth_sessions WHERE token = ${token} LIMIT 1
+        `;
+    } catch (e) {
+        // ⚠ PRIME SUSPECT: the `signed_at` column is missing from the deployed schema (it is
+        // a WO-1441 addition and this database has been behind before -- see the note in
+        // api/auth/session.js). A throw here is NOT a client error, and it must not be
+        // reported as one: the caller answers SESSION_UNKNOWN, the client falls back to
+        // minting with a real signature, and the player sees one extra sheet instead of a
+        // broken save. Apply the schema: psql "$DATABASE_URL" -f api/schema.sql
+        return { ok: false, code: AuthCode.SESSION_UNKNOWN, detail: { query_failed: true, likely_schema: 'signed_at' } };
+    }
+
+    if (!rows || rows.length === 0) {
+        return { ok: false, code: AuthCode.SESSION_UNKNOWN, detail: { swept_or_never_issued: true } };
+    }
+    const row = rows[0];
+    if (row.revoked === true)        return { ok: false, code: AuthCode.SESSION_UNKNOWN, detail: { revoked: true } };
+    // An EXPIRED session is not renewable -- see property 1. This is the normal, recoverable
+    // state the client answers by signing once, so it stays distinct from UNKNOWN.
+    if (row.expired === true)        return { ok: false, code: AuthCode.SESSION_EXPIRED, detail: { renewable: false } };
+    if (row.past_absolute === true)  return { ok: false, code: AuthCode.SESSION_EXPIRED, detail: { absolute_cap: true } };
+
+    const wallet = String(row.wallet);
+
+    // Issue FIRST, then revoke. If the revoke fails the player holds a working new token
+    // and one extra live old token that still dies on its own 15-minute clock -- degraded,
+    // not broken. Revoking first would risk leaving them with NO usable session at all.
+    let next;
+    try {
+        next = await issueSession(sql, wallet, row.identity_kind, row.signed_at);
+    } catch (e) {
+        return { ok: false, code: AuthCode.SESSION_UNKNOWN, detail: { issue_failed: true } };
+    }
+
+    try {
+        await sql`UPDATE auth_sessions SET revoked = TRUE WHERE token = ${token}`;
+    } catch (_) { /* see above: the old token still expires on its own clock */ }
+
+    return {
+        ok: true,
+        wallet,
+        token: next.token,
+        expiresAt: next.expiresAt,
+        ttlSeconds: next.ttlSeconds,
+    };
 }
 
 /**
@@ -833,7 +940,8 @@ async function authenticatePromoRedeem(sql, req, payload, claimedPlayerId) {
 }
 
 module.exports = {
-    issueSession, verifySession, SESSION_TTL_SECONDS,
+    issueSession, verifySession, renewSession,
+    SESSION_TTL_SECONDS, SESSION_ABSOLUTE_TTL_SECONDS,
     NONCE_TTL_SECONDS,
     GUEST_WINDOW_SECONDS,
     GUEST_MAX_PER_WINDOW,
