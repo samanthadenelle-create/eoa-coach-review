@@ -612,7 +612,14 @@ async function verifyWallet(sql, headers, payload, claimedPlayerId) {
     const burn = await consumeNonce(sql, nonce, wallet);
     if (!burn.ok) return { ok: false, code: burn.code, detail: burn.detail };
 
-    return { ok: true, wallet: wallet, mode: 'wallet' };
+    // ⛔ `via` IS PART OF THE CONTRACT, NOT DEBUG DECORATION (WO-1452). A caller that mints
+    // long-lived state off this result MUST be able to tell "an ed25519 signature was verified
+    // just now" from "a bearer token was presented". api/auth/session.js branches on exactly
+    // this: a session-verified request may only RENEW (carrying signed_at forward), because a
+    // mint stamps a new chain origin and would reset the absolute cap. Both branches now say
+    // which one they are, so the distinction cannot be made by the ABSENCE of a field — which
+    // is how a future refactor would silently turn every request back into a mint.
+    return { ok: true, wallet: wallet, mode: 'wallet', via: 'signature' };
 }
 
 /**

@@ -87,20 +87,60 @@ module.exports = async (req, res) => {
     // ORIGINAL signature (signed_at, carried forward across rotations), and it revokes the
     // old token instead of leaving a growing family of live ones.
     //
-    // ⛔ GATED ON THE ABSENCE OF A NONCE, NOT ON A CLIENT FLAG. A request carrying signature
-    // material must always take the verifying path below; letting a caller ASSERT "renew"
-    // would let it choose the cheaper check for itself, which is the shape of most auth
-    // bypasses. A client can reach renewal only by having nothing else to offer.
-    const sessionHeader = headers['x-session'] != null ? String(headers['x-session']).trim() : '';
-    const nonceHeader   = headers['x-nonce']   != null ? String(headers['x-nonce']).trim()   : '';
-    if (sessionHeader && !nonceHeader) {
+    // ⛔ NOT ON A CLIENT FLAG. A caller must never be able to ASSERT "renew" and so choose
+    // the cheaper check for itself — that is the shape of most auth bypasses. It reaches
+    // renewal by what it can PROVE, never by what it claims.
+    //
+    // ⛔ CORRECTED 2026-09-07 (WO-1452). THIS GATE USED TO READ `sessionHeader && !nonceHeader`,
+    // WHICH MADE THE CAP OPTIONAL FOR ANYONE WHO KNEW ABOUT IT. Any junk value in X-Nonce
+    // skipped this block — and the code below does NOT then verify a signature, because
+    // _lib/wallet-auth.verifyWallet tries the SESSION rail FIRST and returns ok before the
+    // nonce is ever looked at. Control reached issueSession with `signedAt` undefined, the
+    // INSERT resolved COALESCE(NULL, NOW()), and the chain origin RESET. Measured on the
+    // pre-fix tree by test/auth.session.nonce-header-cap-bypass.test.js: an 11-hour-old chain
+    // had signed_at moved 39600s forward, a chain past the 12-hour cap was renewed with a 200,
+    // the spent token was never revoked, and the nonce was never burned.
+    //
+    // ⚠ AND WIDENING THE CONDITION TO "a nonce AND a signature" WOULD NOT HAVE FIXED IT.
+    // `X-Nonce: junk` + `X-Signature: junk` satisfies that too, and the junk signature is
+    // still never verified because the session rail answers first. So the gate is now about
+    // WHICH CREDENTIAL CAN VERIFY:
+    //   * a request OFFERS a signature only when it carries BOTH halves;
+    //   * when it does, the session token is WITHHELD from verifyWallet, so the signature is
+    //     genuinely checked instead of short-circuited — a verified signature is a NEW chain
+    //     and is stamped NOW;
+    //   * a session presented without verifying signature material — or ALONGSIDE signature
+    //     material that fails — takes the capped renewal path, which carries signed_at forward.
+    //
+    // Stale headers therefore cost a caller nothing (WO-1452 §3: the cap must hold without
+    // depending on client hygiene), and no header combination reaches a mint without a
+    // signature that actually verified.
+    const sessionHeader   = headers['x-session']   != null ? String(headers['x-session']).trim()   : '';
+    const nonceHeader     = headers['x-nonce']     != null ? String(headers['x-nonce']).trim()     : '';
+    const signatureHeader = headers['x-signature'] != null ? String(headers['x-signature']).trim() : '';
+    const offersSignature = !!(nonceHeader && signatureHeader);
+
+    // Set when renewal was tried and declined for a reason that is NOT the cap — an unknown,
+    // revoked or expired token, or the `signed_at` column missing on a lagging database. Only
+    // then may a session-verified request fall through to a mint (see the fall-through note).
+    let renewalDeclined = false;
+
+    /**
+     * Run the capped renewal. Returns TRUE when it has written the response, in which case
+     * the handler must return immediately.
+     *
+     * ⛔ IT IS A FUNCTION BECAUSE IT HAS THREE CALL SITES NOW, NOT TO BE CLEVER. Copying the
+     * cap check into one of them and not the others is exactly how WO-1452 happened.
+     */
+    const tryRenew = async () => {
         let renewed;
         try {
             renewed = await renewSession(sql, sessionHeader);
         } catch (err) {
             console.error(`[auth/session] ref=${ref} step=renew-session FAILED:`,
                 err && err.message ? err.message : err);
-            return quietFail(res, 500, AuthCode.SERVER_ERROR, ref);
+            quietFail(res, 500, AuthCode.SERVER_ERROR, ref);
+            return true;
         }
 
         if (renewed.ok) {
@@ -109,14 +149,15 @@ module.exports = async (req, res) => {
             // rule the mint path applies with auth.wallet below.
             if (renewed.wallet !== wallet) {
                 await logAuthReject(sql, req, { code: AuthCode.SESSION_WRONG_WALLET, ref, identity: wallet, mode: 'wallet-renew' });
-                return quietFail(res, 401, AuthCode.SESSION_WRONG_WALLET, ref);
+                quietFail(res, 401, AuthCode.SESSION_WRONG_WALLET, ref);
+                return true;
             }
 
             try {
                 await logApiEvent(sql, renewed.wallet, 'session_renewed', { ttlSeconds: renewed.ttlSeconds, ref });
             } catch (_) { /* audit is best-effort; never fail a good renewal on it */ }
 
-            return res.status(200).json({
+            res.status(200).json({
                 success: true,
                 ok: true,
                 token: renewed.token,
@@ -124,6 +165,7 @@ module.exports = async (req, res) => {
                 ttlSeconds: renewed.ttlSeconds,
                 renewed: true,
             });
+            return true;
         }
 
         // ⛔ THE CAP IS THE ONE REFUSAL THAT MUST NOT FALL THROUGH. Everything below this
@@ -132,7 +174,8 @@ module.exports = async (req, res) => {
         // its absolute life is REFUSED here and the player signs again.
         if (renewed.detail && renewed.detail.absolute_cap === true) {
             await logAuthReject(sql, req, { code: renewed.code, ref, identity: wallet, mode: 'wallet-renew-capped' });
-            return quietFail(res, 401, renewed.code, ref);
+            quietFail(res, 401, renewed.code, ref);
+            return true;
         }
 
         // ⚠ EVERY OTHER REFUSAL FALLS THROUGH ON PURPOSE, AND THIS IS A DEPLOYMENT SAFETY
@@ -145,6 +188,12 @@ module.exports = async (req, res) => {
         // the same refusal verifyWallet would have produced, so nothing is masked.
         console.warn(`[auth/session] ref=${ref} step=renew-session declined code=${renewed.code} ` +
             `detail=${JSON.stringify(renewed.detail || {})} - falling through to full verification`);
+        renewalDeclined = true;
+        return false;
+    };
+
+    if (sessionHeader && !offersSignature) {
+        if (await tryRenew()) return;
     }
 
     // ⛔ The nonce is burned by this call. That is correct and intended: a session is
@@ -154,9 +203,22 @@ module.exports = async (req, res) => {
     // The payload is null: this request has no body to bind, so the signed message is the
     // 'load'-shaped one the client already builds for a bodyless call. Passing the wallet
     // as claimedPlayerId keeps the wallet-vs-player check in force here too.
+    //
+    // ⛔ WO-1452: WITHHOLD THE SESSION TOKEN WHEN THE CALLER OFFERED SIGNATURE MATERIAL.
+    // verifyWallet tries the session rail FIRST, so passing both means the signature is never
+    // checked and the nonce is never burned — the request authenticates as a bearer token and
+    // then mints, stamping a brand-new chain origin. Withholding it here makes the call do the
+    // one job we came for: verify the signature. Nothing about verifyWallet changes, and the
+    // header is still honoured by the renewal path above and the fallback below.
+    let verifyHeaders = headers;
+    if (sessionHeader && offersSignature) {
+        verifyHeaders = Object.assign({}, headers);
+        delete verifyHeaders['x-session'];
+    }
+
     let auth;
     try {
-        auth = await verifyWallet(sql, headers, null, wallet);
+        auth = await verifyWallet(sql, verifyHeaders, null, wallet);
     } catch (err) {
         // ⚠ A THROW HERE IS USUALLY THE NONCE TABLE, NOT THE SIGNATURE. A bad signature returns
         // {ok:false} and lands on the 401 below; only an infrastructure fault reaches this catch.
@@ -166,8 +228,30 @@ module.exports = async (req, res) => {
     }
 
     if (!auth.ok) {
+        // ⚠ SIGNATURE MATERIAL THAT DOES NOT VERIFY IS NOT A REASON TO PUNISH A CALLER HOLDING
+        // A GOOD SESSION. Clients legitimately keep stale nonce/signature headers around, and
+        // WO-1452 §3 is explicit that the cap must hold without depending on client hygiene —
+        // so fall back to the CAPPED renewal rather than to a mint or a refusal. This is the
+        // only reason withholding the token above cannot lock anyone out.
+        if (sessionHeader && offersSignature && !renewalDeclined) {
+            if (await tryRenew()) return;
+        }
         await logAuthReject(sql, req, { code: auth.code, ref, identity: wallet, mode: 'wallet' });
         return quietFail(res, 401, auth.code, ref);
+    }
+
+    // ⛔ THE BACKSTOP, AND IT IS THE WHOLE WO-1452 DEFECT IN ONE LINE: NOTHING THAT
+    // AUTHENTICATED BY BEARER TOKEN MAY REACH issueSession. A mint stamps a fresh chain
+    // origin, so a session-verified request that mints has just reset its own cap. On the
+    // paths above this is already unreachable (a session-only request renewed, and a request
+    // offering signature material had its token withheld) — it stands so that a future edit to
+    // verifyWallet's rail order, or to the gate above, is a capped renewal rather than a silent
+    // re-opening of the bypass. The one exception is a renewal that already declined for a
+    // schema/unknown reason, where minting is the documented degraded path above.
+    if (auth.via === 'session' && sessionHeader && !renewalDeclined) {
+        console.warn(`[auth/session] ref=${ref} step=mint-guard a session-verified request ` +
+            `reached the mint path - routing to the capped renewal instead (WO-1452)`);
+        if (await tryRenew()) return;
     }
 
     let session;
