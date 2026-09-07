@@ -94,6 +94,9 @@ const USD_ANCHORS = Object.freeze({
     'hero-wardrobe-pack': 9.99,
     'realm-defender-bundle': 9.99,
     'builders-cache': 19.99,
+    // WO-1449: the $1.99 first-buy micro (packs.json `builders-hour`). Small basket
+    // + ONE temporary builder crew for six hours - a CONSUMABLE, nothing permanent.
+    'builders-hour': 1.99,
     'impulse-wood-small': 1.99,
     'impulse-wood-medium': 2.99,
     'impulse-wood-large': 4.99,
