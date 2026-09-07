@@ -191,6 +191,46 @@ async function readBodyExact(req, maxBytes) {
     return { buffer: buffer, exact: true };
 }
 
+/**
+ * The ONE tag that says "this request's bytes were rebuilt, not read".
+ *
+ * WHY THIS REPLACED A 500 (WO-1453, prod proof in
+ * WORK_ORDER_1440_..._blocker.RESULT.md:225-252): three endpoints used to REFUSE the
+ * signature rail outright when `readBodyExact` reported `exact:false` —
+ *
+ *     RAIL 1 (signature) -> HTTP 500 {"ok":false,"code":"SERVER_ERROR",...}
+ *     [auth_reject] detail={"reason":"raw_body_unavailable_bodyparser_active"}
+ *
+ * — with a cryptographically valid signature over the exact bytes. Vercel's Node 24
+ * runtime parses `req.body` no matter what `config.api.bodyParser` says, so `exact`
+ * is effectively ALWAYS false in production and the rail a fresh device must use was
+ * dead. Only the session rail worked, and a fresh device has no session yet.
+ *
+ * ⛔ THE REASONING THAT MAKES PROCEEDING SAFE, stated so nobody re-adds the refusal:
+ * the guard was a DIAGNOSTICS choice, never a security one — it existed so a parser
+ * problem could not masquerade as AUTH_BAD_SIGNATURE. Verifying against reconstructed
+ * bytes cannot create a false accept: `buildSignedMessage` binds sha256(payload) into
+ * the signed message, so a signature either verifies against those exact bytes or it
+ * does not. A wrong reconstruction fails CLOSED, as a 401, which is the correct answer
+ * for "these are not the bytes you signed". And in the ordinary case the round trip is
+ * byte-identical — the client signs `JSON.stringify(obj)` and JSON.parse/stringify
+ * preserves insertion order for non-numeric keys — so the rail simply works.
+ *
+ * What survives of the old guard is its ONE genuine value: the diagnosis. Merge this
+ * into the auth-reject detail at every refusal so a 401 that MIGHT be a reconstruction
+ * artefact is still distinguishable, in the db, from a plainly bad signature.
+ *
+ * @param {boolean} exactBytes  readBodyExact()'s `exact` flag
+ * @returns {object} `{}` when the bytes were read raw; a tag patch when rebuilt.
+ */
+function bodyBytesDetail(exactBytes) {
+    if (exactBytes) return {};
+    return {
+        bytes: 'reconstructed',
+        reason: 'raw_body_reconstructed_bodyparser_active',
+    };
+}
+
 module.exports = {
     ALLOWED_HEADERS,
     applyCors,
@@ -198,4 +238,5 @@ module.exports = {
     quietFail,
     readRawBody,
     readBodyExact,
+    bodyBytesDetail,
 };
