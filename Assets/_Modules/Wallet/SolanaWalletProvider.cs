@@ -732,9 +732,29 @@ namespace DeNelle.Wallet
                 // account; it creates the fee-payer placeholder without possessing a private key.
                 tx.Sign(new Account(string.Empty, from));
                 var scenario = new TargetedLocalAssociationScenario();
-                var signedWire = await scenario.SignTransaction(
-                    DappIdentityUri, DappIconUri, DappIdentityName,
-                    ClusterName(network), _authToken, tx.Serialize());
+                byte[] signedWire;
+                try
+                {
+                    signedWire = await scenario.SignTransaction(
+                        DappIdentityUri, DappIconUri, DappIdentityName,
+                        ClusterName(network), _authToken, tx.Serialize());
+                }
+                // ⛔ WO-1579 - THE ONE FAILURE ON THIS PATH THAT CAN HONESTLY SAY "NOTHING WAS
+                // CHARGED", AND THE CATCH IS SCOPED TO THIS AWAIT SO THAT STAYS TRUE BY
+                // CONSTRUCTION RATHER THAN BY COMMENT. Both TimeoutExceptions reachable here are
+                // thrown by TargetedLocalAssociationScenario (association handshake; the WO-1579
+                // authorize+sign deadline) and SubmitSignedTransaction is LEXICALLY BELOW, so no
+                // wire can have left the device. A catch around the whole method would also swallow
+                // any timeout thrown AFTER the POST went out and tell the player nothing was
+                // charged when it may have been - which is worse than the bug being fixed.
+                // Failure, never Indeterminate: an indeterminate receipt tells the player to
+                // reconcile a payment that does not exist.
+                catch (TimeoutException ex)
+                {
+                    Debug.LogError($"[SolanaWalletProvider] SendPayment TIMED OUT before submission: {ex.Message}");
+                    return PaymentResult.Failure(packSku, currency,
+                        TargetedLocalAssociationScenario.SignTimeoutMessage);
+                }
                 if (signedWire == null || signedWire.Length == 0)
                     return PaymentResult.Failure(packSku, currency,
                         "Wallet returned no signed transaction (cancelled or refused).");
