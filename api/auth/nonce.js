@@ -9,6 +9,7 @@
 //   GET /api/auth/nonce?wallet=<base58>
 //   200 { success:true, ok:true, nonce, expiresAt, ttlSeconds }
 //   400 { ok:false, code:'AUTH_WALLET_MALFORMED', ref }
+//   400 { ok:false, code:'RATE_LIMITED', ref }          ← WO-1456, per caller IP
 //
 // Issuing a nonce is intentionally UNAUTHENTICATED — the nonce alone grants
 // nothing; it is only useful to whoever holds the wallet's PRIVATE key. Leaking
@@ -29,7 +30,34 @@
 const { neon } = require('@neondatabase/serverless');
 const { AuthCode, issueNonce, isWalletId, isGuestId } = require('../_lib/wallet-auth');
 const { applyCors, newRef, quietFail } = require('../_lib/http');
-const { logAuthReject } = require('../_lib/audit');
+const { logAuthReject, logApiEvent, hashIp } = require('../_lib/audit');
+const { reserveIpBudget } = require('../_lib/ip-budget');
+
+// ── THE IP BUDGET (WO-1456) ──────────────────────────────────────────────────
+// This route had NO rate limit of any kind. Every call MINTS A ROW — cheap for
+// an unauthenticated caller, a database write for Neon — so a loop here is a
+// free way to grow `auth_nonces` without ever holding a private key.
+//
+// The limiter is the promo rail's (WO-1440), extracted to _lib/ip-budget.js. Not
+// a second one: two limiters with two windows and two refusal codes is duplicated
+// state, and the promo rail already solved the hard part (one atomic UPSERT, keyed
+// on the one signal a client cannot choose).
+//
+// ⛔ WHY 120 PER HOUR, AND WHY NOT LOWER. The same shared-NAT reasoning the promo
+// budget is written on — a household, a dorm, above all mobile CARRIER-GRADE NAT,
+// which can put many unrelated players behind one address. A nonce is fetched once
+// per save/load handshake, so an ordinary session spends a handful; 120/hour leaves
+// room for a busy household and a retry storm while still turning an unbounded row
+// mint into a bounded one. Erring high is deliberate: the thing being protected is
+// a write, not a payout, and refusing a real player's nonce breaks their cloud save.
+//
+// ⛔ AND IT FAILS OPEN, the OPPOSITE of the promo rail. A nonce grants NOTHING —
+// it is useless without the wallet's private key, and the file says so above. An
+// unreadable budget table must therefore never take the entire wallet login
+// offline. The promo rail guards a payout and fails closed; correctness there,
+// availability here.
+const NONCE_IP_WINDOW_SECONDS = 60 * 60;
+const NONCE_IP_MAX_PER_WINDOW = 120;
 
 module.exports = async (req, res) => {
     if (applyCors(req, res, 'GET, OPTIONS')) return;
@@ -57,6 +85,36 @@ module.exports = async (req, res) => {
 
     try {
         const sql = neon(process.env.DATABASE_URL);
+
+        // ── IP BUDGET ───────────────────────────────────────────────────────
+        // Placed HERE on purpose: AFTER the free shape check above, so a malformed
+        // wallet can never spend a real household's budget, and immediately before
+        // the row is minted, so only an attempt that was actually about to be served
+        // costs a unit. (The same placement rule WO-1440 wrote into the promo route.)
+        const ipHash = hashIp(req);
+        const budget = await reserveIpBudget(sql, ipHash, 'AUTH_NONCE', {
+            windowSeconds: NONCE_IP_WINDOW_SECONDS,
+            maxPerWindow: NONCE_IP_MAX_PER_WINDOW,
+            failClosed: false,
+            label: 'auth/nonce',
+        });
+        if (!budget.ok) {
+            await logApiEvent(sql, wallet, 'auth_nonce_ip_budget_refused', {
+                ref: ref, ipHash: ipHash,
+                grants: budget.grants ?? null,
+                max: NONCE_IP_MAX_PER_WINDOW,
+                windowSeconds: NONCE_IP_WINDOW_SECONDS,
+            });
+            // RATE_LIMITED is the promo rail's code, reused verbatim rather than a new
+            // one. The BODY SHAPE is this route's own ({ok:false, code, ref}) and not
+            // the promo rail's 200 + {success:false,error}, deliberately: the promo
+            // shape exists because the published client branches on a JSON body for a
+            // business outcome, whereas BackendRequestSigner.FetchNonceAsync treats any
+            // non-2xx as "no nonce, abort" — which is exactly the right behaviour here
+            // and keeps this file's three documented response shapes intact.
+            return quietFail(res, 400, 'RATE_LIMITED', ref);
+        }
+
         const { nonce, expiresAt, ttlSeconds } = await issueNonce(sql, wallet);
         return res.status(200).json({ ok: true, success: true, nonce, expiresAt, ttlSeconds });
     } catch (err) {
