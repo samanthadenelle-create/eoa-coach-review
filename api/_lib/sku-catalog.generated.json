@@ -12,25 +12,21 @@
     "tier": "Unique 1..N lookup key (PackCatalog.FindByTier). NOT the price band  -  multiple bundles share a price point but each has a unique tier.",
     "convenience": "TIME-SAVING only, never combat-power (the bent covenant, §5.3). instant-build / instant-repair / harvest-auto-collect / xp-weekend / lantern-oil-2x-expedition / lantern-oil-3x-expedition / permanent-builder / temporary-builder. Lantern blessings are consumed per expedition. permanent-builder is CONCURRENCY (+1 crew at once), not combat power and not queue depth. temporary-builder (WO-1388) is the same +1 crew for BuildTimerConfig.packTemporaryBuilderSeconds (6 h); a second grant inside a running window is deferred, never burned.",
     "economy": "PackStoreVM routes wood/iron/stone/crystals through EconomyService.GrantSpendablePurchased and coins through AddCoins.",
-    "impulsePacks": "Packs 14-25 (tiers 14-25) are the WO-1037 SINGLE-RESOURCE IMPULSE PACKS, authored 2026-08-17 under the owner ruling of 2026-08-16 (option (b), verbatim: \"we should have small instant packs\" / \"small wood only\") and legalised by the WO-947 s12 amendment (the PURCHASE boundary is not the COST boundary). ONE family per harvestable resource (wood, iron, stone, crystals) x small/medium/large. THE LOAD-BEARING RULE (RE-RULED 2026-09-28 by WO-2160, owner: 'Add crystals to them too, re-rule the guardrail'): each wood/iron/stone SKU carries EXACTLY its ONE tagged harvest resource PLUS crystals - the economy key set is exactly {resource, crystals} - and each crystals SKU carries exactly {crystals}; the cosmetics + convenience lists stay EMPTY. Crystals are the TIME currency (instant-finish / extra slot), not a WO-947 cost-basket resource, so adding them does not re-mix the wood+iron vs crystal baskets. A SECOND HARVEST RESOURCE (e.g. wood+iron), coins, or anything else on an impulse SKU is still FORBIDDEN (WO-947 s12c guardrail 1) - asserted headlessly by DeNelle.Editor.Regression.ImpulsePackRegression [impulse-pack], which also pins the $5 PRICE CEILING (owner standing ruling, memory solana-store-early-access-pack-pricing) and the no-structures/no-levels/no-queue-completions rule. The runtime resolver enforces the same rule (ShortfallPackOffer.IsSingleKeyResourceOnly, re-pointed by WO-2160). AMOUNTS ARE PENDING OWNER RATIFICATION - they were sized against the REAL demand curve read out of building-tiers.json (tier costWood 500..16000, costFood 300..13000, costCrystal 100..4800) and structures-catalog.json (repo.upgradeCost iron 20..1440): small closes the cheapest tier upgrade (the Lumber Mill T1 900-wood shortfall in the screenshot that prompted this WO), medium closes a mid-ladder step, large closes a late step but deliberately NOT the Barracks T6 16000-wood ceiling, so the top pack does not trivialise the game. The optional impulse/impulseResource/impulseSize fields are the machine-readable family tag ShortfallPackOffer resolves on; older packs omit them (absent = false/null, no migration break).",
+    "impulsePacks": "Packs 14-25 (tiers 14-25) are the WO-1037 SINGLE-RESOURCE IMPULSE PACKS, authored 2026-08-17 under the owner ruling of 2026-08-16 (option (b), verbatim: \"we should have small instant packs\" / \"small wood only\") and legalised by the WO-947 s12 amendment (the PURCHASE boundary is not the COST boundary). ONE family per harvestable resource (wood, iron, stone, crystals) x small/medium/large. THE LOAD-BEARING RULE: each of these SKUs carries EXACTLY ONE economy key and an EMPTY cosmetics + convenience list. A multi-resource impulse bundle would re-mix the WO-947 cost baskets through the back door and is FORBIDDEN (WO-947 s12c guardrail 1) - asserted headlessly by DeNelle.Editor.Regression.ImpulsePackRegression [impulse-pack], which also pins the $5 PRICE CEILING (owner standing ruling, memory solana-store-early-access-pack-pricing) and the no-structures/no-levels/no-queue-completions rule. AMOUNTS ARE PENDING OWNER RATIFICATION - they were sized against the REAL demand curve read out of building-tiers.json (tier costWood 500..16000, costFood 300..13000, costCrystal 100..4800) and structures-catalog.json (repo.upgradeCost iron 20..1440): small closes the cheapest tier upgrade (the Lumber Mill T1 900-wood shortfall in the screenshot that prompted this WO), medium closes a mid-ladder step, large closes a late step but deliberately NOT the Barracks T6 16000-wood ceiling, so the top pack does not trivialise the game. The optional impulse/impulseResource/impulseSize fields are the machine-readable family tag ShortfallPackOffer resolves on; older packs omit them (absent = false/null, no migration break).",
     "cosmeticGrant": "Every cosmetics SKU is recorded in OwnedItemIds and CosmeticOwnershipService.",
     "shelf": "storeVisible is the SINGLE shelf flag (PackStore.Render line ~327 filters on it). WO-1118 proposed a separate `shelf: live|hidden|legacy` string; that was NOT added, because a second flag over the same decision is duplicated state and the two would drift (see CLAUDE.md S2/S5). storeVisible:false HIDES the row from browse/Buy but KEEPS it loadable, so an existing owner's entitlement still resolves via PackCatalog.Find. Every hidden row carries _hiddenReason.",
-    "skrFlat": "WO-1815 (owner 2026-09-16, verbatim: \"change the store to SKR only and set to flat amounts\" + \"only do straight SKR for SKR build 100 200 300 500 9999\"). skrFlat is the FLAT, market-independent SKR amount for this pack, mapped by USD ANCHOR rung: $1.99 -> 100, $2.99 -> 200, $4.99 -> 300, $9.99 -> 500, $19.99 -> 1000 (this rung is NOT in the owner ladder - her five rungs do not cover the shelf's six USD bands; it is a proposal she can re-rule), $49.99 -> 9999. THAT SIX-RUNG MAPPING IS RETIRED 2026-09-22 - read the RE-PEG clause at the end of this note, not this sentence. Packs sharing a usd anchor share an skrFlat, because test/purchases.quote.test.js judges domination AT A SHARED ANCHOR. THE SERVER IS STILL THE PRICE AUTHORITY: this field reaches api/_lib/sku-catalog.generated.json through the verbatim tools/gen-sku-catalog.mjs copy and the server prices from it; the CLIENT never renders it as a price (that is the WO-1158 paid-but-not-granted defect), only as the STRUCK anchor on a sale card and as the regression/capture oracle. pricing.skr is LEFT ALONE - correcting a dead field would create a second opinion about one number. pricing.usd also stays: PurchaseGate.RequiresWallet derives the wallet rule from it and the Google Play + Pi rails price themselves off it. RE-PEG 2026-09-22 (owner ruling 03:12, verbatim: re-peg every pack's SKR price to its USD ladder at today's rate, ROUNDING UP to clean numbers): rule=ceil(usd/rate/q)*q with q=25 when usd/rate is below 500 and q=100 at 500 and above (quantumLow=25 quantumHigh=100 quantumThreshold=500) rate=0.02092629 USD/SKR source=CoinGecko-simple-price id=seeker last_updated_at=1790064450 (2026-09-22T08:07:30Z); the id 'seeker' is the same one this repo's own probe reads (api/_lib/dep-probes/coingecko.js:30). New rungs: $1.99->100, $2.99->150, $4.99->250, $9.99->500, $19.99->1000, $49.99->2400. RE-RULED the same day: the owner set $19.99 = 1000 SKR. It is expressed as the COARSER QUANTUM ABOVE 500 SKR, never as a per-row override - a per-row exception is a second opinion about one price, and the tiered rule reproduces every other rung unchanged. The old flat ladder (100/200/300/500/1000/9999) is RETIRED: 9999 was never a peg and read as a ~$209 pack on a $49.99 shelf. StoreSkrFlatLadderRegression parses rate= out of THIS sentence and derives every expected rung from it, so the suite and the data cannot drift - change the rate here and the oracle moves with it.",
     "skrPeg": "ONE peg, no second SKR table: skrPerUsd ~= 12.5. $1.99 -> 25 SKR, $2.99 -> 36 SKR, $4.99 -> 60 SKR, $9.99 -> 120 SKR, $19.99 -> 240 SKR, $49.99 -> 600 SKR (authored figures; 2.99*12.5=37.4 is authored down to 36 to keep the rung spacing even). ⚠ THE '$4.99 CEILING' SENTENCE THAT USED TO END THIS NOTE IS RETIRED (WO-1121, owner 2026-08-21): it was an EARLY-ACCESS constraint that WO-1118 applied as though permanent. The ceiling is $49.99 - the full monetization-v2-spec §4 ladder. What did NOT change: the covenant (convenience and beauty, never combat power) and the $5 ceiling on the IMPULSE family specifically, which ImpulsePackRegression still pins.",
     "convenienceRedeemers": "LEGAL != REDEEMABLE. PackCatalog.ConvenienceAllowList says a kind is covenant-legal; PackCatalog.IsRedeemableConvenience says something in THIS build actually spends it. Live redeemers: lantern-oil-2x/3x-expedition (Lantern.cs); permanent-builder (WO-1253, BuildTimerService.SlotCount reads SKU ownership in OwnedItemIds - NOT a GearInventory count, so re-settle is idempotent); instant-build / instant-repair / harvest-auto-collect / xp-weekend (WO-1246, Village/Monetization/ConvenienceRedeemer.cs). Still vapor as PACK TOKENS: harvest_boost (HarvestBoostService is crystal/ad, not GearInventory), instant_fill_storage, workforce_slot, storage_tier_jump, offline_window_extension. A storeVisible pack may not advertise a kind that is not on the redeemable list.",
-    "shelfCurated": "Impulse SKUs are shortfall-only by default (WO-947 s12c.4). shelfCurated:true opts an impulse row onto the browsable shelf - owner ruling 2026-08-21, 'Middle - one impulse tier per resource' (one row per resource), widened by WO-2160 (2026-09-28) to TWO crystal rows (medium + large). Five carry it since WO-2160 (2026-09-28, owner-approved amounts table: crystal impulse 'put medium + large ON the shelf'): impulse-{wood,iron,stone}-medium plus impulse-crystals-medium and impulse-crystals-large. The other seven impulse SKUs stay shortfall-only. The flag lives here rather than as a SKU list in PackStore.cs so the merchandising choice is re-ruled by editing data. Promoting a fourth row is an OWNER decision, not a code cleanup.",
+    "shelfCurated": "Impulse SKUs are shortfall-only by default (WO-947 s12c.4). shelfCurated:true opts ONE row per resource onto the browsable shelf - owner ruling 2026-08-21, 'Middle - one impulse tier per resource'. Exactly three carry it today: impulse-{wood,iron,stone}-medium. The flag lives here rather than as a SKU list in PackStore.cs so the merchandising choice is re-ruled by editing data. Promoting a fourth row is an OWNER decision, not a code cleanup.",
     "legacySkus": "Retired SKU ids that must keep resolving to this pack. `sku` is a LIVE SAVE KEY (GameState.OwnedItemIds, ordinal List.Contains, never rewritten), so renaming one without an alias silently orphans a paid entitlement and re-offers the pack for sale. PackCatalog.Find matches current ids across the WHOLE catalogue first, then legacy ids, so a live SKU can never be shadowed. NEVER delete an entry - a retired id stays redeemable as long as any save can carry it.",
-    "repeatable": "WO-2204 (owner ruling relayed 2026-10-01: consumable resource packs must be re-buyable any number of times; ONLY permanent one-time things are already-owned; crystals are repeatable). Explicit boolean on EVERY priced row - an absent field must not silently mean either (PackCatalog logs FlowTrace.Fail and treats absence as NOT repeatable, the old safe behaviour). true = a consumable: owning it never blocks another purchase, the pre-charge reconcile ignores a delivered (fulfilled) row, api/purchases/reconcile.js answers only paid-but-undelivered (verified) rows oldest-first. false = one-time: the 8 rows that grant a PERMANENT entitlement (non-empty cosmetics or the permanent-builder kind - the same set as the Play non-consumable maps) plus starters-hand, which is consumable by contents but sold ONCE per account by an owner call. Unpriced promo rows (welcome-500/100) never reach the pay path and carry no field. Pinned by RepeatablePackPurchaseRegression [repeatable-pack] and test/purchases.reconcile.test.js.",
     "nightMarketPresentation": "WO-1050 (2026-08-21) THE NIGHT MARKET. Four ADDITIVE presentation keys: band (free|gap|basket|patronage - the shelf grouping key, superseding storeSection's mood names; storeSection is NOT deleted because it is the documented FALLBACK PackCatalog.BandOf resolves an un-migrated row through), orbTint (hex gem tint, DECORATION ONLY - the owner is red/green colourblind so band identity is carried by the mark + the text eyebrow + the step in greyscale value, never by a hue), compareTo (the SKU the spotlight comparison line is drawn against - the line is PURE ARITHMETIC over two real SKUs or it is ABSENT) and anchorOnly (renders fully priced with NO Buy control ever built). **NO ROW CARRIES anchorOnly TODAY** and that is deliberate: WO-1121 is the SAME-DAY owner ruling that un-hid the $9.99/$19.99/$49.99 ladder and made those rows buyable behind PurchaseGate's wallet rule, so flagging one anchorOnly by an authoring edit would walk that ruling back. Setting it is an OWNER call. ALL FOUR KEYS DECIDE WHERE OR HOW A PACK IS SHOWN AND NONE CAN CHANGE WHAT IT GRANTS - that is why ImpulsePackRegression.AllowedPackKeys admits them, and it is the line to hold if the block ever grows.",
     "walletGate": "WO-1121 owner ruling 2026-08-21: a pack priced ABOVE $4.99 requires a CONNECTED, ATTESTED wallet to buy; $4.99 and under stays guest-buyable. A guest save key is guest-local-<sha256(deviceId)> - device-derived, with no proven restore path after a reinstall or a new phone. At $4.99 a lost entitlement is an annoyance; at $49.99 it is a chargeback on a LIVE dApp Store listing. ⛔ THE THRESHOLD IS DERIVED FROM pricing.usd IN CODE (PurchaseGate.WalletRequiredAboveUsd) AND IS DELIBERATELY NOT AUTHORED AS A PER-PACK FIELD - a `requiresWallet` boolean here would be a second copy of a decision the price already makes, and the two would drift. Enforced in PurchaseGate.CanBuy(pack), which BOTH the card builder and the PackStore.Purchase() charge path call, so it cannot be bypassed by a non-UI caller."
   },
-  "_note": "WO-2160 (2026-09-28) CRYSTALS ON EVERY PACK. Owner ruling verbatim: 'I was gonna increase the diamonds that you get because the diamonds allow you to complete more items faster' and 'Include diamonds on every purchase so that people can get past the boring parts of the fun part. The fun part is what it engages in actually keeps people but if you're not getting there, you're not gonna use.' Amounts approved by AskUserQuestion the same hour ('Yes, these amounts'), and the impulse guardrail re-ruled ('Add crystals to them too, re-rule the guardrail'). A crystal is the TIME currency (BuildTimerService.TryInstantFinish / TryBuySlot), never power. No price field changed. Per-dollar ladder after this edit: builders-hour 151, permanent-builder 150, folks-thanks 200, patron-of-elarion 225 (the ceiling every hidden row stays under), founders-vow 220; wood/iron/stone impulse +150/+300/+600 crystals; crystal impulse medium/large unchanged; impulse-crystals-small 250 -> 350 (lead decision 2026-09-28 to clear the $1.99 domination by builders-hour - the ruling's direction is MORE crystals, never a lower price or a smaller bundle).",
-  "version": 6,
-  "currencyDisclaimer": "Priced in SKR - token value moves.",
+  "version": 5,
+  "currencyDisclaimer": "Token price moves with the market.",
   "packs": [
     {
       "sku": "hearth-spark",
-      "repeatable": true,
       "band": "basket",
       "tier": 1,
       "storeSection": "featured",
@@ -41,13 +37,12 @@
         "usd": 4.99,
         "usdc": 4.99,
         "sol": 0.018,
-        "skr": 25,
-        "skrFlat": 250
+        "skr": 25
       },
       "contents": {
         "cosmetics": [],
         "economy": {
-          "crystals": 750,
+          "crystals": 150,
           "stone": 500,
           "coins": 100,
           "wood": 1500,
@@ -61,7 +56,6 @@
     },
     {
       "sku": "keepers-satchel",
-      "repeatable": true,
       "tier": 2,
       "storeSection": "essentials",
       "name": "Keeper's Satchel",
@@ -71,8 +65,7 @@
         "usd": 4.99,
         "usdc": 4.99,
         "sol": 0.045,
-        "skr": 60,
-        "skrFlat": 250
+        "skr": 60
       },
       "contents": {
         "cosmetics": [],
@@ -90,7 +83,6 @@
     },
     {
       "sku": "folks-thanks",
-      "repeatable": true,
       "band": "patronage",
       "compareTo": "starters-hand",
       "tier": 3,
@@ -102,13 +94,12 @@
         "usd": 9.99,
         "usdc": 9.99,
         "sol": 0.09,
-        "skr": 120,
-        "skrFlat": 500
+        "skr": 120
       },
       "contents": {
         "cosmetics": [],
         "economy": {
-          "crystals": 2000,
+          "crystals": 900,
           "stone": 3400,
           "coins": 1400,
           "wood": 9000,
@@ -127,26 +118,24 @@
     },
     {
       "sku": "patron-of-elarion",
-      "repeatable": true,
       "storeBadge": "BEST VALUE",
       "band": "basket",
       "compareTo": "folks-thanks",
       "tier": 4,
       "storeVisible": true,
-      "name": "Patron of Elarion",
+      "name": "Resource Pack I",
       "tagline": "A patron's gift to Elarion - a meaningful headstart for the Heart.",
       "theme": "Heavyweight cosmetic suite + meaningful economy headstart.",
       "pricing": {
         "usd": 19.99,
         "usdc": 19.99,
         "sol": 0.18,
-        "skr": 240,
-        "skrFlat": 1000
+        "skr": 240
       },
       "contents": {
         "cosmetics": [],
         "economy": {
-          "crystals": 4500,
+          "crystals": 1850,
           "stone": 7000,
           "coins": 2800,
           "wood": 18500,
@@ -161,16 +150,15 @@
         ]
       },
       "storeSection": "support",
-      "_shelfNote": "WO-1121 (2026-08-21) OWNER RULING - THE PRICE CEILING IS $49.99, NOT $4.99. The $4.99 cap was an EARLY-ACCESS constraint that WO-1118 applied as if permanent; the full monetization-v2-spec S4 ladder is back on the shelf. THE COVENANT IS UNCHANGED AND IS ABOUT CONTENT, NOT PRICE: convenience and beauty, never combat power. | Amounts scale against the live $4.99 anchor (starters-hand: 4000 wood / 2000 iron / 400 crystals / 1500 stone / 600 coins) at roughly 2.2x / 4.6x / 11.5x, a modest volume bonus over the straight price multiple, never a cliff. Paid grants bypass the town bank cap (EconomyService.GrantSpendablePurchased), so the advertised figure is the figure that lands even past a 34000 storage ceiling. | WALLET REQUIRED ABOVE $4.99 - enforced in PurchaseGate.CanBuy(pack), NOT authored here: a guest save key is device-derived with no proven restore path, and a $49.99 entitlement lost to a reinstall is a chargeback. The threshold is read off the price, so there is no second field to drift. | `theme` above is an AUTHORING note (PackStore renders name + tagline only) and still describes the retired cosmetic suite - left verbatim because it is a monetization-v2-spec string; no player sees it. OWNER TODO: reword, or restore the cosmetics when CosmeticApplier is actually wired. | UI-001 7 (2026-08-22): `storeBadge: BEST VALUE` MOVED HERE from hearth-spark. This row is the arithmetic winner at 1,968 total goods/$ across all five economy keys. Baskets compare on TOTAL goods, never on a single resource - a single-resource comparison inverts the ladder, because the gap packs out-earn every basket per dollar on their one resource (impulse-wood-medium is 1,171 wood/$). | WO-2160 (2026-09-28): crystals 1850 -> 4500. Re-measured on the same five-key rule: 42,000 goods / $19.99 = 2,101/$, still FIRST (founders-vow 104,500/$49.99 = 2,090; folks-thanks 20,300/$9.99 = 2,032; best impulse row 8,600/$4.99 = 1,723), so BEST VALUE stays arithmetic-true."
+      "_shelfNote": "WO-1121 (2026-08-21) OWNER RULING - THE PRICE CEILING IS $49.99, NOT $4.99. The $4.99 cap was an EARLY-ACCESS constraint that WO-1118 applied as if permanent; the full monetization-v2-spec S4 ladder is back on the shelf. THE COVENANT IS UNCHANGED AND IS ABOUT CONTENT, NOT PRICE: convenience and beauty, never combat power. | Amounts scale against the live $4.99 anchor (starters-hand: 4000 wood / 2000 iron / 400 crystals / 1500 stone / 600 coins) at roughly 2.2x / 4.6x / 11.5x, a modest volume bonus over the straight price multiple, never a cliff. Paid grants bypass the town bank cap (EconomyService.GrantSpendablePurchased), so the advertised figure is the figure that lands even past a 34000 storage ceiling. | WALLET REQUIRED ABOVE $4.99 - enforced in PurchaseGate.CanBuy(pack), NOT authored here: a guest save key is device-derived with no proven restore path, and a $49.99 entitlement lost to a reinstall is a chargeback. The threshold is read off the price, so there is no second field to drift. | `theme` above is an AUTHORING note (PackStore renders name + tagline only) and still describes the retired cosmetic suite - left verbatim because it is a monetization-v2-spec string; no player sees it. OWNER TODO: reword, or restore the cosmetics when CosmeticApplier is actually wired. | UI-001 7 (2026-08-22): `storeBadge: BEST VALUE` MOVED HERE from hearth-spark. This row is the arithmetic winner at 1,968 total goods/$ across all five economy keys. Baskets compare on TOTAL goods, never on a single resource - a single-resource comparison inverts the ladder, because the gap packs out-earn every basket per dollar on their one resource (impulse-wood-medium is 1,171 wood/$)."
     },
     {
       "sku": "founders-vow",
-      "repeatable": true,
       "band": "basket",
       "compareTo": "patron-of-elarion",
       "tier": 5,
       "storeVisible": true,
-      "name": "Founder's Vow",
+      "name": "Resource Pack II",
       "tagline": "A thank-you to early believers - a vow kept, not a flex.",
       "theme": "One-time only, available v1 launch only - special founder cosmetic + permanent in-village banner.",
       "founderOnly": true,
@@ -178,13 +166,12 @@
         "usd": 49.99,
         "usdc": 49.99,
         "sol": 0.45,
-        "skr": 600,
-        "skrFlat": 2400
+        "skr": 600
       },
       "contents": {
         "cosmetics": [],
         "economy": {
-          "crystals": 11000,
+          "crystals": 4600,
           "stone": 17500,
           "coins": 7000,
           "wood": 46000,
@@ -204,7 +191,6 @@
     },
     {
       "sku": "frostfall-bundle",
-      "repeatable": false,
       "tier": 6,
       "storeSection": "style",
       "name": "Frostfall Bundle",
@@ -215,8 +201,7 @@
         "usd": 9.99,
         "usdc": 9.99,
         "sol": 0.09,
-        "skr": 120,
-        "skrFlat": 500
+        "skr": 120
       },
       "contents": {
         "cosmetics": [
@@ -226,7 +211,7 @@
           "cosmetic.frostfall-bundle.exclusive"
         ],
         "economy": {
-          "crystals": 1500,
+          "crystals": 1200,
           "stone": 400,
           "coins": 800
         },
@@ -244,7 +229,6 @@
     },
     {
       "sku": "embergrove-bundle",
-      "repeatable": false,
       "tier": 7,
       "storeSection": "style",
       "name": "Embergrove Bundle",
@@ -255,8 +239,7 @@
         "usd": 9.99,
         "usdc": 9.99,
         "sol": 0.09,
-        "skr": 120,
-        "skrFlat": 500
+        "skr": 120
       },
       "contents": {
         "cosmetics": [
@@ -266,7 +249,7 @@
           "cosmetic.embergrove-bundle.exclusive"
         ],
         "economy": {
-          "crystals": 1500,
+          "crystals": 1200,
           "stone": 400,
           "coins": 800
         },
@@ -284,7 +267,6 @@
     },
     {
       "sku": "bloomtide-bundle",
-      "repeatable": false,
       "tier": 8,
       "storeSection": "style",
       "name": "Spring Awakening",
@@ -295,8 +277,7 @@
         "usd": 4.99,
         "usdc": 4.99,
         "sol": 0.045,
-        "skr": 60,
-        "skrFlat": 250
+        "skr": 60
       },
       "contents": {
         "cosmetics": [
@@ -306,7 +287,7 @@
           "cosmetic.bloomtide-bundle.exclusive"
         ],
         "economy": {
-          "crystals": 750,
+          "crystals": 600,
           "stone": 200,
           "coins": 400
         },
@@ -324,13 +305,11 @@
     },
     {
       "sku": "starters-hand",
-      "repeatable": false,
       "band": "patronage",
       "compareTo": "hearth-spark",
       "tier": 9,
       "storeSection": "featured",
       "storeBadge": "BEST START",
-      "artHasBanner": true,
       "name": "Starter's Hand",
       "tagline": "A steady hand for a new tender - everything you need to get the Heart growing.",
       "theme": "Onboarding value pack: economy-heavy headstart + early instant-build/repair + one welcome cosmetic. The 'best first buy'.",
@@ -339,13 +318,12 @@
         "usd": 4.99,
         "usdc": 4.99,
         "sol": 0.045,
-        "skr": 60,
-        "skrFlat": 250
+        "skr": 60
       },
       "contents": {
         "cosmetics": [],
         "economy": {
-          "crystals": 800,
+          "crystals": 400,
           "stone": 1500,
           "coins": 600,
           "wood": 4000,
@@ -359,36 +337,32 @@
           }
         ]
       },
-      "storeVisible": false,
-      "_hiddenReason": "WO-1968 (owner shelf lock 2026-09-22): browse OFF - the owner named keepers-satchel the preferred $4.99 hero. The row and its art stay loadable so an existing owner's entitlement still resolves via PackCatalog.Find. keepers-satchel itself is still hidden pending its creative copy pass (see its _shelfNote), so no $4.99 pack is browsable until it is unhidden.",
+      "storeVisible": true,
       "_shelfNote": "WO-1118: contents rewritten to the $4.99 resource-forward basket (4000 wood / 2000 iron / 400 crystals / 1500 stone + the 2x lantern, which is the ONE convenience kind with a live redeemer). instant-build + instant-repair were stripped: nothing in the build spends them (see _schemaNotes.convenienceRedeemers). OWNER TODO: the 'theme' above still advertises 'instant-build/repair + one welcome cosmetic' - reword when those redeemers ship."
     },
     {
       "sku": "builders-hour",
-      "repeatable": true,
       "band": "patronage",
       "tier": 29,
       "storeSection": "featured",
       "storeBadge": "FIRST BUY",
       "storeVisible": true,
-      "name": "Raise the Barracks",
-      "tagline": "Enough timber, iron and stone to raise the Barracks tonight - and a second crew for six hours.",
+      "name": "Builder's Hour",
+      "tagline": "A small chest of materials and a second crew on the walls for six hours.",
       "theme": "WO-1388: the cheap FIRST micro-transaction. A small basket (about half a Cord of Timber) plus ONE extra builder crew for six hours. Convenience compresses TIME, never sells power; storage caps untouched.",
       "founderOnly": false,
       "pricing": {
         "usd": 1.99,
         "usdc": 1.99,
         "sol": 0.018,
-        "skr": 25,
-        "skrFlat": 100
+        "skr": 25
       },
       "contents": {
         "cosmetics": [],
         "economy": {
-          "wood": 700,
-          "iron": 360,
-          "stone": 300,
-          "crystals": 300
+          "wood": 600,
+          "iron": 300,
+          "stone": 300
         },
         "convenience": [
           {
@@ -398,11 +372,10 @@
           }
         ]
       },
-      "_shelfNote": "WO-1388 (owner 2026-09-04, verbatim: 'something cheap but to try to get at least a micro transaction' / '6 hours'). Redeemed by ConvenienceRedeemer.KindTemporaryBuilder -> BuildTimerService.TryGrantTemporaryBuilder(BuildTimerConfig.packTemporaryBuilderSeconds, reclaimAfterExpiry: true). A second purchase while a window is running is DEFERRED (queued behind the active crew, PlayerPrefs convenience.temporary-builder.deferred), never burned. The duration rides the tunables rail as economy.packTemporaryBuilderSeconds. On the Solana channel this pack requires an attested wallet like every price (WO-1386). NAME, BASKET and BADGE COPY are pending owner approval. WO-1801 (2026-09-16, owner verbatim: 'yeah cause i just want a first sale you know') RE-POINTED the basket at ONE NAMEABLE GOAL: the Barracks BUILD costs wood 600 + iron 320 (structures-catalog.json barracks.repo.cost, read at source 2026-09-16), and the old 600/300 basket missed it by 20 IRON - the pack could not complete the one thing its basket was shaped like. Now 700 wood / 360 iron / 300 stone: it covers that build with headroom and EVERY lane still fits the bare base cap of a brand-new save (storage-caps.json baseCap wood/iron/stone 2000 each), so nothing overflows and no faucet goes dead on the buy. SKU, tier, price and the USD_ANCHORS row are UNCHANGED - sku is a live save key and the anchor is server-authoritative. The name carries the GOAL because `name` is the only goal-copy slot a browsing player reads (WO-1798 s1c: the shelf card renders name + contents, never tagline). IRON IS 360, NOT 400, AND THE CEILING IS NOT ARBITRARY: impulse-iron-small grants 400 iron at the SAME $1.99 anchor, so a 400-iron first buy would grant >= its whole basket plus wood and stone - strictly DOMINATING it, which test/purchases.quote.test.js [no impulse rung is strictly dominated] fails by name. 360 covers the 320-iron Barracks build with headroom and leaves the iron rung the better IRON buy at that price, which is what the ladder is for. | WO-2160 (2026-09-28): +300 crystals (owner-approved amounts table, 151 crystals/$). OPEN COLLISION, NOT RESOLVED HERE: at the shared $1.99 anchor this row {wood 700, iron 360, stone 300, crystals 300} now strictly dominates impulse-crystals-small {crystals 250}, which test/purchases.quote.test.js [no impulse rung is strictly dominated] fails by name. No price was changed. RESOLVED the same day (lead decision 2026-09-28): impulse-crystals-small 250 -> 350 crystals, so this row no longer dominates it; this row is untouched."
+      "_shelfNote": "WO-1388 (owner 2026-09-04, verbatim: 'something cheap but to try to get at least a micro transaction' / '6 hours'). Redeemed by ConvenienceRedeemer.KindTemporaryBuilder -> BuildTimerService.TryGrantTemporaryBuilder(BuildTimerConfig.packTemporaryBuilderSeconds, reclaimAfterExpiry: true). A second purchase while a window is running is DEFERRED (queued behind the active crew, PlayerPrefs convenience.temporary-builder.deferred), never burned. The duration rides the tunables rail as economy.packTemporaryBuilderSeconds. On the Solana channel this pack requires an attested wallet like every price (WO-1386). NAME, BASKET and BADGE COPY are pending owner approval."
     },
     {
       "sku": "echo-patron-pack",
-      "repeatable": false,
       "tier": 10,
       "storeSection": "featured",
       "name": "Echo Patron Pack",
@@ -413,8 +386,7 @@
         "usd": 19.99,
         "usdc": 19.99,
         "sol": 0.18,
-        "skr": 240,
-        "skrFlat": 1000
+        "skr": 240
       },
       "contents": {
         "cosmetics": [
@@ -450,7 +422,6 @@
     },
     {
       "sku": "hero-wardrobe-pack",
-      "repeatable": false,
       "tier": 11,
       "storeSection": "style",
       "name": "Hero Wardrobe Pack",
@@ -461,8 +432,7 @@
         "usd": 9.99,
         "usdc": 9.99,
         "sol": 0.09,
-        "skr": 120,
-        "skrFlat": 500
+        "skr": 120
       },
       "contents": {
         "cosmetics": [
@@ -472,7 +442,7 @@
           "cosmetic.hero-wardrobe-pack.exclusive"
         ],
         "economy": {
-          "crystals": 1500,
+          "crystals": 800,
           "stone": 200,
           "coins": 500
         },
@@ -490,7 +460,6 @@
     },
     {
       "sku": "realm-defender-bundle",
-      "repeatable": false,
       "tier": 12,
       "storeSection": "style",
       "name": "Realm Defender Bundle",
@@ -501,8 +470,7 @@
         "usd": 9.99,
         "usdc": 9.99,
         "sol": 0.09,
-        "skr": 120,
-        "skrFlat": 500
+        "skr": 120
       },
       "contents": {
         "cosmetics": [
@@ -512,7 +480,7 @@
           "cosmetic.realm-defender-bundle.exclusive"
         ],
         "economy": {
-          "crystals": 1500,
+          "crystals": 1000,
           "stone": 300,
           "coins": 700
         },
@@ -530,7 +498,6 @@
     },
     {
       "sku": "builders-cache",
-      "repeatable": false,
       "tier": 13,
       "storeVisible": false,
       "name": "Builder's Cache",
@@ -541,8 +508,7 @@
         "usd": 19.99,
         "usdc": 19.99,
         "sol": 0.18,
-        "skr": 240,
-        "skrFlat": 1000
+        "skr": 240
       },
       "contents": {
         "cosmetics": [
@@ -577,11 +543,10 @@
     },
     {
       "sku": "impulse-wood-small",
-      "repeatable": true,
       "tier": 14,
       "name": "Cord of Timber",
       "tagline": "A cord of seasoned timber, cut and stacked - enough to finish what you started.",
-      "theme": "Small single-resource impulse pack (WO-1037, owner ruling 2026-08-16 option (b); WO-947 s12c guardrail 1). Grants wood PLUS crystals and nothing else - exactly {wood, crystals} (WO-2160 re-rule 2026-09-28: crystals are the time currency, not a cost-basket resource). No cosmetics, no convenience, no structures, no levels, no queue completions. Surfaced ONLY against a real shortfall, never as a storefront row.",
+      "theme": "Small single-resource impulse pack (WO-1037, owner ruling 2026-08-16 option (b); WO-947 s12c guardrail 1). Grants wood and NOTHING else - exactly ONE economy key. No cosmetics, no convenience, no structures, no levels, no queue completions. Surfaced ONLY against a real shortfall, never as a storefront row.",
       "founderOnly": false,
       "impulse": true,
       "impulseResource": "wood",
@@ -590,28 +555,25 @@
         "usd": 1.99,
         "usdc": 1.99,
         "sol": 0.018,
-        "skr": 25,
-        "skrFlat": 100
+        "skr": 25
       },
       "contents": {
         "cosmetics": [],
         "economy": {
-          "wood": 1000,
-          "crystals": 150
+          "wood": 1000
         },
         "convenience": []
       }
     },
     {
       "sku": "impulse-wood-medium",
-      "repeatable": true,
       "band": "gap",
       "orbTint": "#C98A3E",
       "compareTo": "hearth-spark",
       "tier": 15,
       "name": "Timber Wagon",
       "tagline": "A wagon of milled timber rolls in through the gate.",
-      "theme": "Medium single-resource impulse pack (WO-1037, owner ruling 2026-08-16 option (b); WO-947 s12c guardrail 1). Grants wood PLUS crystals and nothing else - exactly {wood, crystals} (WO-2160 re-rule 2026-09-28: crystals are the time currency, not a cost-basket resource). No cosmetics, no convenience, no structures, no levels, no queue completions. PERMANENT STOREFRONT ROW as of WO-1335 (owner ruling 2026-09-03, asked directly whether the shortfall gating should stand: 'They should always be buyable'). This DELIBERATELY OVERTURNS the WO-1037 shortfall gate that THIS NOTE ITSELF used to assert - a note that contradicts shipped behaviour is how this repo's most expensive bugs start, so it is rewritten rather than left to rot. WHAT IS NOT OVERTURNED: the WO-947 s12c single-HARVEST-resource guarantee still holds - exactly ONE harvest resource, plus crystals since the WO-2160 re-rule (2026-09-28), nothing else. NOTHING ABOUT MONEY CHANGED EITHER: the price, the SKU and the entitlement are untouched and the USD anchor in api/_lib/purchase-catalog.js has always quoted this row, so it was never missing a price. Since WO-2160 (2026-09-28) five impulse SKUs are shelf rows (the three mediums + impulse-crystals-medium/large); the other seven keep shelfCurated absent and stay shortfall-only (WO-947 s12c.4).",
+      "theme": "Medium single-resource impulse pack (WO-1037, owner ruling 2026-08-16 option (b); WO-947 s12c guardrail 1). Grants wood and NOTHING else - exactly ONE economy key. No cosmetics, no convenience, no structures, no levels, no queue completions. PERMANENT STOREFRONT ROW as of WO-1335 (owner ruling 2026-09-03, asked directly whether the shortfall gating should stand: 'They should always be buyable'). This DELIBERATELY OVERTURNS the WO-1037 shortfall gate that THIS NOTE ITSELF used to assert - a note that contradicts shipped behaviour is how this repo's most expensive bugs start, so it is rewritten rather than left to rot. WHAT IS NOT OVERTURNED: the WO-947 s12c single-resource guarantee above still holds - exactly ONE economy key, nothing else. NOTHING ABOUT MONEY CHANGED EITHER: the price, the SKU and the entitlement are untouched and the USD anchor in api/_lib/purchase-catalog.js has always quoted this row, so it was never missing a price. The other nine impulse SKUs keep shelfCurated absent and stay shortfall-only (WO-947 s12c.4).",
       "founderOnly": false,
       "impulse": true,
       "impulseResource": "wood",
@@ -620,29 +582,26 @@
         "usd": 2.99,
         "usdc": 2.99,
         "sol": 0.027,
-        "skr": 36,
-        "skrFlat": 150
+        "skr": 36
       },
       "contents": {
         "cosmetics": [],
         "economy": {
-          "wood": 3500,
-          "crystals": 300
+          "wood": 3500
         },
         "convenience": []
       },
       "shelfCurated": true,
       "storeVisible": true,
       "storeSection": "essentials",
-      "_shelfNote": "OWNER RULING 2026-08-21 'Middle - one impulse tier per resource': this is one of exactly THREE impulse SKUs promoted to a browsable shelf row (wood/iron/stone, MEDIUM rung). The medium rung was chosen because the small rung is strictly dominated by Hearth Spark at the same $1.99, and the large rung collides with Starter's Hand at $4.99. The other nine impulse SKUs keep shelfCurated absent and stay reachable ONLY via ShortfallPackOffer - that is the surviving WO-947 s12c.4 guardrail. Adding a fourth is an OWNER call. | WO-2160 (2026-09-28): the owner made that call - impulse-crystals-medium + impulse-crystals-large are shelf rows too, so 'exactly THREE' and 'the other nine' above are superseded (five on the shelf, seven shortfall-only)."
+      "_shelfNote": "OWNER RULING 2026-08-21 'Middle - one impulse tier per resource': this is one of exactly THREE impulse SKUs promoted to a browsable shelf row (wood/iron/stone, MEDIUM rung). The medium rung was chosen because the small rung is strictly dominated by Hearth Spark at the same $1.99, and the large rung collides with Starter's Hand at $4.99. The other nine impulse SKUs keep shelfCurated absent and stay reachable ONLY via ShortfallPackOffer - that is the surviving WO-947 s12c.4 guardrail. Adding a fourth is an OWNER call."
     },
     {
       "sku": "impulse-wood-large",
-      "repeatable": true,
       "tier": 16,
       "name": "Timber Barge",
       "tagline": "A barge of timber puts in at the landing, decks stacked to the rail.",
-      "theme": "Large single-resource impulse pack (WO-1037, owner ruling 2026-08-16 option (b); WO-947 s12c guardrail 1). Grants wood PLUS crystals and nothing else - exactly {wood, crystals} (WO-2160 re-rule 2026-09-28: crystals are the time currency, not a cost-basket resource). No cosmetics, no convenience, no structures, no levels, no queue completions. Surfaced ONLY against a real shortfall, never as a storefront row.",
+      "theme": "Large single-resource impulse pack (WO-1037, owner ruling 2026-08-16 option (b); WO-947 s12c guardrail 1). Grants wood and NOTHING else - exactly ONE economy key. No cosmetics, no convenience, no structures, no levels, no queue completions. Surfaced ONLY against a real shortfall, never as a storefront row.",
       "founderOnly": false,
       "impulse": true,
       "impulseResource": "wood",
@@ -651,25 +610,22 @@
         "usd": 4.99,
         "usdc": 4.99,
         "sol": 0.045,
-        "skr": 60,
-        "skrFlat": 250
+        "skr": 60
       },
       "contents": {
         "cosmetics": [],
         "economy": {
-          "wood": 8000,
-          "crystals": 600
+          "wood": 8000
         },
         "convenience": []
       }
     },
     {
       "sku": "impulse-iron-small",
-      "repeatable": true,
       "tier": 17,
       "name": "Pouch of Ingots",
       "tagline": "A pouch of cold-hammered ingots from the foundry floor.",
-      "theme": "Small single-resource impulse pack (WO-1037, owner ruling 2026-08-16 option (b); WO-947 s12c guardrail 1). Grants iron PLUS crystals and nothing else - exactly {iron, crystals} (WO-2160 re-rule 2026-09-28: crystals are the time currency, not a cost-basket resource). No cosmetics, no convenience, no structures, no levels, no queue completions. Surfaced ONLY against a real shortfall, never as a storefront row.",
+      "theme": "Small single-resource impulse pack (WO-1037, owner ruling 2026-08-16 option (b); WO-947 s12c guardrail 1). Grants iron and NOTHING else - exactly ONE economy key. No cosmetics, no convenience, no structures, no levels, no queue completions. Surfaced ONLY against a real shortfall, never as a storefront row.",
       "founderOnly": false,
       "impulse": true,
       "impulseResource": "iron",
@@ -678,28 +634,25 @@
         "usd": 1.99,
         "usdc": 1.99,
         "sol": 0.018,
-        "skr": 25,
-        "skrFlat": 100
+        "skr": 25
       },
       "contents": {
         "cosmetics": [],
         "economy": {
-          "iron": 400,
-          "crystals": 150
+          "iron": 400
         },
         "convenience": []
       }
     },
     {
       "sku": "impulse-iron-medium",
-      "repeatable": true,
       "band": "gap",
       "orbTint": "#9AA6B2",
       "compareTo": "hearth-spark",
       "tier": 18,
       "name": "Ingot Crate",
       "tagline": "A crate of ingots, banded and stamped, straight off the anvil.",
-      "theme": "Medium single-resource impulse pack (WO-1037, owner ruling 2026-08-16 option (b); WO-947 s12c guardrail 1). Grants iron PLUS crystals and nothing else - exactly {iron, crystals} (WO-2160 re-rule 2026-09-28: crystals are the time currency, not a cost-basket resource). No cosmetics, no convenience, no structures, no levels, no queue completions. PERMANENT STOREFRONT ROW as of WO-1335 (owner ruling 2026-09-03, asked directly whether the shortfall gating should stand: 'They should always be buyable'). This DELIBERATELY OVERTURNS the WO-1037 shortfall gate that THIS NOTE ITSELF used to assert - a note that contradicts shipped behaviour is how this repo's most expensive bugs start, so it is rewritten rather than left to rot. WHAT IS NOT OVERTURNED: the WO-947 s12c single-HARVEST-resource guarantee still holds - exactly ONE harvest resource, plus crystals since the WO-2160 re-rule (2026-09-28), nothing else. NOTHING ABOUT MONEY CHANGED EITHER: the price, the SKU and the entitlement are untouched and the USD anchor in api/_lib/purchase-catalog.js has always quoted this row, so it was never missing a price. Since WO-2160 (2026-09-28) five impulse SKUs are shelf rows (the three mediums + impulse-crystals-medium/large); the other seven keep shelfCurated absent and stay shortfall-only (WO-947 s12c.4).",
+      "theme": "Medium single-resource impulse pack (WO-1037, owner ruling 2026-08-16 option (b); WO-947 s12c guardrail 1). Grants iron and NOTHING else - exactly ONE economy key. No cosmetics, no convenience, no structures, no levels, no queue completions. PERMANENT STOREFRONT ROW as of WO-1335 (owner ruling 2026-09-03, asked directly whether the shortfall gating should stand: 'They should always be buyable'). This DELIBERATELY OVERTURNS the WO-1037 shortfall gate that THIS NOTE ITSELF used to assert - a note that contradicts shipped behaviour is how this repo's most expensive bugs start, so it is rewritten rather than left to rot. WHAT IS NOT OVERTURNED: the WO-947 s12c single-resource guarantee above still holds - exactly ONE economy key, nothing else. NOTHING ABOUT MONEY CHANGED EITHER: the price, the SKU and the entitlement are untouched and the USD anchor in api/_lib/purchase-catalog.js has always quoted this row, so it was never missing a price. The other nine impulse SKUs keep shelfCurated absent and stay shortfall-only (WO-947 s12c.4).",
       "founderOnly": false,
       "impulse": true,
       "impulseResource": "iron",
@@ -708,29 +661,26 @@
         "usd": 2.99,
         "usdc": 2.99,
         "sol": 0.027,
-        "skr": 36,
-        "skrFlat": 150
+        "skr": 36
       },
       "contents": {
         "cosmetics": [],
         "economy": {
-          "iron": 1200,
-          "crystals": 300
+          "iron": 1200
         },
         "convenience": []
       },
       "shelfCurated": true,
       "storeVisible": true,
       "storeSection": "essentials",
-      "_shelfNote": "OWNER RULING 2026-08-21 'Middle - one impulse tier per resource': this is one of exactly THREE impulse SKUs promoted to a browsable shelf row (wood/iron/stone, MEDIUM rung). The medium rung was chosen because the small rung is strictly dominated by Hearth Spark at the same $1.99, and the large rung collides with Starter's Hand at $4.99. The other nine impulse SKUs keep shelfCurated absent and stay reachable ONLY via ShortfallPackOffer - that is the surviving WO-947 s12c.4 guardrail. Adding a fourth is an OWNER call. | WO-2160 (2026-09-28): the owner made that call - impulse-crystals-medium + impulse-crystals-large are shelf rows too, so 'exactly THREE' and 'the other nine' above are superseded (five on the shelf, seven shortfall-only)."
+      "_shelfNote": "OWNER RULING 2026-08-21 'Middle - one impulse tier per resource': this is one of exactly THREE impulse SKUs promoted to a browsable shelf row (wood/iron/stone, MEDIUM rung). The medium rung was chosen because the small rung is strictly dominated by Hearth Spark at the same $1.99, and the large rung collides with Starter's Hand at $4.99. The other nine impulse SKUs keep shelfCurated absent and stay reachable ONLY via ShortfallPackOffer - that is the surviving WO-947 s12c.4 guardrail. Adding a fourth is an OWNER call."
     },
     {
       "sku": "impulse-iron-large",
-      "repeatable": true,
       "tier": 19,
       "name": "Foundry Load",
       "tagline": "A full foundry load - the forge runs hot for a week on this.",
-      "theme": "Large single-resource impulse pack (WO-1037, owner ruling 2026-08-16 option (b); WO-947 s12c guardrail 1). Grants iron PLUS crystals and nothing else - exactly {iron, crystals} (WO-2160 re-rule 2026-09-28: crystals are the time currency, not a cost-basket resource). No cosmetics, no convenience, no structures, no levels, no queue completions. Surfaced ONLY against a real shortfall, never as a storefront row.",
+      "theme": "Large single-resource impulse pack (WO-1037, owner ruling 2026-08-16 option (b); WO-947 s12c guardrail 1). Grants iron and NOTHING else - exactly ONE economy key. No cosmetics, no convenience, no structures, no levels, no queue completions. Surfaced ONLY against a real shortfall, never as a storefront row.",
       "founderOnly": false,
       "impulse": true,
       "impulseResource": "iron",
@@ -739,28 +689,25 @@
         "usd": 4.99,
         "usdc": 4.99,
         "sol": 0.045,
-        "skr": 60,
-        "skrFlat": 250
+        "skr": 60
       },
       "contents": {
         "cosmetics": [],
         "economy": {
-          "iron": 3000,
-          "crystals": 600
+          "iron": 3000
         },
         "convenience": []
       }
     },
     {
       "sku": "impulse-stone-small",
-      "repeatable": true,
       "legacySkus": [
         "impulse-food-small"
       ],
       "tier": 20,
       "name": "Mason's Satchel",
       "tagline": "A satchel of dressed stone from the quarry - ready for the wall.",
-      "theme": "Small single-resource impulse pack (WO-1037, owner ruling 2026-08-16 option (b); WO-947 s12c guardrail 1). Grants stone PLUS crystals and nothing else - exactly {stone, crystals} (WO-2160 re-rule 2026-09-28: crystals are the time currency, not a cost-basket resource). No cosmetics, no convenience, no structures, no levels, no queue completions. Surfaced ONLY against a real shortfall, never as a storefront row.",
+      "theme": "Small single-resource impulse pack (WO-1037, owner ruling 2026-08-16 option (b); WO-947 s12c guardrail 1). Grants stone and NOTHING else - exactly ONE economy key. No cosmetics, no convenience, no structures, no levels, no queue completions. Surfaced ONLY against a real shortfall, never as a storefront row.",
       "founderOnly": false,
       "impulse": true,
       "impulseResource": "stone",
@@ -769,21 +716,18 @@
         "usd": 1.99,
         "usdc": 1.99,
         "sol": 0.018,
-        "skr": 25,
-        "skrFlat": 100
+        "skr": 25
       },
       "contents": {
         "cosmetics": [],
         "economy": {
-          "stone": 1000,
-          "crystals": 150
+          "stone": 1000
         },
         "convenience": []
       }
     },
     {
       "sku": "impulse-stone-medium",
-      "repeatable": true,
       "legacySkus": [
         "impulse-food-medium"
       ],
@@ -793,7 +737,7 @@
       "tier": 21,
       "name": "Quarry Cart",
       "tagline": "A cart of dressed stone, hauled up from the quarry.",
-      "theme": "Medium single-resource impulse pack (WO-1037, owner ruling 2026-08-16 option (b); WO-947 s12c guardrail 1). Grants stone PLUS crystals and nothing else - exactly {stone, crystals} (WO-2160 re-rule 2026-09-28: crystals are the time currency, not a cost-basket resource). No cosmetics, no convenience, no structures, no levels, no queue completions. PERMANENT STOREFRONT ROW as of WO-1335 (owner ruling 2026-09-03, asked directly whether the shortfall gating should stand: 'They should always be buyable'). This DELIBERATELY OVERTURNS the WO-1037 shortfall gate that THIS NOTE ITSELF used to assert - a note that contradicts shipped behaviour is how this repo's most expensive bugs start, so it is rewritten rather than left to rot. WHAT IS NOT OVERTURNED: the WO-947 s12c single-HARVEST-resource guarantee still holds - exactly ONE harvest resource, plus crystals since the WO-2160 re-rule (2026-09-28), nothing else. NOTHING ABOUT MONEY CHANGED EITHER: the price, the SKU and the entitlement are untouched and the USD anchor in api/_lib/purchase-catalog.js has always quoted this row, so it was never missing a price. Since WO-2160 (2026-09-28) five impulse SKUs are shelf rows (the three mediums + impulse-crystals-medium/large); the other seven keep shelfCurated absent and stay shortfall-only (WO-947 s12c.4).",
+      "theme": "Medium single-resource impulse pack (WO-1037, owner ruling 2026-08-16 option (b); WO-947 s12c guardrail 1). Grants stone and NOTHING else - exactly ONE economy key. No cosmetics, no convenience, no structures, no levels, no queue completions. PERMANENT STOREFRONT ROW as of WO-1335 (owner ruling 2026-09-03, asked directly whether the shortfall gating should stand: 'They should always be buyable'). This DELIBERATELY OVERTURNS the WO-1037 shortfall gate that THIS NOTE ITSELF used to assert - a note that contradicts shipped behaviour is how this repo's most expensive bugs start, so it is rewritten rather than left to rot. WHAT IS NOT OVERTURNED: the WO-947 s12c single-resource guarantee above still holds - exactly ONE economy key, nothing else. NOTHING ABOUT MONEY CHANGED EITHER: the price, the SKU and the entitlement are untouched and the USD anchor in api/_lib/purchase-catalog.js has always quoted this row, so it was never missing a price. The other nine impulse SKUs keep shelfCurated absent and stay shortfall-only (WO-947 s12c.4).",
       "founderOnly": false,
       "impulse": true,
       "impulseResource": "stone",
@@ -802,32 +746,29 @@
         "usd": 2.99,
         "usdc": 2.99,
         "sol": 0.027,
-        "skr": 36,
-        "skrFlat": 150
+        "skr": 36
       },
       "contents": {
         "cosmetics": [],
         "economy": {
-          "stone": 3500,
-          "crystals": 300
+          "stone": 3500
         },
         "convenience": []
       },
       "shelfCurated": true,
       "storeVisible": true,
       "storeSection": "essentials",
-      "_shelfNote": "OWNER RULING 2026-08-21 'Middle - one impulse tier per resource': this is one of exactly THREE impulse SKUs promoted to a browsable shelf row (wood/iron/stone, MEDIUM rung). The medium rung was chosen because the small rung is strictly dominated by Hearth Spark at the same $1.99, and the large rung collides with Starter's Hand at $4.99. The other nine impulse SKUs keep shelfCurated absent and stay reachable ONLY via ShortfallPackOffer - that is the surviving WO-947 s12c.4 guardrail. Adding a fourth is an OWNER call. | WO-2160 (2026-09-28): the owner made that call - impulse-crystals-medium + impulse-crystals-large are shelf rows too, so 'exactly THREE' and 'the other nine' above are superseded (five on the shelf, seven shortfall-only)."
+      "_shelfNote": "OWNER RULING 2026-08-21 'Middle - one impulse tier per resource': this is one of exactly THREE impulse SKUs promoted to a browsable shelf row (wood/iron/stone, MEDIUM rung). The medium rung was chosen because the small rung is strictly dominated by Hearth Spark at the same $1.99, and the large rung collides with Starter's Hand at $4.99. The other nine impulse SKUs keep shelfCurated absent and stay reachable ONLY via ShortfallPackOffer - that is the surviving WO-947 s12c.4 guardrail. Adding a fourth is an OWNER call."
     },
     {
       "sku": "impulse-stone-large",
-      "repeatable": true,
       "legacySkus": [
         "impulse-food-large"
       ],
       "tier": 22,
       "name": "Mason's Wagon",
       "tagline": "A mason's wagon at full weight, ready to raise the next wall.",
-      "theme": "Large single-resource impulse pack (WO-1037, owner ruling 2026-08-16 option (b); WO-947 s12c guardrail 1). Grants stone PLUS crystals and nothing else - exactly {stone, crystals} (WO-2160 re-rule 2026-09-28: crystals are the time currency, not a cost-basket resource). No cosmetics, no convenience, no structures, no levels, no queue completions. Surfaced ONLY against a real shortfall, never as a storefront row.",
+      "theme": "Large single-resource impulse pack (WO-1037, owner ruling 2026-08-16 option (b); WO-947 s12c guardrail 1). Grants stone and NOTHING else - exactly ONE economy key. No cosmetics, no convenience, no structures, no levels, no queue completions. Surfaced ONLY against a real shortfall, never as a storefront row.",
       "founderOnly": false,
       "impulse": true,
       "impulseResource": "stone",
@@ -836,21 +777,18 @@
         "usd": 4.99,
         "usdc": 4.99,
         "sol": 0.045,
-        "skr": 60,
-        "skrFlat": 250
+        "skr": 60
       },
       "contents": {
         "cosmetics": [],
         "economy": {
-          "stone": 8000,
-          "crystals": 600
+          "stone": 8000
         },
         "convenience": []
       }
     },
     {
       "sku": "impulse-crystals-small",
-      "repeatable": true,
       "tier": 23,
       "name": "Crystal Shard",
       "tagline": "A single shard of aether crystal, still humming faintly.",
@@ -863,24 +801,22 @@
         "usd": 1.99,
         "usdc": 1.99,
         "sol": 0.018,
-        "skr": 25,
-        "skrFlat": 100
+        "skr": 25
       },
       "contents": {
         "cosmetics": [],
         "economy": {
-          "crystals": 350
+          "crystals": 250
         },
         "convenience": []
       }
     },
     {
       "sku": "impulse-crystals-medium",
-      "repeatable": true,
       "tier": 24,
       "name": "Crystal Cluster",
       "tagline": "A clustered growth of aether crystal, cut from the deep seam.",
-      "theme": "Medium single-resource impulse pack (WO-1037, owner ruling 2026-08-16 option (b); WO-947 s12c guardrail 1). Grants crystals and NOTHING else - the pure-crystal rung of the WO-2160 time-currency ladder. No cosmetics, no convenience, no structures, no levels, no queue completions. PERMANENT STOREFRONT ROW as of WO-2160 (2026-09-28, owner-approved amounts table: 'put medium + large ON the shelf'); the crystal amount is unchanged.",
+      "theme": "Medium single-resource impulse pack (WO-1037, owner ruling 2026-08-16 option (b); WO-947 s12c guardrail 1). Grants crystals and NOTHING else - exactly ONE economy key. No cosmetics, no convenience, no structures, no levels, no queue completions. Surfaced ONLY against a real shortfall, never as a storefront row.",
       "founderOnly": false,
       "impulse": true,
       "impulseResource": "crystals",
@@ -889,8 +825,7 @@
         "usd": 2.99,
         "usdc": 2.99,
         "sol": 0.027,
-        "skr": 36,
-        "skrFlat": 150
+        "skr": 36
       },
       "contents": {
         "cosmetics": [],
@@ -898,20 +833,14 @@
           "crystals": 700
         },
         "convenience": []
-      },
-      "band": "gap",
-      "shelfCurated": true,
-      "storeVisible": true,
-      "storeSection": "essentials",
-      "_shelfNote": "WO-2160 (2026-09-28): promoted to the CLOSE THE GAP shelf with the owner-approved amounts table (crystal impulse row: 'put medium + large ON the shelf: shelfCurated:true'). band gap because the landscape rail draws the Gap band only ([gap-reaches-shelf]); no orbTint authored - the tint falls back to the band light (StorePackCard.cs:135), and no hue is picked for a colourblind owner. No compareTo: the comparison line is optional and would point at a hidden row."
+      }
     },
     {
       "sku": "impulse-crystals-large",
-      "repeatable": true,
       "tier": 25,
       "name": "Crystal Vein",
       "tagline": "A whole vein of aether crystal, drawn out of the dark intact.",
-      "theme": "Large single-resource impulse pack (WO-1037, owner ruling 2026-08-16 option (b); WO-947 s12c guardrail 1). Grants crystals and NOTHING else - the pure-crystal rung of the WO-2160 time-currency ladder. No cosmetics, no convenience, no structures, no levels, no queue completions. PERMANENT STOREFRONT ROW as of WO-2160 (2026-09-28, owner-approved amounts table: 'put medium + large ON the shelf'); the crystal amount is unchanged.",
+      "theme": "Large single-resource impulse pack (WO-1037, owner ruling 2026-08-16 option (b); WO-947 s12c guardrail 1). Grants crystals and NOTHING else - exactly ONE economy key. No cosmetics, no convenience, no structures, no levels, no queue completions. Surfaced ONLY against a real shortfall, never as a storefront row.",
       "founderOnly": false,
       "impulse": true,
       "impulseResource": "crystals",
@@ -920,8 +849,7 @@
         "usd": 4.99,
         "usdc": 4.99,
         "sol": 0.045,
-        "skr": 60,
-        "skrFlat": 250
+        "skr": 60
       },
       "contents": {
         "cosmetics": [],
@@ -929,12 +857,7 @@
           "crystals": 1600
         },
         "convenience": []
-      },
-      "band": "gap",
-      "shelfCurated": true,
-      "storeVisible": true,
-      "storeSection": "essentials",
-      "_shelfNote": "WO-2160 (2026-09-28): promoted to the CLOSE THE GAP shelf with the owner-approved amounts table (crystal impulse row: 'put medium + large ON the shelf: shelfCurated:true'). band gap because the landscape rail draws the Gap band only ([gap-reaches-shelf]); no orbTint authored - the tint falls back to the band light (StorePackCard.cs:135), and no hue is picked for a colourblind owner. No compareTo: the comparison line is optional and would point at a hidden row."
+      }
     },
     {
       "sku": "welcome-500",
@@ -982,7 +905,6 @@
     },
     {
       "sku": "permanent-builder",
-      "repeatable": false,
       "band": "basket",
       "tier": 26,
       "storeVisible": true,
@@ -993,14 +915,11 @@
         "usd": 9.99,
         "usdc": 9.99,
         "sol": 0.09,
-        "skr": 120,
-        "skrFlat": 500
+        "skr": 120
       },
       "contents": {
         "cosmetics": [],
-        "economy": {
-          "crystals": 1500
-        },
+        "economy": {},
         "convenience": [
           {
             "kind": "permanent-builder",
@@ -1011,32 +930,6 @@
       },
       "storeSection": "essentials",
       "_shelfNote": "WO-1253. Permanent builder is CONCURRENCY (+1 crew on ChannelId.Builder), never queue depth. Redeemed by BuildTimerService.SlotCount reading OwnedItemIds for this SKU. Grant is idempotent under re-settle. Crystal extra-slot sink (TryBuySlot) is KEEP BOTH and still buys DEPTH. Priced at $9.99 so PurchaseGate requires an attested wallet - a reinstall-safe entitlement must not live on a guest-local key."
-    },
-    {
-      "sku": "order_rename",
-      "repeatable": true,
-      "tier": 30,
-      "storeSection": "essentials",
-      "storeVisible": false,
-      "_hiddenReason": "WO-1890 Order rename is bought from the Order screen (leader), not the Night Market shelf. SKR channel. Hidden on Google Play HUD via #if GOOGLE_PLAY.",
-      "name": "Order Rename",
-      "tagline": "One rename of your Order. Leaders only.",
-      "theme": "WO-1890: renaming an Order costs 100 SKR so names are not changed for free. Grants one rename credit on the clan row; POST /api/clan/rename consumes it.",
-      "founderOnly": false,
-      "pricing": {
-        "usd": 1.99,
-        "usdc": 1.99,
-        "sol": 0.018,
-        "skr": 25,
-        "skrFlat": 100
-      },
-      "contents": {
-        "cosmetics": [],
-        "economy": {},
-        "convenience": [],
-        "orderRename": 1
-      },
-      "_shelfNote": "WO-1890 (owner 2026-09-19): renaming an Order costs 100 SKR. Server is price authority (skrFlat 100). Game never holds SKR — buy this SKU, fulfill grants clans.rename_credits += 1, POST /api/clan/rename consumes one credit. Empty economy so it does not dominate impulse rungs at \\.99. Not a Play product — HUD hides the SKR rename on GOOGLE_PLAY. Hidden from Night Market browse (storeVisible:false); purchase door is the Order HUD."
     }
   ]
 }
