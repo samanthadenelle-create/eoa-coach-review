@@ -156,6 +156,18 @@ const TUNABLE_KEYS = [
     { key: 'raid.lootCoinsBaseBastion', kind: 'int' },
     { key: 'raid.lootCrystalsBase', kind: 'int' },
     { key: 'raid.lootCrystalsPerStar', kind: 'int' },
+    //   raid.lootRepeatClearPct - build default 60 (WO-1461, owner ruling 2026-09-06
+    //     20:33): the share of ordinary loot a re-clear pays while the camp's cooldown
+    //     is still running. It shipped as a compiled const 0.25f, which is exactly why
+    //     it disagreed with her ruling and could not be flipped. Clamped 0..100 at the
+    //     consumer - a repeat may never pay MORE than a first clear.
+    //   raid.cacheCapPerResource - build default 1800: per-resource ceiling on the RAID
+    //     CACHE, the temporary hold that catches loot the town bank refused so a win is
+    //     never burned. Capped resources only (wood/iron/stone). 1800 is one perfect
+    //     Camp I wood haul - a STATED DERIVATION, not her number; she ruled the
+    //     mechanic and said only "a modest cap". 0 restores the pre-WO-1461 burn.
+    { key: 'raid.lootRepeatClearPct', kind: 'int' },
+    { key: 'raid.cacheCapPerResource', kind: 'int' },
     //   raid.starterArmySize - build default 3: free Footmen granted the first time
     //     a save has a Barracks (map section 2, "the first army is free"). Once per
     //     save, so a rebuilt Barracks is not a troop faucet. 0 disables it.
@@ -203,6 +215,58 @@ const TUNABLE_KEYS = [
     { key: 'arena.wagerTier2', kind: 'int' },
     { key: 'arena.wagerTier3', kind: 'int' },
     { key: 'arena.winPursePct', kind: 'int' },
+    // WO-1094 - NOT a PROD-022 knob, and not balance: the honest FLOOR under a
+    // DERIVED bound. The hero's off-mesh playable-bounds clamp used to be a
+    // hardcoded +/-50 box, written for a castle and left standing in a merged
+    // 1000x1000 world, where it teleported a legitimately-placed hero back to the
+    // old bounds. It is now MEASURED from the live Terrain extent - but three
+    // shipped scenes carry no Terrain at all (Village2, RaidBase_*, the legacy
+    // MainCastle_Hall), and in those a purely-derived bound is NO bound: the hero
+    // drifts unbounded on the off-mesh transform fallback, inside the raid loop.
+    //   hero.playableFallbackHalf - build default 50 metres: EXACTLY the bound this
+    //     build replaced, so an empty table reproduces today's behaviour in every
+    //     unmeasured scene. Never read where a Terrain exists. Clamped 1..100000 at
+    //     the consumer, so a typo of 0 cannot pin the hero to the origin.
+    { key: 'hero.playableFallbackHalf', kind: 'int' },
+    // WO-1095 - the stranding watchdog's wall-clock ceiling on raid STAGING, in
+    // seconds. Staging costs nothing on the raid clock, so the only thing a
+    // wall-clock bound should catch is a DEAD session. RaidDeployController already
+    // reads this key and answers 900 for itself while the key has no spec, so
+    // registering it changes nothing on its own - it just makes the number
+    // reachable without a 30-minute rebuild.
+    //   raid.stagingCeilingSeconds - build default 900 (fifteen minutes).
+    { key: 'raid.stagingCeilingSeconds', kind: 'int' },
+    // WO-1594 - THE RAID HONOR MILESTONES, owner ruling 2026-09-09, verbatim
+    // choice: "Tunables with those defaults". The raid HUD opens with three stars
+    // lit and snuffs them as these milestones pass, and the settle clamps the
+    // payout to min(settle, honor) - so these three decide what a raid PAYS as
+    // well as what the bar narrates. RaidScoring reads all three through
+    // RemoteTunables.SpecFor before Int, so an unregistered key still answers the
+    // shipping default instead of 0.
+    //   raid.honorThirdStarSeconds - build default 90 (half the 180 s clock).
+    //   raid.honorSecondStarSeconds - build default 150 (the last 30 s).
+    //   raid.honorSecondStarMinDestructionPct - build default 50. An integer
+    //     PERCENT, not a fraction: the rail carries no floats, and the consumer
+    //     clamps 0..100 and divides by 100.
+    { key: 'raid.honorThirdStarSeconds', kind: 'int' },
+    { key: 'raid.honorSecondStarSeconds', kind: 'int' },
+    { key: 'raid.honorSecondStarMinDestructionPct', kind: 'int' },
+    // WO-1373 ROUGH-STONE CHAIN - owner ruling 2026-09-09, verbatim: "there is only
+    // one stone type till it gets to jeweler, and then its RND. So only top two tiers
+    // of raids can drop stone and no more than 1 per day. 5% drop rate in dungeons not
+    // included the starter dungeons".
+    //   raid.roughStoneMinTier    - build default 3: the LOWER of the top two rungs on
+    //     the Camp I..Iron Bastion ladder, so mage_enclave and iron_bastion drop and
+    //     nothing below does. 2 admits fortified_garrison; 5 turns the raid drop off.
+    //   raid.roughStonePerDayCap  - build default 1: how many stones EVERY raid
+    //     together may pay in one UTC day. GLOBAL, not per camp. 0 turns it off.
+    //   dungeon.roughStoneDropPct - build default 5, and the one DEPARTURE here: the
+    //     build shipped 15 as a compiled const. 15 restores it. Starter dungeons
+    //     (layout tier 1) are excluded by a tier gate, not by this number, and the
+    //     guaranteed FIRST stone is not on this axis at all.
+    { key: 'raid.roughStoneMinTier', kind: 'int' },
+    { key: 'raid.roughStonePerDayCap', kind: 'int' },
+    { key: 'dungeon.roughStoneDropPct', kind: 'int' },
 ];
 
 /** How long one warm lambda may reuse a read of the table. */
