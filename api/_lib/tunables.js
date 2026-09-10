@@ -267,6 +267,35 @@ const TUNABLE_KEYS = [
     { key: 'raid.roughStoneMinTier', kind: 'int' },
     { key: 'raid.roughStonePerDayCap', kind: 'int' },
     { key: 'dungeon.roughStoneDropPct', kind: 'int' },
+    // WO-1348 - NOT PROD-022 knobs and NOT balance: these are the owner's CREATIVE VFX
+    // picks, moved off a thirty-minute rebuild and onto this rail. Her ask, verbatim:
+    // "is it possible to tag those from the command center? and then change pointer on
+    // next town load?" / "realm.vfx(set)" - and her namespace proposal is the key shape,
+    // adopted verbatim, VFX-key casing and underscores included.
+    //
+    // (!) THE VALUE IS A STABLE OPTION ID, NOT A PREFAB PATH. This rail is int-only, so
+    // the row names an entry in the pool generated from her own tag file by
+    // tools/gen-vfx-pick-options.mjs. Ids are append-only and NEVER reassigned: a sorted
+    // position would shift the day somebody tags a new effect and would silently re-point
+    // a row she set last week.
+    //
+    // (!) 0 = THE BUILD-TIME PICK. An empty table therefore renders exactly what
+    // Assets/Editor/VfxManualPicks.json renders today - that file stays the default and
+    // the record. An id this build cannot resolve falls back to it and traces the reason;
+    // it never renders nothing, because art that is picked but never shipped fails with NO
+    // ERROR ON SCREEN and that silence has already cost this project three incidents
+    // (CLAUDE.md section 16).
+    //
+    //   realm.vfx.atfootprintoftree_Aura   - the world tree's foot glow (a LOOP slot).
+    //   realm.vfx.atfootprintoftree_Impact - the world tree's foot burst. NO build-time
+    //     entry: at 0 nothing renders, and setting an id CREATES the tag rather than
+    //     replacing one. Key creation is a stated acceptance criterion of the ticket.
+    //   realm.vfx.EliteDeath_Impact        - the elite death burst.
+    //   realm.vfx.BossDeath_Impact         - the boss death burst.
+    { key: 'realm.vfx.atfootprintoftree_Aura', kind: 'int' },
+    { key: 'realm.vfx.atfootprintoftree_Impact', kind: 'int' },
+    { key: 'realm.vfx.EliteDeath_Impact', kind: 'int' },
+    { key: 'realm.vfx.BossDeath_Impact', kind: 'int' },
 ];
 
 /** How long one warm lambda may reuse a read of the table. */
