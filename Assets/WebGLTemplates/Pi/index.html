@@ -265,6 +265,19 @@
       script.onload = function () {
         createUnityInstance(document.querySelector("#unity-canvas"), config, function (progress) {
           if (loadingBar) loadingBar.textContent = "Loading... " + Math.round(progress * 100) + "%";
+          // Loader progress + memory crumb every 10% (2026-09-10, owner: the phone dies at 65% every
+          // time, and the page never reaches pagehide - so the last crumb that lands IS the evidence).
+          try {
+            var pct = Math.round(progress * 100);
+            if (pct >= (window.__piLastPct || 0) + 10 || pct >= 60 && pct !== window.__piLastPct) {
+              window.__piLastPct = pct;
+              var pm = (performance && performance.memory) ? performance.memory : null;
+              piTraceEmit('[PiLifecycle] loader progress=' + pct + '% deviceMemoryGB=' + (navigator.deviceMemory || '?') +
+                ' jsHeapUsedMB=' + (pm ? Math.round(pm.usedJSHeapSize / 1048576) : '?') +
+                ' jsHeapLimitMB=' + (pm ? Math.round(pm.jsHeapSizeLimit / 1048576) : '?') +
+                ' upMs=' + (Date.now() - piBootAt), false);
+            }
+          } catch (e) { /* telemetry never blocks a boot */ }
         }).then(function (unityInstance) {
           window.unityInstance = unityInstance; // SendMessage targets this
           piBootCrumb('unity-running');
@@ -288,6 +301,19 @@
       // Posted HERE, before startUnityOnce() ever appends the loader script - this line has to
       // survive the case where the runtime never comes up at all.
       piTraceEmit(piBootLine, false);
+      // Pi-host fingerprint (2026-09-10, owner in Pi Desktop App Studio saw the SKR stub): the SDK
+      // finds its host through document.referrer + a parent-frame channel, never the user agent,
+      // while PiBridge.jslib's PiIsPiBrowser keys on the UA token / a pinet.com host. Capture the
+      // four facts the two readings disagree on so the fix reads them instead of guessing them.
+      try {
+        var piHostLine = '[PiLifecycle] host ua=' + (navigator.userAgent || '') +
+          ' referrer=' + (document.referrer || '') +
+          ' framed=' + (window.top !== window.self) +
+          ' href=' + location.href +
+          ' windowPi=' + (typeof window.Pi);
+        console.info(piHostLine);
+        piTraceEmit(piHostLine, false);
+      } catch (e) { console.info('[PiLifecycle] host fingerprint unavailable: ' + e); }
 
       // ===================================================================================
       // PROD-022 Lane C: separate "the MAIN THREAD wedged" from "the CONTENT PROCESS was killed".
