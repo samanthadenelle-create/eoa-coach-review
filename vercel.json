@@ -5,7 +5,8 @@
   "framework": null,
   "crons": [
     { "path": "/api/admin/cleanup", "schedule": "0 4 * * *" },
-    { "path": "/api/admin/google-play-voided-reconcile", "schedule": "30 4 * * *" }
+    { "path": "/api/admin/google-play-voided-reconcile", "schedule": "30 4 * * *" },
+    { "path": "/api/cron/heart-pulse", "schedule": "0 5 * * *" }
   ],
   "rewrites": [
     { "source": "/privacy", "destination": "/privacy.html" },
