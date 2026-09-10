@@ -4,6 +4,42 @@
 // Source contract: Solana Mobile's official react-native-samples/skr-staking sample.
 // The logged-in MWA address is only the lookup key. No signature, token movement, or
 // custody occurs. The program/account constants and PDA seeds below match that sample.
+//
+// ⛔⛔ DISPLAY-ONLY SINCE 2026-09-10 (WO-1674 / HEART-001, owner ruling 13:10:
+//     "backend only"). READ THIS BEFORE WIRING ANYTHING TO IT.
+//
+//     THE AMOUNT THIS CLASS COMPUTES MAY NOT GRANT ANYTHING. It is computed on
+//     the device, and product rule 7 of the Heartbound spec is explicit: "The
+//     Unity client must never be trusted to report the amount of SKR staked."
+//     The AUTHORITATIVE stake is read by the BACKEND, from mainnet, in
+//     api/_lib/skr-staking.js, served by GET /api/heartbound/status, and reaches
+//     gameplay through DeNelle.Core.Platform.VerifiedStakeSnapshot — whose only
+//     writer is HeartboundStatusClient.
+//
+//     ⚠ WHY IT WAS NOT DELETED. Two reasons, both concrete:
+//       1. It still feeds the SHOWCASE/FTUE surfaces through
+//          StakeRewardsResolver.Query, which is a display path. Deleting it
+//          would blank a shipped screen to fix a problem that lives elsewhere.
+//       2. Assets/Editor/Regression/JewelerDiscoveryFtueRegression.cs:23,116-121
+//          reads THIS FILE as text and requires the program id, the "user_stake"
+//          seed, the WalletPreferenceStore lookup, GetAccountInfoAsync and the
+//          "no signature requested" trace to still be here. Deleting the file
+//          turns that suite red for a reason unrelated to the actual defect.
+//     The fix for rule 7 was never "delete a class" — it was to make sure no
+//     REWARD reads this number. That happened in PolishBonusProvider.cs, which
+//     now reads VerifiedStakeSnapshot.
+//
+//     ⛔ DO NOT re-point StakeRewardsResolver.Query at a reward path, and do not
+//     add a consumer of TryGetActiveStake that grants anything. The settable
+//     property is a DISPLAY seam now. StakingComplianceRegression fails if a
+//     reward path reads a client-computed stake again.
+//
+//     ⚠ AND NOTE THE FAILURE MODE IS *CORRECT HERE AND WRONG THERE*: the catch
+//     below fails CLOSED to zero, which is right for a one-off perk and exactly
+//     wrong for a streak. The backend deliberately does the opposite (last-known
+//     verified state within a bounded grace window). Two different answers for
+//     two different questions, written down rather than left to drift — this is
+//     WO-1674 Q2, ruled.
 // =============================================================================
 
 using System;
@@ -81,7 +117,9 @@ namespace DeNelle.Wallet
                 _activeStake = Math.Max(0, active);
                 _known = true;
                 FlowTrace.Step("Stake", $"official SKR program read for logged-in wallet: active={_activeStake:N0} SKR, " +
-                                        $"userStake={userStake.Key}; read-only, no signature requested.");
+                                        $"userStake={userStake.Key}; read-only, no signature requested. " +
+                                        "DISPLAY-ONLY (WO-1674): this number grants nothing - the reward path " +
+                                        "reads VerifiedStakeSnapshot, written only by the backend verifier.");
                 if (changed) StakeRewardsResolver.NotifyStakeChanged();
             }
             catch (Exception ex)
