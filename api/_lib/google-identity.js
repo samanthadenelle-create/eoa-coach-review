@@ -127,6 +127,15 @@ function derivePlayerId(subject, key) {
     return 'play-' + crypto.createHmac('sha256', k).update(sub, 'utf8').digest('hex');
 }
 
+/** Verified Google email lookup only. Never use this fingerprint as authentication. */
+function deriveEmailHmac(email, key) {
+    if (typeof email !== 'string' || email.length > 320) throw new Error('EMAIL_INVALID');
+    const normalized = email.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) throw new Error('EMAIL_INVALID');
+    if (typeof key !== 'string' || !key.trim()) throw new Error('GOOGLE_IDENTITY_UNCONFIGURED');
+    return crypto.createHmac('sha256', key).update(normalized, 'utf8').digest('hex');
+}
+
 function b64urlToBuffer(segment) {
     return Buffer.from(String(segment).replace(/-/g, '+').replace(/_/g, '/'), 'base64');
 }
@@ -326,6 +335,7 @@ module.exports = {
     identityConfiguration,
     allowedAudiences,
     derivePlayerId,
+    deriveEmailHmac,
     verifyIdToken,
     _test: { fetchJwks, findJwk, jwksTtlFromResponse, decodeJsonSegment, _resetJwksCache },
 };
