@@ -130,8 +130,86 @@ namespace DeNelle.Editor
             "psa_crypto",
             // Art asset id 'ebc_cryptofthecount' - the icon for Crypt of the Count. The
             // letters 'crypt' + 'o' collide with the token; nothing to do with currency.
-            "cryptofthecount"
+            "cryptofthecount",
+            // -- OWNER RULING 2026-09-15 (WO-1741): the vendored UniTask SOURCE PATHS. -----
+            // WHAT UNITASK IS. UniTask is a general-purpose zero-allocation async/await
+            // library for Unity (Cysharp). It is not crypto code, it has no wallet, chain,
+            // token or payment surface, and it has nothing to do with Solana beyond WHERE ITS
+            // FILES SIT ON DISK: the Solana SDK vendors it INSIDE its own package folder, so
+            // every UniTask source path reads
+            // Packages/com.solana.unity_sdk/Runtime/Plugins/UniTask/Runtime/<File>.cs.
+            // Sixteen first-party asmdefs - DeNelle.Core and DeNelle.Village among them -
+            // reference the UniTask assembly, so it compiles into the GOOGLE_PLAY player by
+            // design, and IL2CPP writes each source file PATH into global-metadata.dat.
+            //
+            // WHY A VENDORED PATH STRING IS NOT A POLICY SURFACE. The token here is a
+            // DIRECTORY NAME carried by a debug-metadata path, not a feature, not a string a
+            // player or a reviewer can reach through the app, and not code that can talk to a
+            // chain. Nothing in the artifact behaves differently for its presence. No build
+            // callback can strip it either: the path is baked by IL2CPP from the file's
+            // location on disk, so the only true removal is un-vendoring UniTask
+            // (com.cysharp.unitask + dropping the SDK from the Play manifest), which needs a
+            // manifest swap, a package resolve and a full recompile - see WO-1740 s5 Q1(i).
+            // This entry is the owner's ruling of 2026-09-15 on that ceiling: allowlist the
+            // UniTask paths, with the reason written down, rather than leave the Play lane
+            // permanently red on a folder name.
+            //
+            // WHY IT IS SCOPED TO .../Plugins/UniTask AND NOT TO THE PACKAGE. MEASURED
+            // 2026-09-15 by listing Packages/com.solana.unity_sdk/Runtime/: its children are
+            // codebase/ (IWalletBase, InGameWallet, DeepLinkWallets, Metaplex) and Plugins/,
+            // and UniTask's OWN SIBLINGS inside Plugins/ are SolanaWalletAdapterWebGL/ and
+            // Web3AuthSDK/. Those are real crypto surfaces. An allowlist on the package - or
+            // even on Runtime/Plugins/ - would suppress them too. Scoped as written, a leak
+            // from any of them still fires, because IsAllowlistedOccurrence suppresses a hit
+            // ONLY when the matched occurrence lies INSIDE the phrase below.
+            //
+            // The phrase contains exactly one forbidden token, 'solana'. It cannot mask a
+            // second: 'Solana.Unity.' does not occur in it (the following character is an
+            // underscore, not a dot), and no other entry of the vocabulary is a substring.
+            // Both separators are listed because global-metadata.dat carries Windows-built
+            // paths with backslashes while the same path appears forward-slashed elsewhere.
+            "com.solana.unity_sdk/runtime/plugins/unitask",
+            @"com.solana.unity_sdk\runtime\plugins\unitask"
         };
+
+        // Tokens the PLAY-NEUTRAL AUTHORING SWEEP polices that the ARTIFACT scan deliberately
+        // does not. Bare 'wallet' is too common in engine/third-party binaries to be evidence
+        // in an AAB entry, but in hand-authored catalog COPY it is exactly the word that must
+        // not reach a Play shelf - MEASURED 2026-09-15: canon-strings storeBuyWalletRequired
+        // reads 'need a connected wallet', which the artifact token 'connect wallet' does NOT
+        // match ('connected' is not 'connect '). Kept here, beside the vocabulary it extends,
+        // so the sweep still has ONE source of truth and not a second copy (WO-1740 s3).
+        private static readonly string[] AuthoringOnlyTokens =
+        {
+            "wallet"
+        };
+
+        /// <summary>
+        /// WO-1741. The ONE entry point the Play-neutral catalog sweep
+        /// (<c>GooglePlayContentExclusion.ContainsForbiddenAuthoringToken</c>) uses, so the
+        /// sweep consumes this class's vocabulary AND this class's matcher instead of keeping
+        /// a third copy of the policy.
+        ///
+        /// It replaced a hand-maintained list that held <c>" skr"</c> WITH A LEADING SPACE,
+        /// so a value STARTING with the token - canon-strings <c>storeBalanceUnavailable</c> =
+        /// <c>SKR: unavailable in this build</c> - was never detected, its already-authored
+        /// neutral replacement was never consulted, and the Seeker copy shipped in every Play
+        /// AAB ever produced (WO-1739 s3b). Bare <c>skr</c> under the word-boundary rule here
+        /// catches it.
+        ///
+        /// Text, not binary: <c>readableEntry: true</c>, so no printable-run corroboration is
+        /// required and the documented false-positive suppressions still apply.
+        /// </summary>
+        public static bool ContainsForbiddenAuthoringToken(string value)
+        {
+            string text = value ?? string.Empty;
+            if (text.Length == 0) return false;
+            foreach (string token in ForbiddenTokens)
+                if (MatchesTokenInPayload(text, token, readableEntry: true)) return true;
+            foreach (string token in AuthoringOnlyTokens)
+                if (MatchesTokenInPayload(text, token, readableEntry: true)) return true;
+            return false;
+        }
 
         // JAR signature listings hold nothing but entry names and base64 SHA digests, and a
         // base64 digest is a long printable run of arbitrary characters - the one place the
