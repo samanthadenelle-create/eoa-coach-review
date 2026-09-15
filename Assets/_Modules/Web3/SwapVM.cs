@@ -28,7 +28,7 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
-using DeNelle.Core.Web3;
+using DeNelle.Core.Backend;
 using DeNelle.Core.Diagnostics;
 
 namespace DeNelle.Web3

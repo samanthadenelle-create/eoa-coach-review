@@ -32,7 +32,7 @@ using System.Globalization;
 using System.Text;
 using System.Threading.Tasks;
 using DeNelle.Core;
-using DeNelle.Core.Web3;
+using DeNelle.Core.Backend;
 using DeNelle.Core.Diagnostics;
 using DeNelle.Wallet;
 using UnityEngine;

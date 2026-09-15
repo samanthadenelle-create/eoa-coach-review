@@ -36,7 +36,7 @@ using System.Collections.Generic;
 using System.Text;
 using Cysharp.Threading.Tasks;
 using DeNelle.Core.Diagnostics;
-using DeNelle.Core.Web3;
+using DeNelle.Core.Backend;
 using Newtonsoft.Json;
 using UnityEngine;
 using UnityEngine.Networking;
