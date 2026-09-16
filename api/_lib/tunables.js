@@ -168,6 +168,34 @@ const TUNABLE_KEYS = [
     //     mechanic and said only "a modest cap". 0 restores the pre-WO-1461 burn.
     { key: 'raid.lootRepeatClearPct', kind: 'int' },
     { key: 'raid.cacheCapPerResource', kind: 'int' },
+    // WO-1763 PER-CAMP RAID DIFFICULTY - NOT PROD-022 knobs. Two axes per camp, and
+    // the first difficulty levers on this rail at all: until this ticket the ONLY way
+    // to make a camp harder was to edit Assets/Resources/Data/Canonical/scene-configs.json
+    // and ship a build. The owner nearly 3-starred the top camp with a level-4 hero, and
+    // that camp's garrison block is a field-for-field clone of the one below it on every
+    // difficulty axis - read the authored values off that JSON, never off a number here.
+    //   raid.difficultyMultPct<Camp> - build default 100: a PERCENT on the camp's
+    //     AUTHORED difficultyMultiplier, which is the one number that scales a raid
+    //     defender's HP and contact damage. 100 is identity and bit-identical to today
+    //     (the consumer short-circuits and never round-trips the float). Clamped 25..400
+    //     at the consumer. 160 = 1.6x the authored toughness on both axes.
+    //   raid.levelOffset<Camp> - build default -999, a SENTINEL meaning "use the value
+    //     scene-configs.json authors". It REPLACES that offset, it does not add to it -
+    //     the number written is the offset. Deleting the row is the same as the sentinel
+    //     and is this table's documented resting state. Any other value is clamped -5..20
+    //     at the consumer. The spawner's max(baseEnemyLevel, playerLevel + offset) floor
+    //     is untouched, so this only ever raises the ceiling.
+    // (!) The NEGATIVE SENTINEL is why this family's manifest `min` is -999 rather than
+    // -5: test/tunables-manifest.test.js asserts the shipped default is inside the range
+    // the page offers, so a min of -5 would be red on correct code.
+    { key: 'raid.difficultyMultPctCamp1', kind: 'int' },
+    { key: 'raid.difficultyMultPctCamp2', kind: 'int' },
+    { key: 'raid.difficultyMultPctCamp3', kind: 'int' },
+    { key: 'raid.difficultyMultPctBastion', kind: 'int' },
+    { key: 'raid.levelOffsetCamp1', kind: 'int' },
+    { key: 'raid.levelOffsetCamp2', kind: 'int' },
+    { key: 'raid.levelOffsetCamp3', kind: 'int' },
+    { key: 'raid.levelOffsetBastion', kind: 'int' },
     //   raid.starterArmySize - build default 3: free Footmen granted the first time
     //     a save has a Barracks (map section 2, "the first army is free"). Once per
     //     save, so a rebuilt Barracks is not a troop faucet. 0 disables it.
