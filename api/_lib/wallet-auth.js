@@ -735,6 +735,54 @@ async function touchGuestRate(sql, guestId) {
 }
 
 /**
+ * WO-1844 (clan step 1). Record that this PROVEN wallet was seen, in one atomic UPSERT.
+ *
+ * ONE WALLET = ONE ROW. `first_seen_at` is written ONCE, by the insert, and is never
+ * touched again — the ON CONFLICT clause names `last_seen_at` and nothing else, which is
+ * the whole contract: "when did this wallet first exist to us" must survive every later
+ * visit. A conflict update that also refreshed first_seen_at would quietly destroy the
+ * only fact this table is for.
+ *
+ * ⛔ FAIL-OPEN, DELIBERATELY, AND FOR THE SAME REASON touchGuestRate IS — read that
+ *    function's note. This is IDENTITY TRACKING, not authorization: it decides nothing,
+ *    it gates nothing, and the caller has ALREADY proven wallet ownership by the time we
+ *    get here. So a missing table (migration 0029 not yet applied) or any other write
+ *    failure must degrade to a logged warning, never deny a request that is otherwise
+ *    good. THIS FUNCTION MUST NEVER THROW: it is awaited on the wallet rail's success
+ *    path, so a throw here would turn every successful wallet auth into a 500 — the exact
+ *    deploy-order failure that 500'd every wallet session mint for a week over
+ *    auth_sessions.identity_kind (see test/migrations.runner.test.js's header).
+ *
+ * ⛔ AND IT WRITES ONLY TWO COLUMNS. `first_seen_staked_at`, `sgt_mint` and
+ *    `sgt_verified_at` exist in the table for later steps in this chain (the Vigil read,
+ *    Genesis Token binding). Nothing here may set, read or reason about them.
+ *
+ * @param {Function} sql     neon(...) tagged-template client
+ * @param {string}   wallet  a wallet whose ownership has ALREADY been proven
+ * @returns {Promise<{ok:true, firstSeenAt?:string, lastSeenAt?:string, degraded?:boolean}>} always ok
+ */
+async function touchWalletIdentity(sql, wallet) {
+    try {
+        const rows = await sql`
+            INSERT INTO wallet_identity (wallet, first_seen_at, last_seen_at)
+            VALUES (${wallet}, NOW(), NOW())
+            ON CONFLICT (wallet) DO UPDATE SET
+                last_seen_at = NOW()
+            RETURNING first_seen_at, last_seen_at
+        `;
+        const row = rows && rows[0] ? rows[0] : null;
+        return {
+            ok: true,
+            firstSeenAt: row ? row.first_seen_at : null,
+            lastSeenAt: row ? row.last_seen_at : null,
+        };
+    } catch (err) {
+        console.warn('[wallet-auth] wallet_identity unavailable — continuing (fail-open):', err.message);
+        return { ok: true, degraded: true };
+    }
+}
+
+/**
  * THE ONE ENTRY POINT save.js/load.js call.
  *
  * Routes by the SHAPE of the player id being acted on, so the caller cannot pick
@@ -756,9 +804,21 @@ async function authenticate(sql, req, payload, claimedPlayerId) {
 
     if (isWalletId(id)) {
         const r = await verifyWallet(sql, headers, payload, id);
-        return r.ok
-            ? { ok: true, mode: 'wallet', identity: r.wallet }
-            : { ok: false, mode: 'wallet', identity: id, code: r.code, detail: r.detail };
+        if (!r.ok) {
+            return { ok: false, mode: 'wallet', identity: id, code: r.code, detail: r.detail };
+        }
+        // WO-1844 (clan step 1). ONE call site, and it sits HERE rather than in
+        // authenticateGranting(): both authenticateGranting() and authenticatePromoRedeem()
+        // delegate to this function and have no verification point of their own, so a second
+        // call in either would only double-write the same row on the same request.
+        //
+        // ⛔ AFTER the proof, and on the WALLET RAIL ONLY. A guest id is self-asserted, so
+        //    recording one as an identity would fill this table with whatever an attacker
+        //    mints; and a play- id can never carry the Solana-shaped columns this table
+        //    reserves. Fail-open by construction — see touchWalletIdentity — so nothing
+        //    below this line can turn a proven auth into a failure.
+        await touchWalletIdentity(sql, r.wallet);
+        return { ok: true, mode: 'wallet', identity: r.wallet };
     }
 
     // GOOGLE PLAY RAIL (WO-1282 PIN-1b). A play- id is proven the same way a wallet
@@ -973,6 +1033,7 @@ module.exports = {
     verifyWallet,
     verifyGuest,
     verifyAndConsume,   // back-compat
+    touchWalletIdentity,  // ← WO-1844: fail-open identity tracking. Decides nothing.
     authenticate,          // ← self-service routes (own row): save, load, generate, tower-swap
     authenticateGranting,  // ← ANY route that hands out value: referral claim, entitlements, …
     authenticatePromoRedeem, // ← /api/promo/redeem ONLY (owner ruling 2026-09-06). One caller.
