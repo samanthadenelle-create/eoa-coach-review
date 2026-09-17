@@ -339,7 +339,30 @@ function _resetRateCache() { _rateCache = null; _rateInFlight = null; }
  * caller persists it and stamps the id/expiry.
  * @returns {object|null} null when the SKU is not sold on this network.
  */
-function buildQuoteBody(network, sku, rate, discountBps = null) {
+/**
+ * ⛔ THE LABEL IS CHOSEN BY THE **REASON**, NOT BY THE NUMBER (WO-1799).
+ *
+ * Until the storewide sale existed there was exactly ONE discount, so the label
+ * could hardcode the word "shortfall" off the bps alone. It cannot any more: a
+ * 3000-bps quote is a SALE and a 2000-bps one is a per-wallet shortfall apology,
+ * and telling a sale buyer they received a "shortfall discount" is a sentence the
+ * player cannot make sense of on the confirm screen.
+ *
+ * ⚠ The client renders this string VERBATIM and performs no percentage arithmetic
+ * (PurchaseQuoteService.DiscountLabel, PackStore.cs confirm line), so the wording
+ * is a SERVER decision and there is nowhere else it can be fixed.
+ *
+ * Unknown/absent reason falls back to the neutral "% off", never to a claim about
+ * WHY - an invented reason on a money screen is worse than none.
+ */
+function discountLabelFor(bps, reason) {
+    const pct = bps / 100;
+    if (reason === 'repair_shortfall') return `${pct}% shortfall discount`;
+    if (reason === 'sale') return `${pct}% off`;
+    return `${pct}% off`;
+}
+
+function buildQuoteBody(network, sku, rate, discountBps = null, discountReason = 'repair_shortfall') {
     const rail = purchaseRail(network);
     const usd = usdAnchor(sku);
     if (!rail || usd == null || !rate || !(rate.usdPerSkr > 0)) return null;
@@ -362,7 +385,11 @@ function buildQuoteBody(network, sku, rate, discountBps = null) {
         usdEffective: quotedUsd,
         usdSaving: hasDiscount ? usd - quotedUsd : null,
         discountBps: hasDiscount ? bps : null,
-        discountLabel: hasDiscount ? `${bps / 100}% shortfall discount` : null,
+        discountLabel: hasDiscount ? discountLabelFor(bps, discountReason) : null,
+        // The reason that priced this body, carried so the caller persists the SAME
+        // string it labelled with. Two separate decisions about one reason is how a
+        // row ends up saying 'sale' under a "shortfall discount" label.
+        discountReason: hasDiscount ? discountReason : null,
         rate: rate.usdPerSkr,
         rateSource: rate.source,
     };
@@ -427,5 +454,6 @@ module.exports = { DEVNET_CANARY_SKU, DEVNET_PACKS, MAINNET_CANARY_SKU, MAINNET_
     MAINNET_SKR_MINT, MAINNET_CANARY_OWNER, SKR_DECIMALS_BY_NETWORK, USD_ANCHORS,
     QUOTE_TTL_SECONDS, QUOTE_SETTLEMENT_GRACE_SECONDS, RATE_SOURCE,
     mainnetCanaryEnabled, walletAllowed, purchaseContract, purchaseRail, isPinnedSku,
-    usdAnchor, quoteAmount, pinnedSkus, fetchSkrUsdRate, buildQuoteBody, quotableSkus,
+    usdAnchor, quoteAmount, pinnedSkus, fetchSkrUsdRate, buildQuoteBody, discountLabelFor,
+    quotableSkus,
     quoteValidAtPayment, quoteOfferable, contractFromQuoteRow, _resetRateCache };

@@ -65,6 +65,9 @@ const { logAuthReject, logApiEvent } = require('../_lib/audit');
 const { enforce: maintenanceEnforce, AREA_STORE } = require('../_lib/maintenance');
 const { buildQuoteBody, fetchSkrUsdRate, isPinnedSku, pinnedSkus, purchaseContract,
     quotableSkus, usdAnchor, walletAllowed, QUOTE_TTL_SECONDS } = require('../_lib/purchase-catalog');
+// WO-1799 the storewide sale. Read through the SAME readTunables helper
+// api/client-tunables.js uses — never a second reader of the knob table.
+const { readStoreSale, resolveDiscount, SALE_REASON } = require('../_lib/store-sale');
 
 // Worded, player-readable refusals. Quiet ≠ mute: a refusal on the money path
 // must say WHY, or the player is left staring at a dead button (§3).
@@ -108,8 +111,15 @@ function discountBpsForReason(reasonHint, discountedRecently) {
         ? SHORTFALL_DISCOUNT_BPS : null;
 }
 
-/** The wire shape of one priced row. Same field names in both modes on purpose. */
-function wireQuote(body, extra) {
+/**
+ * The wire shape of one priced row. Same field names in both modes on purpose.
+ *
+ * `saleEndsAtIso` is PER-ROW because the client reads it per-row: WO-1800 added
+ * `[JsonProperty("saleEndsAt")]` to PurchaseQuote and draws a countdown from it
+ * (PurchaseQuoteService.SaleEndsAtUtc, read at source 2026-09-16). Null is a
+ * first-class answer there — a sale with no end draws the badge and no countdown.
+ */
+function wireQuote(body, extra, saleEndsAtIso) {
     return Object.assign({
         sku: body.sku,
         network: body.network,
@@ -125,6 +135,21 @@ function wireQuote(body, extra) {
         usdSaving: body.usdSaving,
         discountBps: body.discountBps,
         discountLabel: body.discountLabel,
+        // ── WO-1799: THE SHELF'S SALE FIELDS ─────────────────────────────────
+        // ⚠ ADDITIVE, AND THE SHIPPED APK IGNORES THEM ON THE CARD. Verified at
+        // source 2026-09-16: PackStore.StorePriceMajor / StorePriceMinor draw the
+        // card from AUTHORED client data (pack.AmountLabel / pack.UsdReference /
+        // pack.UsdApprox) or from the Pi/Play provider, and the only thing the
+        // LIST feeds today is IsSellable / SellableReasonFor. So a sale is FELT at
+        // the CONFIRM LINE, which does read discountLabel + usdSaving, and a
+        // struck-through shelf anchor needs a client change (a new APK).
+        //
+        // They are sent anyway because the alternative is a client change that
+        // then needs a server change too. `saleBps` is null on a row that is not
+        // on sale — never 0, which a formatter would happily print as "0% off".
+        saleBps: body.discountReason === SALE_REASON ? body.discountBps : null,
+        saleLabel: body.discountReason === SALE_REASON ? body.discountLabel : null,
+        saleEndsAt: body.discountReason === SALE_REASON && saleEndsAtIso ? saleEndsAtIso : null,
         rate: body.rate,
         rateSource: body.rateSource,
         pinned: false,
@@ -146,6 +171,13 @@ function wirePinned(contract) {
         usdAnchor: usdAnchor(contract.sku),
         usdEffective: null,
         usdSaving: null,
+        // ⛔ A CANARY IS NEVER ON SALE. Its amount is a PROTOCOL CONSTANT the
+        // verifier checks by exact equality, so a discount on it would refuse the
+        // very proof-of-rail it exists to be. Stated as an explicit null rather
+        // than an absent field, so a formatter cannot read "missing" as "0% off".
+        saleBps: null,
+        saleLabel: null,
+        saleEndsAt: null,
         rate: null,
         rateSource: 'server-pinned',
         pinned: true,
@@ -247,6 +279,14 @@ async function handler(req, res) {
             message: RATE_UNAVAILABLE_MESSAGE, ref });
     }
 
+    // ── THE STOREWIDE SALE (WO-1799) ─────────────────────────────────────────
+    // Read ONCE, before either mode, so the shelf and the till cannot disagree
+    // about whether a sale is running. FAILS TO NO SALE: an unreadable knob table
+    // charges the ORDINARY price, never a remembered or invented one.
+    const sale = await readStoreSale(sql);
+    const saleEndsAtIso = sale.bps > 0 && sale.endsAtMs
+        ? new Date(sale.endsAtMs).toISOString() : null;
+
     // ── LIST mode: display prices. Binds nothing, persists nothing. ──────────
     if (!sku) {
         const rows = [];
@@ -259,11 +299,22 @@ async function handler(req, res) {
         // disabled button and a sentence explains everything. Nothing is sellable
         // that was sellable before — see sellableReasonFor().
         for (const candidate of quotableSkus(network)) {
-            const built = buildQuoteBody(network, candidate, rate);
+            // ⛔ THE SALE IS PRICED ON THE SHELF BY THE SAME buildQuoteBody THE TILL
+            // USES. A shelf that applied the percentage itself would be a second
+            // price calculation, and the two would disagree the first time the
+            // rounding rule (ceil-to-a-whole-SKR) landed differently — a card
+            // promising one figure and a confirm screen charging another.
+            //
+            // ⚠ The per-wallet SHORTFALL discount is deliberately NOT applied here:
+            // it is once per 7 days per wallet and the LIST is public and
+            // unauthenticated, so there is no wallet to judge. The shelf shows the
+            // sale; the till adds the shortfall if this player is owed one.
+            const built = buildQuoteBody(network, candidate, rate,
+                sale.bps > 0 ? sale.bps : null, SALE_REASON);
             if (!built) continue;
             const reason = sellableReasonFor(network, candidate, playerId, false);
             rows.push(wireQuote(built, { quoteId: null, expiresAt: null,
-                sellable: reason == null, sellableReason: reason }));
+                sellable: reason == null, sellableReason: reason }, saleEndsAtIso));
         }
         // ⚠ The canaries stay FILTERED, and that is not an oversight. A canary is a
         // proof-of-rail, not a sale, so it is NOT part of the public ladder — it
@@ -277,7 +328,13 @@ async function handler(req, res) {
                 { sellable: true, sellableReason: null }));
         }
         return res.status(200).json({ success: true, mode: 'list', network,
-            rate: rate.usdPerSkr, rateSource: rate.source, prices: rows });
+            rate: rate.usdPerSkr, rateSource: rate.source, prices: rows,
+            // Envelope-level as well as per-row, so a shelf can print ONE banner
+            // instead of reading the sale off an arbitrary row. `saleEndsAt` is ISO on
+            // the wire even though the knob is epoch minutes — the wire speaks the
+            // client's format, the knob speaks the rail's (store-sale.js says why).
+            saleBps: sale.bps > 0 ? sale.bps : null,
+            saleEndsAt: saleEndsAtIso });
     }
 
     // ── QUOTE mode: one binding, single-use, expiring row. ───────────────────
@@ -290,13 +347,24 @@ async function handler(req, res) {
                     SELECT 1 FROM purchase_quotes
                     WHERE wallet = ${playerId}
                       AND discount_bps IS NOT NULL
+                      AND discount_reason = ${SHORTFALL_REASON_SERVER}
                       AND issued_at >= NOW() - (${DISCOUNT_WINDOW_DAYS} * INTERVAL '1 day')
                 ) AS issued`;
             discountedRecently = !prior || !prior.length || prior[0].issued === true;
         } catch (_) { return quietFail(res, 500, AuthCode.SERVER_ERROR, ref); }
     }
-    let discountBps = discountBpsForReason(reasonHint, discountedRecently);
-    let built = buildQuoteBody(network, sku, rate, discountBps);
+    // ⛔ THE SALE REPLACES THE SHORTFALL WHEN IT IS LARGER — MAX, NEVER ADDITIVE.
+    // The rule and the reason it is not a sum live in store-sale.resolveDiscount.
+    const shortfallBps = discountBpsForReason(reasonHint, discountedRecently);
+    let resolved = resolveDiscount(sale.bps, shortfallBps, SHORTFALL_REASON_SERVER);
+    let discountBps = resolved.bps;
+    let discountReason = resolved.reason;
+    // ⭐ ONLY A SHORTFALL IS RATE-LIMITED, so only a shortfall needs the serializable
+    // predicate below. A sale is storewide and unlimited: gating it on an empty
+    // 7-day window would sell the FIRST pack of a sale at 30% off and every one
+    // after it at full price, which is not a sale.
+    const gateOnWindow = discountReason === SHORTFALL_REASON_SERVER;
+    let built = buildQuoteBody(network, sku, rate, discountBps, discountReason);
     if (!built) {
         await logApiEvent(sql, playerId, 'purchase_quote_refused',
             { ref, sku, network, reason: 'contract_unavailable' });
@@ -307,7 +375,7 @@ async function handler(req, res) {
     const quoteId = quoteRef();
     let inserted;
     try {
-        if (discountBps != null) {
+        if (discountBps != null && gateOnWindow) {
             // Serializable predicate authority: simultaneous requests that both observe an empty
             // window cannot both commit. A serialization loser fails closed and may retry at the
             // ordinary price after the winner is visible.
@@ -320,20 +388,34 @@ async function handler(req, res) {
                        ${built.amountBaseUnits}, ${built.decimals}, ${built.mint},
                        ${built.recipient}, ${built.recipientAta}, ${built.usdAnchor},
                        ${built.rate}, ${built.rateSource}, ${discountBps},
-                       ${SHORTFALL_REASON_SERVER},
+                       ${discountReason},
                        NOW() + (${QUOTE_TTL_SECONDS} * INTERVAL '1 second')
                 WHERE NOT EXISTS (
                     SELECT 1 FROM purchase_quotes
                     WHERE wallet = ${playerId}
                       AND discount_bps IS NOT NULL
+                      AND discount_reason = ${SHORTFALL_REASON_SERVER}
                       AND issued_at >= NOW() - (${DISCOUNT_WINDOW_DAYS} * INTERVAL '1 day'))
                 RETURNING quote_ref, expires_at`], { isolationLevel: 'Serializable' });
             inserted = discountedTx[0];
+            // ⛔ THE FALLBACK IS THE SALE, NOT FULL PRICE (WO-1799). A shortfall that
+            // is already in-window, or that loses the concurrent race, must drop back
+            // to whatever the STOREWIDE sale is — charging full price during a 30%
+            // sale because the player also asked for a shortfall discount would
+            // punish the very moment the shortfall hint exists to soften.
+            if (!inserted || !inserted.length) {
+                resolved = resolveDiscount(sale.bps, null, SHORTFALL_REASON_SERVER);
+                discountBps = resolved.bps;
+                discountReason = resolved.reason;
+            }
         }
+        // The UNGATED insert. It serves three cases and that is why it no longer
+        // hardcodes a NULL discount: no discount at all, a STOREWIDE SALE (not
+        // rate-limited, so it never needed the predicate), and a shortfall that was
+        // already in-window or lost the race and fell back to the sale above.
         if (!inserted || !inserted.length) {
-            // Already in-window or lost a concurrent race: issue an ordinary quote.
-            discountBps = null;
-            built = buildQuoteBody(network, sku, rate, null);
+            built = buildQuoteBody(network, sku, rate, discountBps, discountReason);
+            if (!built) return quietFail(res, 500, AuthCode.SERVER_ERROR, ref);
             inserted = await sql`
                 INSERT INTO purchase_quotes
                     (quote_ref, wallet, sku, network, currency, amount_base_units, decimals,
@@ -342,7 +424,8 @@ async function handler(req, res) {
                 VALUES (${quoteId}, ${playerId}, ${sku}, ${network}, ${built.currency},
                         ${built.amountBaseUnits}, ${built.decimals}, ${built.mint},
                         ${built.recipient}, ${built.recipientAta}, ${built.usdAnchor},
-                        ${built.rate}, ${built.rateSource}, NULL, NULL,
+                        ${built.rate}, ${built.rateSource},
+                        ${built.discountBps}, ${built.discountReason},
                         NOW() + (${QUOTE_TTL_SECONDS} * INTERVAL '1 second'))
                 RETURNING quote_ref, expires_at`;
         }
@@ -355,12 +438,17 @@ async function handler(req, res) {
     await logApiEvent(sql, playerId, 'purchase_quote_issued', { ref, sku, network,
         quoteId, amountBaseUnits: built.amountBaseUnits, usdAnchor: built.usdAnchor,
         rate: built.rate, rateSource: built.rateSource, discountBps: built.discountBps,
-        discountReason: built.discountBps != null ? SHORTFALL_REASON_SERVER : null,
+        // ⛔ THE REASON IS READ OFF THE BODY THAT PRICED THE ROW, NOT INFERRED. This
+        // line used to hardcode the shortfall reason whenever a discount existed,
+        // which after WO-1799 would have logged every SALE as a shortfall — the
+        // audit trail disagreeing with the persisted row it exists to explain.
+        discountReason: built.discountReason,
+        saleBps: sale.bps > 0 ? sale.bps : null,
         reasonHint: reasonHint || null });
 
     return res.status(200).json({ success: true, mode: 'quote',
         quote: wireQuote(built, { quoteId,
-            expiresAt: new Date(inserted[0].expires_at).toISOString() }) });
+            expiresAt: new Date(inserted[0].expires_at).toISOString() }, saleEndsAtIso) });
 }
 
 module.exports = handler;
@@ -368,4 +456,4 @@ module.exports.config = { api: { bodyParser: false } };
 module.exports._test = { wireQuote, wirePinned, RATE_UNAVAILABLE_MESSAGE, SKU_UNAVAILABLE_MESSAGE,
     SALES_CLOSED_MESSAGE, CANARY_NOT_SELLABLE_MESSAGE, sellableReasonFor,
     SHORTFALL_DISCOUNT_BPS, DISCOUNT_WINDOW_DAYS, SHORTFALL_REASON_HINT,
-    discountBpsForReason };
+    SHORTFALL_REASON_SERVER, discountBpsForReason };

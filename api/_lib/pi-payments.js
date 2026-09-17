@@ -39,7 +39,10 @@
 // touches it returns a CODE, never the upstream body.
 // =============================================================================
 
-const { usdAnchor, QUOTE_TTL_SECONDS } = require('./purchase-catalog');
+// discountLabelFor is shared with the SKR rail on purpose (WO-1799): one wording
+// decision per discount reason, so a sale cannot read "30% off" on one rail and
+// "30% shortfall discount" on the other.
+const { usdAnchor, discountLabelFor, QUOTE_TTL_SECONDS } = require('./purchase-catalog');
 
 // ── What is sellable on the Pi rail ─────────────────────────────────────────
 // ⭐ ONE SKU, DELIBERATELY (owner ruling, WO-1318). No purchase has ever
@@ -211,10 +214,18 @@ function piSkuUsd(sku) {
  * The un-persisted body of a Pi quote. Pure given a rate — the caller persists it
  * and stamps the id/expiry, exactly as purchases/quote.js does for SKR.
  */
-function buildPiQuoteBody(sku, rate) {
+function buildPiQuoteBody(sku, rate, discountBps = null, discountReason = null) {
     const usd = piSkuUsd(sku);
     if (usd == null || !rate || !(rate.usdPerPi > 0)) return null;
-    const amount = quotePiAmount(usd, rate.usdPerPi);
+    // ⛔ THE SALE IS APPLIED TO THE **USD** BEFORE THE Pi CONVERSION (WO-1799), the
+    // same order api/_lib/purchase-catalog.buildQuoteBody uses. Discounting the Pi
+    // figure afterwards would apply the percentage to a number the rounding rule had
+    // already touched, so the two rails would drift apart on the same sale — and the
+    // only place that shows up is a player's confirm screen.
+    const bps = discountBps;
+    const hasDiscount = typeof bps === 'number' && Number.isInteger(bps) && bps > 0 && bps < 10_000;
+    const quotedUsd = hasDiscount ? usd * (10_000 - bps) / 10_000 : usd;
+    const amount = quotePiAmount(quotedUsd, rate.usdPerPi);
     if (!amount) return null;
     return {
         sku, network: PI_NETWORK, currency: PI_CURRENCY,
@@ -222,6 +233,13 @@ function buildPiQuoteBody(sku, rate) {
         amountBaseUnits: amount.amountBaseUnits, // what the server compares
         decimals: PI_DECIMALS,
         usdAnchor: usd,
+        // Display facts from the SAME calculation that priced the amount. The client
+        // may format these; it may never derive either one.
+        usdEffective: quotedUsd,
+        usdSaving: hasDiscount ? usd - quotedUsd : null,
+        discountBps: hasDiscount ? bps : null,
+        discountLabel: hasDiscount ? discountLabelFor(bps, discountReason) : null,
+        discountReason: hasDiscount ? discountReason : null,
         memo: PI_MEMO,
         rate: rate.usdPerPi,
         rateSource: rate.source,

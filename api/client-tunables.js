@@ -48,7 +48,37 @@
 
 const { neon } = require('@neondatabase/serverless');
 const { applyCors } = require('./_lib/http');
-const { readTunables } = require('./_lib/tunables');
+const { readTunables, TUNABLE_KEYS } = require('./_lib/tunables');
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⛔ SERVER-ONLY KEYS NEVER LEAVE THE SERVER (WO-1799).
+// ─────────────────────────────────────────────────────────────────────────────
+// This endpoint is PUBLIC and UNAUTHENTICATED. Every key it serves is a key any
+// player can read. That is fine for a load-timeout or a spell colour and it is
+// NOT fine for a knob the SERVER is authoritative for - the first of which is the
+// storewide sale percentage (api/_lib/store-sale.js).
+//
+// A sale bps on a phone is a second opinion about money on a device we do not
+// control: exactly the duplicated-state failure CLAUDE.md sections 2, 5 and 16
+// each record a scar from, arriving through the money door. It is withheld here
+// rather than "not read by the client", because what a client chooses to read is
+// not a boundary - what the server sends is.
+//
+// ⚠ DERIVED FROM THE ALLOWLIST, NEVER A SECOND LIST. A hand-typed set of excluded
+// names here would be the copy this whole rail's header refuses to make: the day a
+// second serverOnly knob lands, that copy would ship its value to every phone.
+const SERVER_ONLY_KEYS = new Set(
+    TUNABLE_KEYS.filter((s) => s && s.serverOnly === true).map((s) => s.key));
+
+/** The public subset of an override map: everything the server does not keep. */
+function publicValues(values) {
+    const out = {};
+    for (const key of Object.keys(values || {})) {
+        if (SERVER_ONLY_KEYS.has(key)) continue;
+        out[key] = values[key];
+    }
+    return out;
+}
 
 /** Payload schema version. The client parses forward-compatibly (RemoteTunables). */
 const PAYLOAD_VERSION = 1;
@@ -74,6 +104,8 @@ module.exports = async (req, res) => {
         version: PAYLOAD_VERSION,
         readOk: state.ok === true,
         reason: state.reason,
-        values: state.ok ? state.values : {},
+        values: state.ok ? publicValues(state.values) : {},
     });
 };
+
+module.exports._test = { SERVER_ONLY_KEYS, publicValues, PAYLOAD_VERSION };
