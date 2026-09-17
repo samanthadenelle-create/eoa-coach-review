@@ -296,6 +296,29 @@ const TUNABLE_KEYS = [
     // reachable without a 30-minute rebuild.
     //   raid.stagingCeilingSeconds - build default 900 (fifteen minutes).
     { key: 'raid.stagingCeilingSeconds', kind: 'int' },
+    // WO-1810 - WHAT LOSING A RAID COSTS, owner ruling 2026-09-16, verbatim: "there
+    // is no cost to losing a raid" / "loss should lose troops and then rebuild" /
+    // "maybe lose 100 on fail, lose 60% on retreat" / "but any troop killed is dead
+    // so 60% of whats left". Percents of the SURVIVORS; troops KILLED on the field
+    // are dead on every outcome and are deliberately NOT on the rail.
+    //   raid.lossPctFail    - build default 100: a failed raid (clock expiry, wipe,
+    //     watchdog, hero-death settlement) loses the whole warband.
+    //   raid.lossPctRetreat - build default 60: the price of the player's own
+    //     Retreat, charged on what is left after the killed.
+    // ⚠ BOTH ARE A DEPARTURE from "the default is today's behaviour": the build lost
+    // 0% permanently - the fallen came home "wounded" and healed free on a timer.
+    // A row of 0 on both restores that.
+    { key: 'raid.lossPctFail', kind: 'int' },
+    { key: 'raid.lossPctRetreat', kind: 'int' },
+    // WO-1811 - DISMISSING A TRAINED TROOP, owner ruling 2026-09-16, verbatim:
+    // "you need to remove ones from active army, and either return them to gold or
+    // to a staged ready troop". The Reserve is the free exit; this prices the
+    // permanent one as a PERCENT OF THE TROOP'S CATALOG GOLD VALUE.
+    //   army.dismissReturnPercent - build default 50.
+    // ⚠ IT REFUNDS NOTHING THAT WAS PAID: training has charged nothing since
+    // WO-1387, so there is no spend to give back. The owner ruled the VERB and not
+    // the number, which is exactly why the number is a row and not a literal.
+    { key: 'army.dismissReturnPercent', kind: 'int' },
     // WO-1594 - THE RAID HONOR MILESTONES, owner ruling 2026-09-09, verbatim
     // choice: "Tunables with those defaults". The raid HUD opens with three stars
     // lit and snuffs them as these milestones pass, and the settle clamps the
