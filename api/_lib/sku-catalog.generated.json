@@ -347,8 +347,8 @@
       "storeSection": "featured",
       "storeBadge": "FIRST BUY",
       "storeVisible": true,
-      "name": "Builder's Hour",
-      "tagline": "A small chest of materials and a second crew on the walls for six hours.",
+      "name": "Raise the Barracks",
+      "tagline": "Enough timber, iron and stone to raise the Barracks tonight - and a second crew for six hours.",
       "theme": "WO-1388: the cheap FIRST micro-transaction. A small basket (about half a Cord of Timber) plus ONE extra builder crew for six hours. Convenience compresses TIME, never sells power; storage caps untouched.",
       "founderOnly": false,
       "pricing": {
@@ -360,8 +360,8 @@
       "contents": {
         "cosmetics": [],
         "economy": {
-          "wood": 600,
-          "iron": 300,
+          "wood": 700,
+          "iron": 360,
           "stone": 300
         },
         "convenience": [
@@ -372,7 +372,7 @@
           }
         ]
       },
-      "_shelfNote": "WO-1388 (owner 2026-09-04, verbatim: 'something cheap but to try to get at least a micro transaction' / '6 hours'). Redeemed by ConvenienceRedeemer.KindTemporaryBuilder -> BuildTimerService.TryGrantTemporaryBuilder(BuildTimerConfig.packTemporaryBuilderSeconds, reclaimAfterExpiry: true). A second purchase while a window is running is DEFERRED (queued behind the active crew, PlayerPrefs convenience.temporary-builder.deferred), never burned. The duration rides the tunables rail as economy.packTemporaryBuilderSeconds. On the Solana channel this pack requires an attested wallet like every price (WO-1386). NAME, BASKET and BADGE COPY are pending owner approval."
+      "_shelfNote": "WO-1388 (owner 2026-09-04, verbatim: 'something cheap but to try to get at least a micro transaction' / '6 hours'). Redeemed by ConvenienceRedeemer.KindTemporaryBuilder -> BuildTimerService.TryGrantTemporaryBuilder(BuildTimerConfig.packTemporaryBuilderSeconds, reclaimAfterExpiry: true). A second purchase while a window is running is DEFERRED (queued behind the active crew, PlayerPrefs convenience.temporary-builder.deferred), never burned. The duration rides the tunables rail as economy.packTemporaryBuilderSeconds. On the Solana channel this pack requires an attested wallet like every price (WO-1386). NAME, BASKET and BADGE COPY are pending owner approval. WO-1801 (2026-09-16, owner verbatim: 'yeah cause i just want a first sale you know') RE-POINTED the basket at ONE NAMEABLE GOAL: the Barracks BUILD costs wood 600 + iron 320 (structures-catalog.json barracks.repo.cost, read at source 2026-09-16), and the old 600/300 basket missed it by 20 IRON - the pack could not complete the one thing its basket was shaped like. Now 700 wood / 360 iron / 300 stone: it covers that build with headroom and EVERY lane still fits the bare base cap of a brand-new save (storage-caps.json baseCap wood/iron/stone 2000 each), so nothing overflows and no faucet goes dead on the buy. SKU, tier, price and the USD_ANCHORS row are UNCHANGED - sku is a live save key and the anchor is server-authoritative. The name carries the GOAL because `name` is the only goal-copy slot a browsing player reads (WO-1798 s1c: the shelf card renders name + contents, never tagline). IRON IS 360, NOT 400, AND THE CEILING IS NOT ARBITRARY: impulse-iron-small grants 400 iron at the SAME $1.99 anchor, so a 400-iron first buy would grant >= its whole basket plus wood and stone - strictly DOMINATING it, which test/purchases.quote.test.js [no impulse rung is strictly dominated] fails by name. 360 covers the 320-iron Barracks build with headroom and leaves the iron rung the better IRON buy at that price, which is what the ladder is for."
     },
     {
       "sku": "echo-patron-pack",
