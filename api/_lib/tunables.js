@@ -196,9 +196,41 @@ const TUNABLE_KEYS = [
     { key: 'raid.levelOffsetCamp2', kind: 'int' },
     { key: 'raid.levelOffsetCamp3', kind: 'int' },
     { key: 'raid.levelOffsetBastion', kind: 'int' },
-    //   raid.starterArmySize - build default 3: free Footmen granted the first time
-    //     a save has a Barracks (map section 2, "the first army is free"). Once per
-    //     save, so a rebuilt Barracks is not a troop faucet. 0 disables it.
+    // WO-1773 TOWN WAVE DIFFICULTY + THE TOWN-REGEN COMBAT GATE. Two dead steps
+    // measured off an external tester's wave-176 recording, and fixing either one
+    // alone closes nothing:
+    //   A. town.regenSuppressSecondsAfterHit / town.regenPctDuringWave - the town
+    //      safe-zone regen had NO combat check at all. It is a fraction of MaxHp per
+    //      second, so it scales with gear while incoming damage is capped by the wave
+    //      curve's clamp: the gap widens with every upgrade and can never be
+    //      outgrown. This is the PREREQUISITE - a heavier roster cannot move a bar
+    //      that refills faster than it drains. Defaults 0 (no gate) and 100 (full
+    //      rate in a wave) are today exactly. The suppression window WINS over the
+    //      in-wave percent, and the first-time tutorial is never gated.
+    //   B. wave.hpGrowthPctPerWave / wave.dmgGrowthPctPerWave / wave.maxCountPct /
+    //      wave.countCapPct / wave.maxSimultaneousPct - nothing got harder after wave
+    //      60, so wave 176 IS wave 60. The two growth knobs are HUNDREDTHS of
+    //      multiplier ADDED per wave past the curve's clamp band (additive, not
+    //      multiplicative - the shapes diverge hard at high waves); the three
+    //      percents scale the roster ceiling, the endless count cap and the on-screen
+    //      concurrency cap. Defaults 0 / 0 / 100 / 100 / 100 are today exactly.
+    // (!) wave.maxSimultaneousPct is a PHONE FRAME BUDGET, not a difficulty dial - it
+    // is the only knob in this family that can regress device frame rate, and its
+    // consumer clamps it tighter (25..400) than the roster knobs for that reason.
+    { key: 'town.regenSuppressSecondsAfterHit', kind: 'int' },
+    { key: 'town.regenPctDuringWave', kind: 'int' },
+    { key: 'wave.hpGrowthPctPerWave', kind: 'int' },
+    { key: 'wave.dmgGrowthPctPerWave', kind: 'int' },
+    { key: 'wave.maxCountPct', kind: 'int' },
+    { key: 'wave.countCapPct', kind: 'int' },
+    { key: 'wave.maxSimultaneousPct', kind: 'int' },
+    //   raid.starterArmySize - build default 10 (WO-1803, 2026-09-16; was 3): the
+    //     TOTAL free troops granted the first time a save has a Barracks (map
+    //     section 2, "the first army is free"). The CLIENT splits it even between
+    //     Footmen and Archers, remainder to Footmen - so 10 is 5 + 5 and this row
+    //     never carries the composition. Once per save, so a rebuilt Barracks is not
+    //     a troop faucet and an existing save keeps the squad it already took.
+    //     0 disables it. Clamped client-side to the fresh-save housing cap (10).
     { key: 'raid.starterArmySize', kind: 'int' },
     // WO-1379 HEARTFIRE - the raid PACING charge, and it is a CHARGE, NOT A
     // CURRENCY: never earned, traded, stored, gifted or bought, so neither key
@@ -295,6 +327,26 @@ const TUNABLE_KEYS = [
     { key: 'raid.roughStoneMinTier', kind: 'int' },
     { key: 'raid.roughStonePerDayCap', kind: 'int' },
     { key: 'dungeon.roughStoneDropPct', kind: 'int' },
+    // WO-1805 LANE C - THE DUNGEON DARKNESS. Owner's report 2026-09-16, verbatim: "we never
+    // really ever go over the mechanics of the torch in so nobody understands why the torch
+    // runs out and why just become suddenly dark". Lane A teaches it; these four make the PACE
+    // answerable from the database instead of a ten-minute APK rebuild per opinion.
+    //   dungeon.lanternDrainPerSecX100  - build default 50 = 0.50 oil/s = 200 s a flask, which
+    //     is exactly what dungeon-balance.json authors. x100 because this rail carries no
+    //     floats. 33 ~= 300 s, 25 = 400 s. maxOil is deliberately NOT a knob: it is the meter's
+    //     100 % and the denominator of three fraction thresholds.
+    //   dungeon.lanternOilStoneRefillPct - build default 100: a cache TOPS the flask. Each
+    //     stone stays ONE USE per visit whatever this says.
+    //   dungeon.lanternStillRefillPct    - build default 40 = ComposedOilStill's 0.40f, the
+    //     one-use flask+cloth field distillation (80 s at today's drain).
+    //   dungeon.lanternFinalWarningSec   - build default 30: the final collapse window, range to
+    //     1.35 u behind a 0.45..3.2 m fog wall. THE "suddenly dark" knob.
+    // Both the drain and the warning window are ALSO authored in dungeon-balance.json, so the
+    // client treats a row AT its default as "not set" and leaves that json as the authority.
+    { key: 'dungeon.lanternDrainPerSecX100', kind: 'int' },
+    { key: 'dungeon.lanternOilStoneRefillPct', kind: 'int' },
+    { key: 'dungeon.lanternStillRefillPct', kind: 'int' },
+    { key: 'dungeon.lanternFinalWarningSec', kind: 'int' },
     // WO-1348 - NOT PROD-022 knobs and NOT balance: these are the owner's CREATIVE VFX
     // picks, moved off a thirty-minute rebuild and onto this rail. Her ask, verbatim:
     // "is it possible to tag those from the command center? and then change pointer on
@@ -325,6 +377,85 @@ const TUNABLE_KEYS = [
     { key: 'realm.vfx.EliteDeath_Impact', kind: 'int' },
     { key: 'realm.vfx.BossDeath_Impact', kind: 'int' },
 ];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WO-1799 THE STOREWIDE SALE - owner 2026-09-16, verbatim: "can we run a 30%
+// deal?" - and the FIRST TWO `serverOnly` ROWS ON THIS RAIL.
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// ⛔ WHY THESE TWO ARE APPENDED AND NOT WRITTEN INSIDE THE LITERAL ABOVE.
+//
+// The array literal above is not just a list - it is a DOMAIN THE UNITY BUILD'S
+// ORACLE COMPARES ITSELF AGAINST. Assets/Editor/Regression/
+// RemoteTunablesDefaultsRegression.cs case 4 (`Case4_KeyDomain` -> `CompareDomain`)
+// reads this file from disk, matches `TUNABLE_KEYS = [ ... ];` with a regex, pulls
+// every `key: '...'` out of it and asserts the result is EXACTLY the pinned
+// ExpectedDefaults set, reporting anything extra as an "UNPINNED key". Its own
+// failure text explains why: *"a key the server knows and the build does not is
+// stored and silently ignored"*.
+//
+// ⭐ THAT IS PRECISELY WHAT A serverOnly KEY IS SUPPOSED TO BE - the server reads
+// it, on the money path, and no build ever should. So the literal above holds the
+// CLIENT-READ domain the build oracle is entitled to pin, and these rows are
+// appended here, deliberately outside it. The runtime allowlist is the same
+// allowlist either way: `setTunable`/`isKnownKey` walk the joined array.
+//
+// ⛔ AND THE APPEND BLOCK IS GUARDED, so it cannot become a back door. The
+// assertion below THROWS at module load if any appended row lacks
+// `serverOnly: true` - a client knob smuggled in here would otherwise escape the
+// build oracle silently, which is the one thing this structure must not allow.
+//
+// ⚠ THE ALTERNATIVE, FOR THE RECORD: a one-line skip in that C# oracle for specs
+// carrying `serverOnly: true`. That is the tidier fix and it is the LEAD'S CALL -
+// this lane is forbidden to touch Assets/ (the owner wants the sale without a new
+// APK). If that skip is ever added, these two rows can move back inside the
+// literal and this whole comment deletes.
+//
+// ⛔ `serverOnly: true` MEANS NO BUILD READS THIS KEY AND NONE EVER SHOULD.
+// The mechanism it rides was landed by WO-1682 D3 for exactly this shape of
+// number (api/_lib/tunable-manifest.js, the serverOnly header). It buys ONE
+// exemption - from the build-registry join - and nothing else: the key must still
+// be allowlisted, which is what these rows are.
+//
+    // ⛔ `serverOnly: true` MEANS NO BUILD READS THIS KEY AND NONE EVER SHOULD.
+    // The mechanism it rides was landed by WO-1682 D3 for exactly this shape of
+    // number (api/_lib/tunable-manifest.js, the serverOnly header). It buys ONE
+    // exemption - from the build-registry join, because RemoteTunables.Registry
+    // deliberately does not carry these - and nothing else: the key must still be
+    // allowlisted here to be writable, which is this row.
+    //
+    // ⛔ AND IT IS WHAT KEEPS A PRICE OFF THE PHONE. A sale percentage the Unity
+// client could read would be a SECOND authority on money, on a device we do not
+// control. api/client-tunables.js therefore OMITS every serverOnly key from its
+// public payload, and neither key gets a Command Center card - that page's own
+// boundary notice says prices are never editable there.
+//
+// ⚠ THE END TIME IS EPOCH **MINUTES**. normalizeValue() below accepts at most nine
+// digits; epoch SECONDS is ten and would be REFUSED at write time. Do not widen
+// that rule to make seconds fit - it widens every key on the rail, and the client
+// parses these as C# int. See api/_lib/store-sale.js.
+//
+//   store.saleBps            - 0 (resting state) = NO SALE. 3000 = 30% off every
+//     quotable SKU on every server-priced rail. Clamped 0..7000 on the READ
+//     (store-sale.js), so a fat thumb cannot give the store away.
+//   store.saleEndsAtEpochMin - 0/absent = the sale runs until it is cleared.
+//     Otherwise the sale STOPS at that minute without anybody being awake.
+const SERVER_ONLY_TUNABLE_KEYS = [
+    { key: 'store.saleBps', kind: 'int', serverOnly: true },
+    { key: 'store.saleEndsAtEpochMin', kind: 'int', serverOnly: true },
+];
+
+for (const spec of SERVER_ONLY_TUNABLE_KEYS) {
+    // Loud at module load, not silent at write time. A row that reaches this list
+    // without the marker would be invisible to the build oracle AND served to every
+    // phone by api/client-tunables.js - two failures at once, neither with a symptom.
+    if (!spec || spec.serverOnly !== true) {
+        throw new Error('SERVER_ONLY_TUNABLE_KEYS carries a row without serverOnly:true (' +
+            (spec && spec.key) + '). A client knob belongs in the TUNABLE_KEYS literal, ' +
+            'where the build oracle can see it.');
+    }
+    TUNABLE_KEYS.push(spec);
+}
 
 /** How long one warm lambda may reuse a read of the table. */
 const MEMO_TTL_MS = 5000;
