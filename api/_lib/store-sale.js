@@ -76,6 +76,16 @@ const SALE_MAX_BPS = 7000;
 const SALE_REASON = 'sale';
 
 /**
+ * The value persisted in purchase_quotes.discount_reason for a PERSONAL promo-code
+ * discount (WO-1833). `discount_reason` is a bare TEXT column with no CHECK
+ * constraint (api/schema.sql:1395, read at source 2026-09-17), so a new reason
+ * string needs no migration - and purchases/verify.js prices from the row's
+ * discount_bps rather than re-deriving it from the reason, so the verifier accepts
+ * a promo-priced quote with no change.
+ */
+const PROMO_REASON = 'promo';
+
+/**
  * The sale's display copy, derived from the bps because the rail cannot store a
  * string. `3000` -> "30% off". The client formats this verbatim and does no
  * percentage arithmetic (PurchaseQuoteService.DiscountLabel says so).
@@ -139,6 +149,68 @@ function resolveDiscount(saleBps, shortfallBps, shortfallReason) {
 }
 
 /**
+ * ⛔ THE PRECEDENCE RULE (WO-1833), AND IT IS **OVERRIDE, NOT MAX**.
+ *
+ * Owner ruling 2026-09-17, verbatim: *"personal promo should override global i
+ * would think not stack"*.
+ *
+ * ⚠ THIS SUPERSEDES THE LEAD'S EARLIER STATED DEFAULT of best-of/`max()`. It is
+ * NOT the same rule as resolveDiscount() below it, and the difference is felt:
+ * with `store.saleBps = 5000` running and a 3000 bps promo redeemed, a player who
+ * holds the promo is charged **30% off, not 50% off**. That is the ruling, not a
+ * bug - a personal discount is a promise made to one player and it REPLACES the
+ * storefront number rather than competing with it.
+ *
+ * ⛔ THIS IS THE ONE PLACE THE COMBINATION IS DECIDED, and it is a two-branch
+ * precedence rather than arithmetic precisely so that flipping it later is one
+ * edit here and nothing at any call site. To go additive or best-of, change this
+ * function and the constant beside it - never a second opinion in quote.js.
+ *
+ * @param {number|null} promoBps  the player's active PERSONAL discount, null/0 = none
+ * @param {number|null} saleBps   the storewide sale, null/0 = none
+ * @returns {{bps:number, reason:string}} bps 0 = no storefront discount at all
+ */
+const DISCOUNT_PRECEDENCE = 'promo-overrides-sale';
+
+function resolveStorefrontDiscount(promoBps, saleBps) {
+    const promo = Number.isFinite(promoBps) && promoBps > 0 ? promoBps : 0;
+    const sale = Number.isFinite(saleBps) && saleBps > 0 ? saleBps : 0;
+    // ⛔ NO max() HERE. See DISCOUNT_PRECEDENCE and the ruling above.
+    if (promo > 0) return { bps: promo, reason: PROMO_REASON };
+    return { bps: sale, reason: SALE_REASON };
+}
+
+/**
+ * The FULL discount resolution for one quote: promo vs sale vs shortfall.
+ *
+ * Two laws, on two DIFFERENT axes, and they are composed rather than merged:
+ *   1. promo OVERRIDES the storewide sale (resolveStorefrontDiscount, WO-1833);
+ *   2. the winner of (1) is then compared MAX-NOT-ADDITIVE against the per-wallet
+ *      shortfall apology (resolveDiscount, WO-1799) - unchanged.
+ *
+ * ⚠ WHY THE SHORTFALL IS STILL COMPARED AND NOT OVERRIDDEN TOO, SAID OUT LOUD SO
+ * IT IS NOT READ AS AN OVERSIGHT: the owner ruled on the promo versus the GLOBAL
+ * SALE. She did not re-rule the shortfall, whose max-not-additive law predates
+ * WO-1833 and exists so a player is never charged MORE for holding an
+ * entitlement. So a shortfall LARGER than the promo still wins, exactly as it
+ * already wins over a larger sale. One line to change if that is ruled otherwise.
+ *
+ * @returns {{bps:number|null, reason:string|null}} bps null = no discount at all
+ */
+function resolveEffectiveDiscount(promoBps, saleBps, shortfallBps, shortfallReason) {
+    const storefront = resolveStorefrontDiscount(promoBps, saleBps);
+    const winner = resolveDiscount(storefront.bps, shortfallBps, shortfallReason);
+    // resolveDiscount reports SALE_REASON for the storefront side; re-label it when
+    // the storefront figure was actually a PROMO, or the persisted audit row would
+    // call a personal discount a storewide sale and wireQuote would draw a
+    // storefront badge for it.
+    if (winner.bps != null && winner.reason === SALE_REASON && storefront.reason === PROMO_REASON) {
+        return { bps: winner.bps, reason: PROMO_REASON };
+    }
+    return winner;
+}
+
+/**
  * Read the live sale off the knob table. NEVER throws (readTunables never does).
  *
  * @param {Function|null} sql neon(...) client, or null
@@ -155,13 +227,23 @@ async function readStoreSale(sql, nowMs) {
 }
 
 module.exports = {
+    DISCOUNT_PRECEDENCE,
+    PROMO_REASON,
     SALE_BPS_KEY,
     SALE_ENDS_KEY,
     SALE_MAX_BPS,
     SALE_REASON,
     saleLabel,
     clampSaleBps,
+    // ⛔ ONE CEILING, TWO NAMES - and the alias exists so no second clamp is written.
+    // WO-1833 needed the same 7000 bps ceiling for a PROMO bps, and the honest
+    // options were to re-type the clamp under a promo-shaped name (a second opinion
+    // about the ceiling, the §5 failure) or to call the sale's clamp from the promo
+    // path under a name that does not lie about its scope. This is the second.
+    clampDiscountBps: clampSaleBps,
     resolveSale,
     resolveDiscount,
+    resolveStorefrontDiscount,
+    resolveEffectiveDiscount,
     readStoreSale,
 };

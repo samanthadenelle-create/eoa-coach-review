@@ -71,7 +71,11 @@ const { buildQuoteBody, fetchSkrUsdRate, isPinnedSku, pinnedSkus, purchaseContra
     isFlatSku, FLAT_RATE_SOURCE } = require('../_lib/purchase-catalog');
 // WO-1799 the storewide sale. Read through the SAME readTunables helper
 // api/client-tunables.js uses — never a second reader of the knob table.
-const { readStoreSale, resolveDiscount, SALE_REASON } = require('../_lib/store-sale');
+const { readStoreSale, resolveEffectiveDiscount, SALE_REASON,
+    PROMO_REASON } = require('../_lib/store-sale');
+// WO-1833 the PERSONAL promo discount. Read through the one library that also gates
+// redemption, so "is this discount live" has a single answer. Fails to NO DISCOUNT.
+const { readActivePromoDiscount } = require('../_lib/promo-discount');
 
 // Worded, player-readable refusals. Quiet ≠ mute: a refusal on the money path
 // must say WHY, or the player is left staring at a dead button (§3).
@@ -123,7 +127,7 @@ function discountBpsForReason(reasonHint, discountedRecently) {
  * (PurchaseQuoteService.SaleEndsAtUtc, read at source 2026-09-16). Null is a
  * first-class answer there — a sale with no end draws the badge and no countdown.
  */
-function wireQuote(body, extra, saleEndsAtIso) {
+function wireQuote(body, extra, saleEndsAtIso, promoEndsAtIso) {
     return Object.assign({
         sku: body.sku,
         network: body.network,
@@ -154,6 +158,18 @@ function wireQuote(body, extra, saleEndsAtIso) {
         saleBps: body.discountReason === SALE_REASON ? body.discountBps : null,
         saleLabel: body.discountReason === SALE_REASON ? body.discountLabel : null,
         saleEndsAt: body.discountReason === SALE_REASON && saleEndsAtIso ? saleEndsAtIso : null,
+        // ── WO-1833: WHICH SOURCE PRODUCED THE DISCOUNT ──────────────────────
+        // ⚠ ADDITIVE, and it exists so a client can say "promo active" rather than
+        // "storefront sale" without doing any arithmetic of its own. It is the
+        // reason string the ROW was priced with, never inferred from the numbers.
+        //
+        // ⛔ NOTE WHAT THE THREE `saleBps`/`saleLabel`/`saleEndsAt` LINES ABOVE NOW
+        // DO ON A PROMO QUOTE: they answer null, because the reason is 'promo', not
+        // 'sale'. That is correct and load-bearing — a personal discount must not
+        // light up a storefront-wide sale badge, and a storewide countdown would be
+        // the wrong end time for a personal window.
+        discountSource: body.discountReason || null,
+        promoEndsAt: body.discountReason === PROMO_REASON && promoEndsAtIso ? promoEndsAtIso : null,
         rate: body.rate,
         rateSource: body.rateSource,
         pinned: false,
@@ -182,6 +198,12 @@ function wirePinned(contract) {
         saleBps: null,
         saleLabel: null,
         saleEndsAt: null,
+        // WO-1833: a canary is never discounted either, for the identical reason —
+        // its amount is a protocol constant the verifier checks by exact equality.
+        // Explicit nulls rather than absent fields, so a formatter cannot read
+        // "missing" as a live promo.
+        discountSource: null,
+        promoEndsAt: null,
         rate: null,
         rateSource: 'server-pinned',
         pinned: true,
@@ -307,6 +329,27 @@ async function handler(req, res) {
     const saleEndsAtIso = sale.bps > 0 && sale.endsAtMs
         ? new Date(sale.endsAtMs).toISOString() : null;
 
+    // ── THE PERSONAL PROMO DISCOUNT (WO-1833) ────────────────────────────────
+    // Owner ruling 2026-09-17: "personal promo should override global i would think
+    // not stack". The precedence itself lives in ONE named function,
+    // store-sale.resolveStorefrontDiscount — never re-decided here.
+    //
+    // ⛔ QUOTE MODE ONLY (`sku &&`), and that is the same rule the per-wallet
+    // shortfall discount already follows — see the LIST loop below, which says in its
+    // own words that a personal discount cannot be judged on a public list because
+    // there is no wallet to judge. Reading it here for a LIST would also DISCLOSE
+    // per-wallet state to any caller who types a wallet into an unauthenticated body.
+    // By this line a quote-mode request has already passed authenticateGranting, so
+    // `playerId` is PROVEN, not claimed.
+    //
+    // readActivePromoDiscount fails to NO DISCOUNT on an unreadable table or an
+    // unmigrated database, so the worst case here is the ORDINARY price — never an
+    // invented one, the same direction readStoreSale fails in.
+    const promo = sku ? await readActivePromoDiscount(sql, playerId) : null;
+    const promoBps = promo ? promo.bps : null;
+    const promoEndsAtIso = promo && promo.endsAtMs
+        ? new Date(promo.endsAtMs).toISOString() : null;
+
     // ── LIST mode: display prices. Binds nothing, persists nothing. ──────────
     if (!sku) {
         const rows = [];
@@ -329,6 +372,17 @@ async function handler(req, res) {
             // it is once per 7 days per wallet and the LIST is public and
             // unauthenticated, so there is no wallet to judge. The shelf shows the
             // sale; the till adds the shortfall if this player is owed one.
+            //
+            // ⛔ AND THE WO-1833 PERSONAL PROMO IS NOT APPLIED HERE EITHER, FOR BOTH OF
+            // THE REASONS ABOVE AND ONE MORE. It is personal, so the paragraph above
+            // covers it unchanged: this LIST is public and its playerId is CLAIMED, not
+            // proven. The extra reason is DISCLOSURE — pricing the shelf from a claimed
+            // id would let anyone POST any wallet and read back whether that wallet
+            // holds a live promo and at what bps, which is the same enumeration
+            // redeem.js closes deliberately by answering INVALID_CODE for a code bound
+            // to someone else. It also buys nothing felt: the shipped APK ignores these
+            // per-row price fields on the card (see wireQuote's own note). The shelf
+            // shows the SALE; the till applies the promo to a PROVEN wallet.
             const built = buildQuoteBody(network, candidate, rate,
                 sale.bps > 0 ? sale.bps : null, SALE_REASON);
             if (!built) continue;
@@ -360,6 +414,10 @@ async function handler(req, res) {
             // client's format, the knob speaks the rail's (store-sale.js says why).
             saleBps: sale.bps > 0 ? sale.bps : null,
             saleEndsAt: saleEndsAtIso });
+            // ⛔ NO `promoBps` ON THIS ENVELOPE, DELIBERATELY. It would answer "does this
+            // wallet hold a live promo, and at what percentage" to any caller who types
+            // the wallet into an UNAUTHENTICATED list body. The player learns their own
+            // promo from the binding quote, which is behind authenticateGranting.
     }
 
     // ── QUOTE mode: one binding, single-use, expiring row. ───────────────────
@@ -378,10 +436,15 @@ async function handler(req, res) {
             discountedRecently = !prior || !prior.length || prior[0].issued === true;
         } catch (_) { return quietFail(res, 500, AuthCode.SERVER_ERROR, ref); }
     }
-    // ⛔ THE SALE REPLACES THE SHORTFALL WHEN IT IS LARGER — MAX, NEVER ADDITIVE.
-    // The rule and the reason it is not a sum live in store-sale.resolveDiscount.
+    // ⛔ TWO LAWS, TWO AXES, COMPOSED IN ONE NAMED FUNCTION — store-sale
+    // .resolveEffectiveDiscount, which is also where each reason is written down:
+    //   * a PERSONAL PROMO **OVERRIDES** the storewide sale (WO-1833, owner ruling
+    //     "personal promo should override global i would think not stack") — so a
+    //     3000 bps promo beats a 5000 bps sale, deliberately;
+    //   * the winner is then MAX-NOT-ADDITIVE against the shortfall (WO-1799).
+    // Never re-decide either one here: one comparison, one place, one line to flip.
     const shortfallBps = discountBpsForReason(reasonHint, discountedRecently);
-    let resolved = resolveDiscount(sale.bps, shortfallBps, SHORTFALL_REASON_SERVER);
+    let resolved = resolveEffectiveDiscount(promoBps, sale.bps, shortfallBps, SHORTFALL_REASON_SERVER);
     let discountBps = resolved.bps;
     let discountReason = resolved.reason;
     // ⭐ ONLY A SHORTFALL IS RATE-LIMITED, so only a shortfall needs the serializable
@@ -428,8 +491,14 @@ async function handler(req, res) {
             // to whatever the STOREWIDE sale is — charging full price during a 30%
             // sale because the player also asked for a shortfall discount would
             // punish the very moment the shortfall hint exists to soften.
+            // WO-1833: the fallback drops to WHATEVER THE STOREFRONT OFFERS — the
+            // player's personal promo if they hold one, otherwise the sale. It must
+            // never drop to full price, and it must never forget the promo: a player
+            // holding a 30% promo who also asked for a shortfall discount and lost the
+            // race would otherwise pay full freight at the exact moment the shortfall
+            // hint exists to soften.
             if (!inserted || !inserted.length) {
-                resolved = resolveDiscount(sale.bps, null, SHORTFALL_REASON_SERVER);
+                resolved = resolveEffectiveDiscount(promoBps, sale.bps, null, SHORTFALL_REASON_SERVER);
                 discountBps = resolved.bps;
                 discountReason = resolved.reason;
             }
@@ -474,11 +543,18 @@ async function handler(req, res) {
         // audit trail disagreeing with the persisted row it exists to explain.
         discountReason: built.discountReason,
         saleBps: sale.bps > 0 ? sale.bps : null,
+        // WO-1833: BOTH candidate figures are logged, not only the winner, so a
+        // disputed charge can be reconstructed as "she held 3000, the store offered
+        // 5000, precedence picked the promo" months later — without that pair, the
+        // ruling looks like a bug in the audit trail.
+        promoBps: promoBps,
+        promoCode: promo ? promo.code : null,
         reasonHint: reasonHint || null });
 
     return res.status(200).json({ success: true, mode: 'quote',
         quote: wireQuote(built, { quoteId,
-            expiresAt: new Date(inserted[0].expires_at).toISOString() }, saleEndsAtIso) });
+            expiresAt: new Date(inserted[0].expires_at).toISOString() },
+            saleEndsAtIso, promoEndsAtIso) });
 }
 
 module.exports = handler;
