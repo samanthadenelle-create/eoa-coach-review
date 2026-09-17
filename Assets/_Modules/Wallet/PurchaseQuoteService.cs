@@ -88,6 +88,45 @@ namespace DeNelle.Wallet
         [JsonProperty("discountBps")] public int? DiscountBps;
         /// <summary>Server-authored display copy; the client performs no percentage arithmetic.</summary>
         [JsonProperty("discountLabel")] public string DiscountLabel;
+
+        // =====================================================================
+        //  ⭐ THE STOREWIDE SALE (WO-1800 client / WO-1799 server).
+        // ---------------------------------------------------------------------
+        //  ⛔ THESE THREE FIELDS ARE A DIFFERENT AXIS FROM DiscountBps, AND
+        //  CONFLATING THEM WOULD DOUBLE-COUNT THE MONEY. `discountBps` is the
+        //  PER-PLAYER, PER-QUOTE shortfall grant the server issues at the till
+        //  (discountBpsForReason, once per window, bound to a persisted quote
+        //  row). `saleBps` is the STOREWIDE MERCHANDISING knob that applies to
+        //  the whole shelf for everyone — it is what the owner asked for on
+        //  2026-09-16 ("put big sales signs with x% off"). One is an
+        //  entitlement, the other is a price list.
+        //
+        //  ⛔ AND THE CLIENT STILL PRICES NOTHING. `usdEffective` remains the
+        //  ONLY number the card may print as the price; saleBps is used ONLY to
+        //  word a badge, and only when the server sent it. Deriving an effective
+        //  price from anchor x (1 - saleBps/10000) here would be the client
+        //  re-acquiring an opinion about money — the exact defect this file's
+        //  header records, one field further on.
+        //
+        //  ⛔ FAIL-CLOSED IS THE WHOLE CONTRACT: absent, zero, negative, or
+        //  >= 10000 bps ⇒ NO BADGE AT ALL. A "0% OFF" ribbon is worse than no
+        //  ribbon: it is a sale sign that advertises nothing, on the one screen
+        //  that takes money.
+        //
+        //  ⚠ FIELD NAMES ARE TAKEN FROM api/purchases/quote.js `wireQuote` +
+        //  the WO-1799 brief, read 2026-09-16. `saleEndsAt` is this lane's
+        //  OPTIONAL addition — the server may never send it, which is why every
+        //  reader of it is null-tolerant and the countdown is drawn absent
+        //  rather than invented.
+        // =====================================================================
+
+        /// <summary>Storewide sale, in basis points off the anchor. Null/0 ⇒ no sale, no badge.</summary>
+        [JsonProperty("saleBps")] public int? SaleBps;
+        /// <summary>Server-authored sale copy ("30% OFF"). Preferred over the bps conversion.</summary>
+        [JsonProperty("saleLabel")] public string SaleLabel;
+        /// <summary>ISO-8601 UTC instant the sale ends, or null. Optional; drives the countdown.</summary>
+        [JsonProperty("saleEndsAt")] public string SaleEndsAt;
+
         /// <summary>USD per SKR behind this quote. Null on a pinned canary.</summary>
         [JsonProperty("rate")] public double? Rate;
         /// <summary>WHICH oracle produced the rate — shown at the confirm step.</summary>
@@ -205,6 +244,101 @@ namespace DeNelle.Wallet
             UsdSaving.HasValue && UsdSaving.Value > 0d
                 ? $"was ${UsdAnchor.Value:0.00} - save ${UsdSaving.Value:0.00}"
                 : string.Empty;
+
+        // =====================================================================
+        //  The storewide sale, in words and digits. Pure formatters over server
+        //  numbers: no price arithmetic, no invented percentage, no fallback to
+        //  the anchor. Every one of them returns EMPTY rather than a half-truth.
+        // =====================================================================
+
+        /// <summary>
+        /// True when the SERVER put this row on the storewide sale.
+        /// <para>Mirrors <see cref="IsDiscounted"/>'s own test on purpose — an integer strictly
+        /// between 0 and 10000 — so the two axes fail closed by the same rule. A 0 or absent
+        /// figure is NOT a sale, and 10000 (100% off) is not a price this store can state.</para>
+        /// </summary>
+        public bool IsOnSale =>
+            SaleBps.HasValue && SaleBps.Value > 0 && SaleBps.Value < 10000;
+
+        /// <summary>
+        /// The ribbon's copy — the server's own <see cref="SaleLabel"/> when it sent one.
+        /// <para>⚠ THE bps -> "N% OFF" FALLBACK IS A UNIT CONVERSION, NOT PRICING. It converts an
+        /// integer the server authored from one unit (basis points) into the unit a player reads
+        /// (percent). It never touches a dollar figure, never multiplies an anchor, and cannot
+        /// disagree with <see cref="UsdEffective"/> — which stays the only printable price. It
+        /// exists because a shelf that has the sale number but no copy for it would draw no sign at
+        /// all, and the owner asked for the sign.</para>
+        /// <para>Empty whenever <see cref="IsOnSale"/> is false. There is no "0% OFF".</para>
+        /// </summary>
+        public string SaleBadgeText
+        {
+            get
+            {
+                if (!IsOnSale) return string.Empty;
+                string authored = SaleLabel != null ? SaleLabel.Trim() : string.Empty;
+                if (authored.Length > 0) return authored;
+                // Rounded to the nearest whole percent: 3000 -> "30% OFF", 2550 -> "26% OFF". A
+                // fractional percent on a sale sign reads as a bug, and the exact money is the
+                // struck anchor beside it, not this word.
+                int pct = (int)Math.Round(SaleBps.Value / 100d, MidpointRounding.AwayFromZero);
+                return pct > 0 ? pct.ToString(System.Globalization.CultureInfo.InvariantCulture) + "% OFF" : string.Empty;
+            }
+        }
+
+        /// <summary>
+        /// True when BOTH dollar figures the strike-through needs are present and consistent.
+        /// <para>⛔ THE BADGE MAY SHOW WITHOUT THE STRIKE, BUT NEVER THE STRIKE WITHOUT BOTH
+        /// NUMBERS. A struck price implies a second, lower price sitting beside it; drawing the
+        /// strike with only an anchor would cross out the only figure on the card.</para>
+        /// </summary>
+        public bool HasStruckAnchor =>
+            IsOnSale && UsdAnchor.HasValue && UsdAnchor.Value > 0d &&
+            UsdEffective.HasValue && UsdEffective.Value > 0d &&
+            UsdEffective.Value < UsdAnchor.Value;
+
+        /// <summary>The anchor as digits, for striking through. Empty when <see cref="HasStruckAnchor"/> is false.</summary>
+        public string SaleAnchorLabel =>
+            HasStruckAnchor ? "$" + UsdAnchor.Value.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture) : string.Empty;
+
+        /// <summary>The effective price as digits. Empty when the server did not send one.</summary>
+        public string SaleEffectiveLabel =>
+            IsOnSale && UsdEffective.HasValue && UsdEffective.Value > 0d
+                ? "$" + UsdEffective.Value.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)
+                : string.Empty;
+
+        /// <summary>The sale's end instant as UTC, or null when absent/unparseable/not a sale.</summary>
+        public DateTime? SaleEndsAtUtc
+        {
+            get
+            {
+                if (!IsOnSale || string.IsNullOrEmpty(SaleEndsAt)) return null;
+                return DateTime.TryParse(SaleEndsAt, System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.AdjustToUniversal |
+                    System.Globalization.DateTimeStyles.AssumeUniversal, out var parsed)
+                    ? parsed : (DateTime?)null;
+            }
+        }
+
+        /// <summary>
+        /// "ends in 2d 4h" / "ends in 4h 12m" / "ends in 9m", or EMPTY.
+        /// <para>⛔ EMPTY WHEN THE SALE HAS ALREADY ENDED, not "ends in 0m". A countdown that has
+        /// run out is not urgency, it is a stale shelf — and the card keeps its badge only because
+        /// the badge is the SERVER's still-live sale flag, which is the authority here.</para>
+        /// <para><paramref name="nowUtc"/> is passed in so this is a pure function an oracle can
+        /// pin without waiting for a clock.</para>
+        /// </summary>
+        public string SaleCountdownLabel(DateTime nowUtc)
+        {
+            var ends = SaleEndsAtUtc;
+            if (!ends.HasValue) return string.Empty;
+            TimeSpan left = ends.Value - nowUtc;
+            if (left.TotalMinutes < 1d) return string.Empty;
+            if (left.TotalDays >= 1d)
+                return "ends in " + (int)left.TotalDays + "d " + left.Hours + "h";
+            if (left.TotalHours >= 1d)
+                return "ends in " + (int)left.TotalHours + "h " + left.Minutes + "m";
+            return "ends in " + (int)left.TotalMinutes + "m";
+        }
 
         internal const string StoreStringsUnavailable = "Price unavailable";
     }
