@@ -64,7 +64,11 @@ const { logAuthReject, logApiEvent } = require('../_lib/audit');
 // returns true when the caller must stop. Fail-OPEN by ruling — see _lib/maintenance.js.
 const { enforce: maintenanceEnforce, AREA_STORE } = require('../_lib/maintenance');
 const { buildQuoteBody, fetchSkrUsdRate, isPinnedSku, pinnedSkus, purchaseContract,
-    quotableSkus, usdAnchor, walletAllowed, QUOTE_TTL_SECONDS } = require('../_lib/purchase-catalog');
+    quotableSkus, usdAnchor, walletAllowed, QUOTE_TTL_SECONDS,
+    // WO-1818 the FLAT SKR ladder. `isFlatSku` is the ONE predicate that decides
+    // whether this request needs the oracle at all — never a second copy of the
+    // skrFlat lookup here (CLAUDE.md §2/§5).
+    isFlatSku, FLAT_RATE_SOURCE } = require('../_lib/purchase-catalog');
 // WO-1799 the storewide sale. Read through the SAME readTunables helper
 // api/client-tunables.js uses — never a second reader of the knob table.
 const { readStoreSale, resolveDiscount, SALE_REASON } = require('../_lib/store-sale');
@@ -269,9 +273,25 @@ async function handler(req, res) {
         return res.status(404).json({ ok: false, code: 'PURCHASE_SKU_UNAVAILABLE',
             message: SKU_UNAVAILABLE_MESSAGE, ref });
 
-    // ── The rate. FAIL CLOSED. ───────────────────────────────────────────────
-    const rate = await fetchSkrUsdRate();
-    if (!rate) {
+    // ── The rate. FAIL CLOSED — BUT ONLY WHERE A RATE IS ACTUALLY USED. ──────
+    //
+    // ⛔ WO-1818: A FLAT SKU MUST QUOTE WITH THE ORACLE DOWN. That is the entire
+    // reason flat exists. Before this, every quote fetched coingecko first and
+    // answered 503 on failure, so a pack whose price is the CONSTANT 300 SKR
+    // became unbuyable because a third party was unreachable — refusing a sale
+    // the server already knew the exact answer to.
+    //
+    // ⚠ AND THE LIST IS NOT ALL-FLAT TODAY, so it still fetches. `monthly-wayfarer`
+    // and `monthly-keeper` are authored in battle_monthly.json, which the SKU
+    // generator does not copy, so they carry no skrFlat and are still priced off
+    // the rate (read at source 2026-09-16). The condition is DATA-DRIVEN rather
+    // than a hardcoded `true`: give those two an skrFlat and the shelf stops
+    // depending on coingecko by itself, with no change here.
+    //
+    // The worded refusal is unchanged for everything that genuinely needs a rate.
+    const needsRate = sku ? !isFlatSku(sku) : !quotableSkus(network).every(isFlatSku);
+    const rate = needsRate ? await fetchSkrUsdRate() : null;
+    if (needsRate && !rate) {
         if (sql && playerId)
             await logApiEvent(sql, playerId, 'purchase_quote_refused',
                 { ref, sku: sku || null, network, reason: 'rate_unavailable' });
@@ -328,7 +348,12 @@ async function handler(req, res) {
                 { sellable: true, sellableReason: null }));
         }
         return res.status(200).json({ success: true, mode: 'list', network,
-            rate: rate.usdPerSkr, rateSource: rate.source, prices: rows,
+            // ⚠ NULL WHEN NO ORACLE WAS CONSULTED (an all-flat shelf). Never 0 and
+            // never a remembered figure: a reader must be able to tell "no rate
+            // backed these prices" from "the rate was zero". The per-row fields say
+            // the same thing per row.
+            rate: rate ? rate.usdPerSkr : null,
+            rateSource: rate ? rate.source : FLAT_RATE_SOURCE, prices: rows,
             // Envelope-level as well as per-row, so a shelf can print ONE banner
             // instead of reading the sale off an arbitrary row. `saleEndsAt` is ISO on
             // the wire even though the knob is epoch minutes — the wire speaks the
@@ -387,7 +412,7 @@ async function handler(req, res) {
                 SELECT ${quoteId}, ${playerId}, ${sku}, ${network}, ${built.currency},
                        ${built.amountBaseUnits}, ${built.decimals}, ${built.mint},
                        ${built.recipient}, ${built.recipientAta}, ${built.usdAnchor},
-                       ${built.rate}, ${built.rateSource}, ${discountBps},
+                       ${built.usdRateForRow}, ${built.rateSource}, ${discountBps},
                        ${discountReason},
                        NOW() + (${QUOTE_TTL_SECONDS} * INTERVAL '1 second')
                 WHERE NOT EXISTS (
@@ -416,6 +441,11 @@ async function handler(req, res) {
         if (!inserted || !inserted.length) {
             built = buildQuoteBody(network, sku, rate, discountBps, discountReason);
             if (!built) return quietFail(res, 500, AuthCode.SERVER_ERROR, ref);
+            // ⚠ `built.usdRateForRow` below, not `built.rate`: purchase_quotes.usd_rate
+            // is NOT NULL (api/schema.sql:1366) and a FLAT quote carries rate === null
+            // on the wire. purchase-catalog.FLAT_ROW_RATE decides the stored value
+            // once; `rate_source = 'flat-skr'` beside it is what makes the 0 readable
+            // as "no oracle was consulted" rather than as a price of zero.
             inserted = await sql`
                 INSERT INTO purchase_quotes
                     (quote_ref, wallet, sku, network, currency, amount_base_units, decimals,
@@ -424,7 +454,7 @@ async function handler(req, res) {
                 VALUES (${quoteId}, ${playerId}, ${sku}, ${network}, ${built.currency},
                         ${built.amountBaseUnits}, ${built.decimals}, ${built.mint},
                         ${built.recipient}, ${built.recipientAta}, ${built.usdAnchor},
-                        ${built.rate}, ${built.rateSource},
+                        ${built.usdRateForRow}, ${built.rateSource},
                         ${built.discountBps}, ${built.discountReason},
                         NOW() + (${QUOTE_TTL_SECONDS} * INTERVAL '1 second'))
                 RETURNING quote_ref, expires_at`;

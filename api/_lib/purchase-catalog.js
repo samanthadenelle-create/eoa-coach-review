@@ -118,6 +118,82 @@ const USD_ANCHORS = Object.freeze({
     'monthly-keeper': 9.99,
 });
 
+// ── THE FLAT SKR LADDER — WO-1818, and it is DERIVED, NEVER RETYPED ──────────
+//
+// Owner ruling 2026-09-16, verbatim: "change the store to SKR only and set to
+// flat amounts" + "only do straight SKR for SKR build 100 200 300 500 9999".
+//
+// ⛔ THE DEFECT THIS CLOSES: the shelf said 300 SKR and the confirm screen said
+// 431 SKR. WO-1815 authored `pricing.skrFlat` into packs.json so the amount is a
+// CONSTANT instead of a market derivation — but nothing on this rail read it, so
+// the served quote was still `ceil(usd / coingecko_low_24h)`. A card promising
+// one figure and a till charging another is the same family of failure as the
+// paid-but-not-granted cases this whole file is written around.
+//
+// ⛔ AND IT IS READ OUT OF THE GENERATED CATALOG, NOT HAND-TYPED HERE. A second
+// hand-maintained table tracking live authoring is CLAUDE.md §2/§5's drift bug,
+// which is exactly how USD_ANCHORS above grew its own MIRROR LAW. The one
+// authoring surface is Assets/{Resources,StreamingAssets}/Data/Canonical/
+// packs.json; tools/gen-sku-catalog.mjs copies it VERBATIM to
+// ./sku-catalog.generated.json (never hand-edit that file), and this map is built
+// from that copy at require time.
+//
+// ⚠ WE REQUIRE THE JSON DIRECTLY AND MUST KEEP DOING SO. ./sku-catalog.js
+// requires THIS file for USD_ANCHORS, so requiring it back would be a cycle. The
+// JSON has no requires of its own and cannot participate in one.
+//
+// ⚠ NOT EVERY QUOTABLE SKU IS FLAT, and that is a live fact rather than a
+// hypothetical: `monthly-wayfarer` / `monthly-keeper` are authored in
+// battle_monthly.json, which the generator does not copy, so they carry NO
+// skrFlat and keep the rate-derived path below unchanged (read at source
+// 2026-09-16: 27 of 29 packs[] rows carry skrFlat; those two are not in packs[]
+// at all). Nothing here may assume the whole shelf is flat.
+const SKU_CATALOG = require('./sku-catalog.generated.json');
+const SKR_FLAT = Object.freeze((() => {
+    const out = {};
+    const rows = Array.isArray(SKU_CATALOG && SKU_CATALOG.packs) ? SKU_CATALOG.packs : [];
+    for (const row of rows) {
+        const sku = row && row.sku == null ? '' : String(row.sku);
+        const raw = row && row.pricing ? row.pricing.skrFlat : null;
+        const flat = Number(raw);
+        // A whole number of SKR or nothing. A fractional or junk value is DROPPED
+        // rather than rounded: the flat amount is the exact integer a wallet
+        // transfers, and inventing its last digit is authoring money.
+        if (sku && Number.isSafeInteger(flat) && flat > 0) out[sku] = flat;
+    }
+    return out;
+})());
+
+/**
+ * The authored FLAT SKR amount for a SKU, or null when this SKU is priced off the
+ * rate. `null` is the signal that the whole rate chain still applies.
+ */
+function skrFlatFor(sku) {
+    const flat = SKR_FLAT[sku];
+    return Number.isSafeInteger(flat) && flat > 0 ? flat : null;
+}
+
+/** True when this SKU's amount is a constant and NO oracle is consulted for it. */
+function isFlatSku(sku) {
+    return skrFlatFor(sku) != null;
+}
+
+// ⚠ RECORDED ON THE ROW AND ON THE WIRE where an oracle id would otherwise go, so
+// a disputed charge months later reads "no rate was consulted" instead of a
+// missing field a reader would guess at. purchase_quotes.rate_source is NOT NULL
+// (api/schema.sql:1367) — this is the value that satisfies it honestly.
+const FLAT_RATE_SOURCE = 'flat-skr';
+
+// ⛔ THE ROW'S usd_rate COLUMN IS `NUMERIC(24,12) NOT NULL` (api/schema.sql:1366)
+// AND THIS LANE CANNOT RUN A MIGRATION. A flat quote has no rate, so it persists
+// 0 — and `rate_source = 'flat-skr'` beside it is the discriminator that makes
+// that 0 readable as "none", never as a real price of zero. The WIRE still says
+// `rate: null`. Every reader that echoes the stored value normalises it through
+// ONE helper (verify.js `ledgerRate`), because two places applying this rule is
+// how the two disagree. Relaxing the column to NULL is a migration the owner
+// runs; the code must not require it to have happened.
+const FLAT_ROW_RATE = 0;
+
 // ── Quote lifetime ──────────────────────────────────────────────────────────
 // ⛔ AN UNEXPIRING QUOTE IS A FREE OPTION ON A VOLATILE ASSET. A player could sit
 // on a favourable rate indefinitely and exercise it after the market moved.
@@ -362,14 +438,47 @@ function discountLabelFor(bps, reason) {
     return `${pct}% off`;
 }
 
+/**
+ * A FLAT SKU's amount after a discount. Whole SKR in, whole SKR out.
+ *
+ * ⛔ SAME ROUNDING DIRECTION AS quoteAmount() — CEIL, and deliberately so. A sale
+ * that rounded DOWN would price a 30%-off 9999-SKR pack at 6999 on the shelf and
+ * 6999.3 at the till, and the two would have to disagree by a whole SKR sooner or
+ * later. Written as integer arithmetic (`floor((x + 9999) / 10000)`) rather than
+ * `Math.ceil(x / 10000)` because a float divide of an already-multiplied integer
+ * is the one step in this file that has no reason to be inexact.
+ *
+ * ⚠ THERE IS NO USD IN HERE AT ALL. That is the point of flat: no oracle, no
+ * anchor arithmetic, nothing that can move between the shelf and the confirm.
+ */
+function quoteFlatAmount(flatSkr, bps, decimals) {
+    if (!Number.isSafeInteger(flatSkr) || flatSkr <= 0) return null;
+    if (!Number.isInteger(decimals) || decimals < 0 || decimals > 18) return null;
+    const hasDiscount = Number.isInteger(bps) && bps > 0 && bps < 10_000;
+    const skr = hasDiscount
+        ? Math.floor((flatSkr * (10_000 - bps) + 9_999) / 10_000)
+        : flatSkr;
+    if (!Number.isSafeInteger(skr) || skr <= 0) return null;
+    return { skr, amountBaseUnits: (BigInt(skr) * (10n ** BigInt(decimals))).toString() };
+}
+
 function buildQuoteBody(network, sku, rate, discountBps = null, discountReason = 'repair_shortfall') {
     const rail = purchaseRail(network);
     const usd = usdAnchor(sku);
-    if (!rail || usd == null || !rate || !(rate.usdPerSkr > 0)) return null;
+    const flat = skrFlatFor(sku);
+    if (!rail || usd == null) return null;
+    // ⛔ THE RATE GUARD IS CONDITIONAL NOW, AND THAT IS THE WHOLE POINT OF FLAT.
+    // A flat SKU MUST still quote when coingecko is unreachable — a constant
+    // amount that stops being sellable because a third party is down would be a
+    // flat price in name only. A rate-derived SKU still FAILS CLOSED exactly as
+    // before: no rate, no quote, never an invented one.
+    if (flat == null && (!rate || !(rate.usdPerSkr > 0))) return null;
     const bps = discountBps;
     const hasDiscount = typeof bps === 'number' && Number.isInteger(bps) && bps > 0 && bps < 10_000;
     const quotedUsd = hasDiscount ? usd * (10_000 - bps) / 10_000 : usd;
-    const amount = quoteAmount(quotedUsd, rate.usdPerSkr, rail.decimals);
+    const amount = flat != null
+        ? quoteFlatAmount(flat, bps, rail.decimals)
+        : quoteAmount(quotedUsd, rate.usdPerSkr, rail.decimals);
     if (!amount) return null;
     return {
         sku, network, currency: 'SKR',
@@ -379,19 +488,37 @@ function buildQuoteBody(network, sku, rate, discountBps = null, discountReason =
         mint: rail.mint,
         recipient: rail.recipient,
         recipientAta: rail.recipientAta,
+        // ⚠ KEPT ON A FLAT ROW TOO, and it is not vestigial: PurchaseGate
+        // .RequiresWallet derives the wallet rule from the USD anchor, the Google
+        // Play and Pi rails price themselves off it, and the ledger reconstructs a
+        // disputed charge from it. It is the pack's BAND, not its SKR price.
         usdAnchor: usd,
         // Display facts from the same server calculation that priced amountBaseUnits.
         // The client may format these; it may never derive either one.
-        usdEffective: quotedUsd,
-        usdSaving: hasDiscount ? usd - quotedUsd : null,
+        //
+        // ⛔ BOTH NULL ON A FLAT ROW. A flat amount is not derived from USD, so a
+        // "USD effective" beside it would be a SECOND price for one purchase,
+        // computed a different way — the exact two-figures-on-one-screen defect
+        // this ticket exists to end. Absent beats plausible on a money screen.
+        usdEffective: flat != null ? null : quotedUsd,
+        usdSaving: flat != null ? null : (hasDiscount ? usd - quotedUsd : null),
+        // ⚠ THE SALE FIELDS ARE UNTOUCHED BY FLATNESS. discountBps/Label/Reason are
+        // what wireQuote() turns into saleBps/saleLabel/saleEndsAt, so a flat SKU
+        // still carries its badge — the discount is applied to the SKR amount
+        // above instead of to a USD figure.
         discountBps: hasDiscount ? bps : null,
         discountLabel: hasDiscount ? discountLabelFor(bps, discountReason) : null,
         // The reason that priced this body, carried so the caller persists the SAME
         // string it labelled with. Two separate decisions about one reason is how a
         // row ends up saying 'sale' under a "shortfall discount" label.
         discountReason: hasDiscount ? discountReason : null,
-        rate: rate.usdPerSkr,
-        rateSource: rate.source,
+        rate: flat != null ? null : rate.usdPerSkr,
+        rateSource: flat != null ? FLAT_RATE_SOURCE : rate.source,
+        // ⛔ THE VALUE THE ROW TAKES, computed ONCE here rather than `?? 0` at each
+        // INSERT. purchase_quotes.usd_rate is NOT NULL (api/schema.sql:1366) and a
+        // flat quote has no rate; see FLAT_ROW_RATE for why 0 beside
+        // rate_source='flat-skr' is honest and why this is not two call sites.
+        usdRateForRow: flat != null ? FLAT_ROW_RATE : rate.usdPerSkr,
     };
 }
 
@@ -453,6 +580,7 @@ function contractFromQuoteRow(row) {
 module.exports = { DEVNET_CANARY_SKU, DEVNET_PACKS, MAINNET_CANARY_SKU, MAINNET_PACKS,
     MAINNET_SKR_MINT, MAINNET_CANARY_OWNER, SKR_DECIMALS_BY_NETWORK, USD_ANCHORS,
     QUOTE_TTL_SECONDS, QUOTE_SETTLEMENT_GRACE_SECONDS, RATE_SOURCE,
+    SKR_FLAT, FLAT_RATE_SOURCE, FLAT_ROW_RATE, skrFlatFor, isFlatSku, quoteFlatAmount,
     mainnetCanaryEnabled, walletAllowed, purchaseContract, purchaseRail, isPinnedSku,
     usdAnchor, quoteAmount, pinnedSkus, fetchSkrUsdRate, buildQuoteBody, discountLabelFor,
     quotableSkus,

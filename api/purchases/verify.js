@@ -17,10 +17,40 @@ const { AuthCode, authenticateGranting, WALLET_MAX_BODY_BYTES } = require('../_l
 const { applyCors, newRef, quietFail, readBodyExact } = require('../_lib/http');
 const { logAuthReject, logApiEvent } = require('../_lib/audit');
 const { purchaseContract, walletAllowed, isPinnedSku, contractFromQuoteRow,
-    quoteValidAtPayment } = require('../_lib/purchase-catalog');
+    quoteValidAtPayment, FLAT_RATE_SOURCE } = require('../_lib/purchase-catalog');
 
 const TX_SIG_RE = /^[1-9A-HJ-NP-Za-km-z]{80,90}$/;
 const QUOTE_REF_RE = /^[0-9a-f]{32}$/;
+
+/**
+ * The rate to REPORT and to COPY FORWARD for a quote row — WO-1818.
+ *
+ * ⛔ NOTHING HERE RECOMPUTES AN AMOUNT. This file checks the chain against
+ * `contractFromQuoteRow(quote)` (:305, compared by exact string at :88), so the
+ * flat ladder needs no arithmetic change at all: the amount the verifier accepts
+ * is the one the server PERSISTED when it issued the quote, flat or derived.
+ * This helper is only about the rate FIELD.
+ *
+ * ⚠ A flat quote persists `usd_rate = 0` because the column is NOT NULL
+ * (api/schema.sql:1366) and there is no rate to record. Echoing that 0 outward, or
+ * copying it into purchase_entitlements.usd_rate (which IS nullable,
+ * api/schema.sql:1175), would state a price of zero per SKR to whoever reads the
+ * ledger next. `rate_source = 'flat-skr'` is the discriminator, and the
+ * normalisation lives HERE ONCE for the MONEY PATH — two readers applying this
+ * rule separately is how the response and the ledger come to disagree about one
+ * purchase.
+ *
+ * ⚠ THE ADMIN VIEWS ARE NOT COVERED AND THAT IS STATED RATHER THAN IMPLIED:
+ * api/admin/db.js:312 / :324 and api/admin/stats.js:1061 SELECT usd_rate raw, so
+ * those pages show 0.000000000000 for a flat quote. They are operator reads, not
+ * money decisions, and they print rate_source in the same row — but do not read
+ * this helper's existence as a claim that every reader is normalised.
+ */
+function ledgerRate(quote) {
+    if (!quote) return null;
+    if (String(quote.rate_source || '') === FLAT_RATE_SOURCE) return null;
+    return quote.usd_rate == null ? null : quote.usd_rate;
+}
 
 // Worded refusals. A money-path refusal that says only "rejected" sends the
 // player to support and the next seat to the source. Each of these names the one
@@ -342,7 +372,7 @@ async function handler(req, res) {
                 VALUES (${signature}, ${playerId}, ${sku}, 'solana', ${network}, ${contract.currency},
                         ${contract.amountBaseUnits}, ${contract.amountBaseUnits}, ${contract.recipient},
                         ${contract.recipientAta}, ${chain.slot}, 'manual_review', NOW(),
-                        ${quote.quote_ref}, ${quote.usd_anchor}, ${quote.usd_rate}, ${quote.rate_source})
+                        ${quote.quote_ref}, ${quote.usd_anchor}, ${ledgerRate(quote)}, ${quote.rate_source})
                 ON CONFLICT (tx_signature) DO NOTHING`);
             if (!reviewQ.ok)
                 return recordFailure(sql, res, playerId, ref, 'record_manual_review',
@@ -398,7 +428,7 @@ async function handler(req, res) {
                 ${contract.amountBaseUnits}, ${contract.amountBaseUnits}, ${contract.recipient},
                 ${contract.recipientAta}, ${chain.slot}, 'verified', NOW(),
                 ${quote ? quote.quote_ref : null}, ${quote ? quote.usd_anchor : null},
-                ${quote ? quote.usd_rate : null}, ${quote ? quote.rate_source : 'server-pinned'})
+                ${ledgerRate(quote)}, ${quote ? quote.rate_source : 'server-pinned'})
         ON CONFLICT (tx_signature) DO NOTHING RETURNING entitlement_id`);
     if (!insertedQ.ok)
         return recordFailure(sql, res, playerId, ref, 'record_entitlement',
@@ -431,7 +461,7 @@ async function handler(req, res) {
 
     await logApiEvent(sql, playerId, 'purchase_entitlement_created', { ref, sku, network,
         quoteId: quoteId || null, amountBaseUnits: String(contract.amountBaseUnits),
-        rate: quote ? quote.usd_rate : null, rateSource: quote ? quote.rate_source : 'server-pinned' });
+        rate: ledgerRate(quote), rateSource: quote ? quote.rate_source : 'server-pinned' });
     return res.status(200).json({ success: true, state: 'verified', sku,
         txSignature: signature, network, currency: contract.currency,
         amountLamports: Number(contract.amountBaseUnits), chainSlot: chain.slot,
@@ -442,4 +472,4 @@ module.exports = handler;
 module.exports.config = { api: { bodyParser: false } };
 module.exports._test = { readFinalizedTransfer, rpcUrl, entitlementMatches, entitlementResponse,
     evaluateQuoteRow, evaluatePaidQuote, QUOTE_MESSAGES, QUOTE_REF_RE,
-    tryDb, recordFailure, RECORD_FAILED_MESSAGE };
+    tryDb, recordFailure, RECORD_FAILED_MESSAGE, ledgerRate };
