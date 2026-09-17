@@ -1,8 +1,9 @@
 // =============================================================================
-// api/_lib/clan.js — WO-1845 (clan step 2). ALL clan membership logic, in ONE
-// place, with the database client INJECTED.
+// api/_lib/clan.js — WO-1845 (clan step 2) + WO-1846 (step 3: roles, authorization
+// and leader succession). ALL clan membership logic, in ONE place, with the
+// database client INJECTED.
 // -----------------------------------------------------------------------------
-// The four routes under api/clan/ are deliberately thin: CORS, raw body, auth,
+// The routes under api/clan/ are deliberately thin: CORS, raw body, auth,
 // then one call into this file. Every rule that matters — the code alphabet, the
 // validation bounds, the one-clan-per-wallet refusal, the leader guard — lives
 // here exactly once, so test/clan-membership.test.js can prove all of it against
@@ -44,13 +45,32 @@
 //    predicate is therefore "no member OTHER THAN me", which is both correct under
 //    the shared snapshot and the honest statement of the question.
 //
+// ── WO-1846 ADDS A FOURTH PROPERTY, AND IT IS THE ONE THAT KEEPS ROLES HONEST ──
+//
+// 4. AUTHORIZATION IS CHECKED TWICE: ONCE TO ANSWER, ONCE TO ACT.
+//    Every role write reads the caller's and the target's roles first — that read is
+//    what produces the 403 / 409 / 404 the player sees, because a bare "0 rows
+//    affected" cannot tell "you are not the Leader" from "they already are an
+//    Officer". But the read is NOT the authority: the same predicates are repeated
+//    INSIDE the UPDATE / DELETE (`AND role = 'member'`, plus an `EXISTS` re-asserting
+//    the CALLER's role), so a caller demoted between the two calls cannot still act,
+//    and a target promoted in that window is not double-promoted. Zero rows after a
+//    read that said yes is reported as a RACE, never as a success. This is the same
+//    belt-and-braces shape leaveClan already used for its leader guard.
+//
 // Files under api/_lib/ are NOT routed by Vercel (leading underscore), so this is
-// a library and never an endpoint. CommonJS, no dependencies.
+// a library and never an endpoint. CommonJS, no npm dependencies.
 // =============================================================================
 
 'use strict';
 
 const crypto = require('crypto');
+// The wallet shape, IMPORTED rather than re-spelled. A kick/promote body names its
+// target by address, and a second copy of WALLET_RE in this file is exactly the
+// duplicated-state failure CLAUDE.md §5 / §8 describe: the day the canonical regex
+// moves, the copy silently starts refusing valid wallets. wallet-auth.js requires
+// nothing from this file, so there is no cycle.
+const { isWalletId } = require('./wallet-auth');
 
 // The spec alphabet, identical to the client's CodeAlphabet (ClanService.cs:333):
 // no O/0, no I/1, so a code read aloud or off a screenshot cannot be mistyped into
@@ -76,6 +96,21 @@ const TAG_MAX = 5;
 const LEADER = 'leader';
 const MEMBER = 'member';
 
+// ── WO-1847 (clan step 4): message reporting ─────────────────────────────────
+// Cherry owns message persistence, so a reported id is an OPAQUE EXTERNAL STRING.
+// clan_reports.message_id is TEXT with no foreign key (migration 0031 says why), which
+// means this file is the only place its shape is ever checked. A ceiling is set because
+// an unbounded TEXT column reachable from an authenticated endpoint is a cheap way to
+// write megabytes per request; 200 is far above any id Cherry emits.
+const MESSAGE_ID_MAX = 200;
+// Postgres casts the parameter to UUID itself, and a malformed one raises 22P02 — which
+// would surface as an opaque 500 rather than "you sent a bad clan id". Validated here for
+// the same reason CODE_RE is: so a bad request is a 400 with a stable machine code.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// WO-1846. The third value clan_members_role_valid has always permitted; nothing
+// assigned it until this ticket. One Leader per clan, unlimited Officers.
+const OFFICER = 'officer';
+
 /**
  * Stable machine codes, in the style of wallet-auth.AuthCode: each names a CLASS of
  * failure, none reveals anything about another wallet or another clan.
@@ -95,6 +130,29 @@ const ClanCode = {
     LEADER_MUST_TRANSFER: 'leader_must_transfer',
     CODE_UNAVAILABLE:     'CLAN_CODE_UNAVAILABLE',
     IDENTITY_MISSING:     'CLAN_IDENTITY_MISSING',
+
+    // ── WO-1846: the role-change refusals ────────────────────────────────────
+    // ⛔ TARGET_NOT_IN_CLAN IS DELIBERATELY ONE CODE FOR TWO FACTS: "no such wallet
+    //    anywhere" and "that wallet is in a DIFFERENT clan". Splitting them would
+    //    turn /promote into a membership oracle — type addresses at it and learn who
+    //    belongs to which clan. The target read is scoped by clan_id for the same
+    //    reason, so the two cases are indistinguishable by construction, not by
+    //    remembering to collapse them here.
+    BAD_TARGET:           'CLAN_BAD_TARGET',          // 400 — missing or not wallet-shaped
+    SELF_TARGET:          'CLAN_SELF_TARGET',         // 400 — a role op aimed at the caller
+    TARGET_NOT_IN_CLAN:   'CLAN_TARGET_NOT_IN_CLAN',  // 404 — not a member of YOUR clan
+    FORBIDDEN:            'CLAN_FORBIDDEN',           // 403 — the caller's role cannot do this
+    TARGET_ROLE:          'CLAN_TARGET_ROLE',         // 409 — the target's role is wrong for this op
+    RACED:                'CLAN_RACED',               // 409 — the read said yes, the write moved 0 rows
+
+    // ── WO-1847: the message-report refusals ─────────────────────────────────
+    BAD_CLAN_ID:          'CLAN_BAD_CLAN_ID',         // 400 — missing or not UUID-shaped
+    BAD_MESSAGE_ID:       'CLAN_BAD_MESSAGE_ID',      // 400 — missing, blank, or over the ceiling
+    // 403 — the caller is not a member of the clan they are reporting into. Deliberately
+    // NOT split from "no such clan": answering those separately would turn /report-message
+    // into a clan-existence oracle for any authenticated wallet. The single CTE cannot
+    // tell them apart either, so the collapse is structural rather than remembered.
+    REPORT_NOT_MEMBER:    'CLAN_REPORT_NOT_MEMBER',
 };
 
 // ── Validation ───────────────────────────────────────────────────────────────
@@ -240,7 +298,199 @@ async function readMembership(sql, wallet) {
     };
 }
 
+/**
+ * WO-1846. One member of ONE clan, or null.
+ *
+ * ⛔ SCOPED BY clan_id, AND THAT IS THE PRIVACY PROPERTY, NOT AN OPTIMISATION. Asked
+ * as "SELECT ... WHERE wallet = $1" this read would answer "yes, they are in clan X"
+ * for ANY address a caller cared to type, and /promote would be a membership lookup
+ * service. Scoped to the caller's own clan, a stranger and a member of another clan
+ * are the same answer: null.
+ */
+async function readMemberInClan(sql, clanId, wallet) {
+    const rows = await sql`
+        SELECT wallet, role, joined_at
+        FROM clan_members
+        WHERE clan_id = ${clanId} AND wallet = ${wallet}
+        LIMIT 1
+    `;
+    if (!rows || rows.length === 0) return null;
+    return { wallet: String(rows[0].wallet), role: rows[0].role, joinedAt: rows[0].joined_at };
+}
+
+/**
+ * WO-1846. Normalise the target wallet of a role operation.
+ *
+ * Shape-checked HERE so a garbage string is a 400 rather than a read that finds
+ * nothing and reports a 404 — "that is not an address" and "they are not in your
+ * clan" are different facts, exactly as normalizeCode distinguishes BAD_CODE from
+ * NOT_FOUND. The shape rule itself is imported, never re-spelled (see the require).
+ */
+function normalizeTargetWallet(raw) {
+    const wallet = raw != null ? String(raw).trim() : '';
+    if (!isWalletId(wallet)) return { ok: false, code: ClanCode.BAD_TARGET };
+    return { ok: true, value: wallet };
+}
+
+/**
+ * WO-1846. The preamble every role operation shares: who is asking, who is the
+ * target, and are they in the same clan.
+ *
+ * Returns a refusal in the {ok:false,status,code} shape the routes already answer,
+ * or the caller's membership plus the target's row.
+ */
+async function readRoleContext(sql, callerWallet, rawTarget) {
+    const target = normalizeTargetWallet(rawTarget);
+    if (!target.ok) return { ok: false, status: 400, code: target.code };
+    // Aimed at yourself: refused BEFORE any read. A self-promote is meaningless, and a
+    // self-kick is a leave — which has its own endpoint AND its own succession rule, so
+    // routing it through kick would be a Leader leaving with no successor chosen.
+    if (target.value === String(callerWallet)) {
+        return { ok: false, status: 400, code: ClanCode.SELF_TARGET };
+    }
+
+    const caller = await readMembership(sql, callerWallet);
+    if (!caller) return { ok: false, status: 404, code: ClanCode.NOT_IN_CLAN };
+
+    const member = await readMemberInClan(sql, caller.clanId, target.value);
+    if (!member) return { ok: false, status: 404, code: ClanCode.TARGET_NOT_IN_CLAN };
+
+    return { ok: true, caller: caller, target: member };
+}
+
 // ── Writes ───────────────────────────────────────────────────────────────────
+
+/**
+ * WO-1846. Set one member's role, with the ENTIRE authorization restated inside the
+ * statement.
+ *
+ * @param {string} fromRole  the role the target must still hold
+ * @param {string} toRole    the role to write
+ */
+async function setMemberRole(sql, clanId, callerWallet, targetWallet, fromRole, toRole) {
+    return sql`
+        UPDATE clan_members SET role = ${toRole}
+        WHERE clan_id = ${clanId}
+          AND wallet = ${targetWallet}
+          AND role = ${fromRole}
+          AND EXISTS (
+              SELECT 1 FROM clan_members c
+              WHERE c.clan_id = ${clanId} AND c.wallet = ${callerWallet} AND c.role = ${LEADER}
+          )
+        RETURNING wallet, role
+    `;
+}
+
+/**
+ * Promote a Member to Officer. Leader only.
+ *
+ * @returns {Promise<{ok:true, clanId:string, wallet:string, role:string}
+ *                 | {ok:false, status:number, code:string, detail?:object}>}
+ */
+async function promoteMember(sql, callerWallet, rawTarget) {
+    const ctx = await readRoleContext(sql, callerWallet, rawTarget);
+    if (!ctx.ok) return ctx;
+    if (ctx.caller.role !== LEADER) {
+        return { ok: false, status: 403, code: ClanCode.FORBIDDEN, detail: { role: ctx.caller.role } };
+    }
+    if (ctx.target.role !== MEMBER) {
+        return { ok: false, status: 409, code: ClanCode.TARGET_ROLE, detail: { role: ctx.target.role } };
+    }
+
+    const rows = await setMemberRole(sql, ctx.caller.clanId, callerWallet, ctx.target.wallet, MEMBER, OFFICER);
+    if (!rows || rows.length === 0) {
+        return { ok: false, status: 409, code: ClanCode.RACED, detail: { op: 'promote' } };
+    }
+    return { ok: true, clanId: ctx.caller.clanId, wallet: String(rows[0].wallet), role: rows[0].role };
+}
+
+/** Demote an Officer to Member. Leader only. Mirror image of promoteMember. */
+async function demoteMember(sql, callerWallet, rawTarget) {
+    const ctx = await readRoleContext(sql, callerWallet, rawTarget);
+    if (!ctx.ok) return ctx;
+    if (ctx.caller.role !== LEADER) {
+        return { ok: false, status: 403, code: ClanCode.FORBIDDEN, detail: { role: ctx.caller.role } };
+    }
+    if (ctx.target.role !== OFFICER) {
+        return { ok: false, status: 409, code: ClanCode.TARGET_ROLE, detail: { role: ctx.target.role } };
+    }
+
+    const rows = await setMemberRole(sql, ctx.caller.clanId, callerWallet, ctx.target.wallet, OFFICER, MEMBER);
+    if (!rows || rows.length === 0) {
+        return { ok: false, status: 409, code: ClanCode.RACED, detail: { op: 'demote' } };
+    }
+    return { ok: true, clanId: ctx.caller.clanId, wallet: String(rows[0].wallet), role: rows[0].role };
+}
+
+/**
+ * Remove a member from the clan (owner ruling, WO-1846: Officers may kick too).
+ *
+ *   Leader  → may remove any Member or Officer. Never themself (that is /leave).
+ *   Officer → may remove a MEMBER ONLY. Never another Officer, never the Leader.
+ *   Member  → never.
+ *
+ * ⛔ THE OFFICER'S NARROWER POWER IS IN THE `DELETE` PREDICATE TOO, not only in the
+ * read above it: `(${callerRole} = 'leader' OR role = 'member')`. An Officer promoted
+ * to Leader — or a Leader demoted to Officer — between the read and the write cannot
+ * borrow the role they no longer hold, and the EXISTS clause pins that the caller
+ * still holds the exact role the authorization decision was made on.
+ */
+async function kickMember(sql, callerWallet, rawTarget) {
+    const ctx = await readRoleContext(sql, callerWallet, rawTarget);
+    if (!ctx.ok) return ctx;
+
+    const callerRole = ctx.caller.role;
+    if (callerRole !== LEADER && callerRole !== OFFICER) {
+        return { ok: false, status: 403, code: ClanCode.FORBIDDEN, detail: { role: callerRole } };
+    }
+    // An Officer aiming at anything other than a Member is a 403 and not a 409: the
+    // refusal is about the CALLER's authority, not about the target being in an odd
+    // state. The work order names 403 for exactly this case.
+    if (callerRole === OFFICER && ctx.target.role !== MEMBER) {
+        return {
+            ok: false, status: 403, code: ClanCode.FORBIDDEN,
+            detail: { role: callerRole, targetRole: ctx.target.role },
+        };
+    }
+    // Nobody kicks a Leader. A Leader's own exit is succession (leaveClan); another
+    // Leader row cannot exist, so this predicate is a guard against a corrupted table
+    // rather than a reachable player action — and it costs nothing to hold.
+    if (ctx.target.role === LEADER) {
+        return { ok: false, status: 403, code: ClanCode.FORBIDDEN, detail: { targetRole: LEADER } };
+    }
+
+    // ⛔ THE ::text CAST IN THE PREDICATE BELOW IS LOAD BEARING. Every other comparison
+    // in this file binds a parameter against a COLUMN, so Postgres infers its type. The
+    // Officer narrowing compares two PARAMETERS to each other, and the Neon HTTP driver
+    // sends parameters UNTYPED — parameter-equals-parameter with both sides unknown is
+    // the "could not determine data type" class of 42P18, which would 500 every Officer
+    // kick in production while a recording mock noticed nothing at all. One cast anchors
+    // the comparison to text. (The cast is pinned by clan-roles.test.js for that reason.)
+    const rows = await sql`
+        DELETE FROM clan_members
+        WHERE clan_id = ${ctx.caller.clanId}
+          AND wallet = ${ctx.target.wallet}
+          AND role <> ${LEADER}
+          AND (${callerRole}::text = ${LEADER} OR role = ${MEMBER})
+          AND EXISTS (
+              SELECT 1 FROM clan_members c
+              WHERE c.clan_id = ${ctx.caller.clanId}
+                AND c.wallet = ${callerWallet}
+                AND c.role = ${callerRole}
+          )
+        RETURNING wallet, role
+    `;
+    if (!rows || rows.length === 0) {
+        return { ok: false, status: 409, code: ClanCode.RACED, detail: { op: 'kick' } };
+    }
+    return {
+        ok: true,
+        clanId: ctx.caller.clanId,
+        wallet: String(rows[0].wallet),
+        removedRole: rows[0].role,
+        by: callerRole,
+    };
+}
 
 /**
  * Create a clan and seat the caller as its Leader.
@@ -391,31 +641,22 @@ async function joinClan(sql, wallet, rawCode) {
 /**
  * Leave the caller's clan.
  *
- * ⛔ A LEADER CANNOT LEAVE, and that is a DELIBERATE HOLE, not an oversight: WO-1846
- * defines succession, and until it has, letting a Leader walk out would leave a clan
- * with members and no leader — a state no later ticket has a rule for. The refusal is
- * a 409 carrying the work order's literal `leader_must_transfer`.
+ * ⚠ REWRITTEN BY WO-1846, AND THE OLD RULE IS RETIRED. Until 2026-09-17 a Leader
+ * calling this got a 409 `leader_must_transfer`, because WO-1845 shipped before
+ * succession had a rule and a Leader walking out would have left members with no
+ * leader. Succession now exists (leaveAsLeader below), so a Leader leaving SUCCEEDS.
+ * `ClanCode.LEADER_MUST_TRANSFER` is kept as the RACE label — the read said member and
+ * the write moved nothing — because the client already branches on that literal string
+ * and it still means "your leave did not happen, look at your role again".
  *
- * The guard is in BOTH places: read the role, and also `role <> 'leader'` in the
- * statement itself, so a role change landing between the two cannot slip a leader out.
- *
- * ⚠ THE CLAN CLEANUP IS REACHABLE ONLY FOR A LAST NON-LEADER MEMBER, which — while a
- * leader can never leave — means it fires only for a clan whose leader row is already
- * gone by some other path. It is implemented because the work order specifies it; it
- * is not today's live behaviour, and saying so is cheaper than someone later reading
- * it as dead code and removing it.
+ * The non-leader path below is UNCHANGED, statement and all, including both halves of
+ * the guard (`role <> 'leader'` in the statement as well as the read) and the snapshot
+ * rule in the emptiness test described in this file's header.
  */
 async function leaveClan(sql, wallet) {
     const existing = await readMembership(sql, wallet);
     if (!existing) return { ok: false, status: 404, code: ClanCode.NOT_IN_CLAN };
-    if (existing.role === LEADER) {
-        return {
-            ok: false,
-            status: 409,
-            code: ClanCode.LEADER_MUST_TRANSFER,
-            detail: { clanId: existing.clanId, memberCount: existing.memberCount },
-        };
-    }
+    if (existing.role === LEADER) return leaveAsLeader(sql, wallet, existing);
 
     const rows = await sql`
         WITH departed AS (
@@ -445,13 +686,188 @@ async function leaveClan(sql, wallet) {
     return { ok: true, clanId: existing.clanId, clanRemoved: (Number(r.emptied_rows) || 0) > 0 };
 }
 
+/**
+ * WO-1846. A LEADER leaves: succession, in ONE STATEMENT.
+ *
+ * The rule (work order §"Leader succession"): the oldest Officer by joined_at becomes
+ * Leader; failing that the oldest Member; failing that the clan is deleted.
+ *
+ * ⛔ WHY ALL THREE WRITES ARE ONE STATEMENT. The Neon HTTP driver sends one statement
+ * per call with no transaction across calls, so "promote the successor" and "delete the
+ * old leader" as two calls has a window containing TWO leaders, and a crash between
+ * them leaves it there permanently. As three sequential calls the window also contains
+ * a clan with NO leader. A data-modifying CTE is atomic by construction and is the same
+ * shape createClan and the member path already use.
+ *
+ * ⛔ AND THE SNAPSHOT RULE AGAIN, in two places:
+ *   • `successor` must exclude the leaver BY WALLET (`m.wallet <> $1`). The DELETE in
+ *     the sibling `departed` CTE is invisible to it — every sub-statement reads the
+ *     same snapshot — so without that predicate the leaver could elect themself.
+ *   • `disbanded`'s emptiness test is likewise "no member OTHER THAN me", never "no
+ *     rows in clan_members". When a successor exists the predicate is false and the
+ *     clan survives; when the Leader is the sole member it is true and the clan goes.
+ *     One statement therefore covers both branches with no `if` in JavaScript at all.
+ *
+ * ⛔ THE ORDER BY IS FULLY DETERMINISTIC ON PURPOSE. `(role = 'officer') DESC` puts
+ * Officers ahead of Members (the work order's two-tier preference), `joined_at ASC` is
+ * "oldest", and `wallet ASC` breaks a tie — two members can share a joined_at to the
+ * microsecond in a seeded or scripted clan, and an unordered pick would make succession
+ * non-reproducible, which is the kind of bug nobody can ever reproduce on purpose.
+ */
+async function leaveAsLeader(sql, wallet, existing) {
+    const rows = await sql`
+        WITH mine AS (
+            SELECT m.clan_id
+            FROM clan_members m
+            WHERE m.wallet = ${wallet} AND m.role = ${LEADER}
+        ), successor AS (
+            SELECT m.clan_id, m.wallet, m.role
+            FROM clan_members m
+            JOIN mine ON mine.clan_id = m.clan_id
+            WHERE m.wallet <> ${wallet}
+            ORDER BY (m.role = ${OFFICER}) DESC, m.joined_at ASC, m.wallet ASC
+            LIMIT 1
+        ), promoted AS (
+            UPDATE clan_members SET role = ${LEADER}
+            WHERE (clan_id, wallet) IN (SELECT clan_id, wallet FROM successor)
+            RETURNING wallet, role
+        ), departed AS (
+            DELETE FROM clan_members
+            WHERE wallet = ${wallet} AND clan_id IN (SELECT clan_id FROM mine)
+            RETURNING clan_id
+        ), disbanded AS (
+            DELETE FROM clans
+            WHERE id IN (SELECT clan_id FROM mine)
+              AND NOT EXISTS (
+                  SELECT 1 FROM clan_members m
+                  WHERE m.clan_id = clans.id AND m.wallet <> ${wallet}
+              )
+            RETURNING id
+        )
+        SELECT (SELECT COUNT(*) FROM departed)::int  AS departed_rows,
+               (SELECT COUNT(*) FROM disbanded)::int AS disbanded_rows,
+               (SELECT wallet FROM promoted LIMIT 1)  AS new_leader,
+               (SELECT role FROM successor LIMIT 1)   AS successor_prior_role
+    `;
+
+    const r = rows && rows[0] ? rows[0] : { departed_rows: 0, disbanded_rows: 0 };
+    const departed = Number(r.departed_rows) || 0;
+    if (departed === 0) {
+        // The read said leader and the write removed nothing: the row moved underneath
+        // us. Reported as the literal the client already branches on (see leaveClan's
+        // note), never as a cheerful 200 for a leave that did not happen.
+        return { ok: false, status: 409, code: ClanCode.LEADER_MUST_TRANSFER, detail: { raced: true } };
+    }
+
+    const clanDeleted = (Number(r.disbanded_rows) || 0) > 0;
+    const newLeader = r.new_leader != null ? String(r.new_leader) : null;
+    if (!clanDeleted && !newLeader) {
+        // A clan that was neither handed to a successor nor deleted is exactly the
+        // leaderless state this whole function exists to prevent. Say so loudly rather
+        // than returning ok and leaving it for a player to discover.
+        console.error('[clan] succession left a clan with no leader:', existing.clanId);
+        return { ok: false, status: 500, code: ClanCode.RACED, detail: { succession: 'no_leader' } };
+    }
+
+    return {
+        ok: true,
+        clanId: existing.clanId,
+        clanRemoved: clanDeleted,
+        clanDeleted: clanDeleted,
+        newLeader: newLeader,
+        successionFrom: r.successor_prior_role != null ? String(r.successor_prior_role) : null,
+    };
+}
+
+/**
+ * Normalise a clan id: trim, then the UUID shape Postgres would otherwise reject with
+ * 22P02. Answered as a BAD REQUEST rather than a 500, and never as NOT FOUND — a
+ * malformed id is the client's mistake, a missing clan is a fact about the database,
+ * and telling them apart is what stops a client retrying a typo forever.
+ */
+function normalizeClanId(raw) {
+    const id = raw != null ? String(raw).trim() : '';
+    if (!UUID_RE.test(id)) return { ok: false, code: ClanCode.BAD_CLAN_ID };
+    return { ok: true, value: id };
+}
+
+/**
+ * Normalise an external (Cherry) message id: trim, require non-empty, bound to
+ * MESSAGE_ID_MAX. NOT pattern-matched beyond that on purpose — the id belongs to
+ * Cherry's schema, not this one, and a regex guessing at its format here would reject
+ * valid reports the first time Cherry changed it.
+ */
+function normalizeMessageId(raw) {
+    const id = raw != null ? String(raw).trim() : '';
+    if (id.length < 1 || id.length > MESSAGE_ID_MAX) {
+        return { ok: false, code: ClanCode.BAD_MESSAGE_ID };
+    }
+    return { ok: true, value: id };
+}
+
+/**
+ * Record a report against one Cherry message, by a member of the clan it was sent in.
+ *
+ * ONE STATEMENT, and here that is the membership CHECK as well as the write (property 3
+ * in this file's header): the INSERT's rows come from a SELECT over clan_members, so a
+ * caller who is not a member of that clan inserts ZERO rows and there is no window in
+ * which a membership read passes and a leave lands before the insert. A separate
+ * "am I a member" SELECT followed by an INSERT is two answers to one question.
+ *
+ * ⚠ ZERO ROWS IS THE REFUSAL, AND IT IS AMBIGUOUS ON PURPOSE. It means "you are not a
+ * member of that clan" OR "that clan does not exist", and both answer 403 with the same
+ * code — see ClanCode.REPORT_NOT_MEMBER for why collapsing them is the security
+ * property and not a lost distinction.
+ *
+ * ⛔ NOTHING READS THIS TABLE IN THIS TICKET. WO-1265 required that reporting exist
+ * before free-text chat shipped; the admin review surface is deferred. A write-only
+ * table is the deliberate shape, so do not "finish" it by adding a read here.
+ *
+ * @param {Function} sql        neon(...) tagged-template client
+ * @param {string} wallet       a wallet whose ownership has ALREADY been proven
+ * @param {*} rawClanId         body.clanId
+ * @param {*} rawMessageId      body.messageId
+ * @returns {Promise<{ok:true, reportId:string, clanId:string}
+ *                 | {ok:false, status:number, code:string, detail?:object}>}
+ */
+async function reportMessage(sql, wallet, rawClanId, rawMessageId) {
+    const clanId = normalizeClanId(rawClanId);
+    if (!clanId.ok) return { ok: false, status: 400, code: clanId.code };
+    const messageId = normalizeMessageId(rawMessageId);
+    if (!messageId.ok) return { ok: false, status: 400, code: messageId.code };
+
+    let rows;
+    try {
+        rows = await sql`
+            INSERT INTO clan_reports (reporter_wallet, message_id, clan_id)
+            SELECT ${wallet}, ${messageId.value}, m.clan_id
+            FROM clan_members m
+            WHERE m.clan_id = ${clanId.value}::uuid AND m.wallet = ${wallet}
+            RETURNING id, clan_id, reported_at
+        `;
+    } catch (err) {
+        // The same deploy fault createClan/joinClan map: migration 0029 or 0031 is not on
+        // this database, so the reporter's wallet_identity row is not there to reference.
+        // A deploy fault is never the player's fault, so it is a 500 and not a 400.
+        if (identityForeignKeyViolation(err)) {
+            return { ok: false, status: 500, code: ClanCode.IDENTITY_MISSING, detail: { migration: '0029/0031' } };
+        }
+        throw err;
+    }
+
+    const r = rows && rows[0] ? rows[0] : null;
+    if (!r) return { ok: false, status: 403, code: ClanCode.REPORT_NOT_MEMBER };
+
+    return { ok: true, reportId: String(r.id), clanId: String(r.clan_id) };
+}
+
 module.exports = {
     CODE_ALPHABET,
     CODE_RE,
     CODE_LEN,
     MAX_CODE_ATTEMPTS,
     NAME_MIN, NAME_MAX, TAG_MIN, TAG_MAX,
-    LEADER, MEMBER,
+    LEADER, MEMBER, OFFICER,
     ClanCode,
     normalizeName,
     normalizeTag,
@@ -465,4 +881,18 @@ module.exports = {
     createClan,
     joinClan,
     leaveClan,
+    // ── WO-1846 ─────────────────────────────────────────────────────────────
+    readMemberInClan,
+    normalizeTargetWallet,
+    readRoleContext,
+    promoteMember,
+    demoteMember,
+    kickMember,
+    leaveAsLeader,
+    // ── WO-1847 (clan step 4) — message reporting ───────────────────────────
+    MESSAGE_ID_MAX,
+    UUID_RE,
+    normalizeClanId,
+    normalizeMessageId,
+    reportMessage,
 };

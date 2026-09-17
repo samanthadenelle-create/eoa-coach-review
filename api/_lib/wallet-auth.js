@@ -193,6 +193,7 @@ const AuthCode = {
     GUEST_MISMATCH:         'GUEST_MISMATCH',           // X-Guest-Id != the guest playerId
     GUEST_RATE_LIMITED:     'GUEST_RATE_LIMITED',       // guest exceeded its window budget
     GUEST_DISABLED:         'GUEST_DISABLED',           // guest rail switched off by env
+    CLAN_RATE_LIMITED:      'CLAN_RATE_LIMITED',        // WO-1846: a wallet's per-hour clan-action budget is spent
     WALLET_REQUIRED:        'AUTH_WALLET_REQUIRED',     // an UNPROVEN rail authenticated, but this route GRANTS VALUE
 
     GOOGLE_DISABLED:        'GOOGLE_IDENTITY_DISABLED', // play- id presented while the Play rail is switched off
@@ -734,6 +735,104 @@ async function touchGuestRate(sql, guestId) {
     }
 }
 
+// ── Clan action budgets (WO-1846) ────────────────────────────────────────────
+// PER WALLET, PER ACTION, PER HOUR. Not one shared budget: a player reorganising
+// their roster legitimately fires twenty promotes, and that must not cost them the
+// ability to leave. Every number is a first pass and tunable — they exist to stop a
+// scripted loop minting clans or thrashing roles, not to ration honest play.
+//
+// ⛔ THE WINDOW IS AN HOUR, WHICH IS 60x THE GUEST WINDOW, SO THE SHAPE OF THE ROW
+//    MATTERS MORE HERE. The guest table is one row per guest; this one is one row per
+//    (wallet, action) pair — six rows per wallet at most, and the composite primary key
+//    is what makes the UPSERT atomic per action instead of per wallet.
+const CLAN_RATE_WINDOW_SECONDS = 3600;
+const CLAN_RATE_LIMITS = {
+    create:  3,
+    join:   10,
+    leave:   5,
+    promote: 20,
+    demote:  20,
+    kick:    20,
+};
+// An action nobody declared a budget for is a PROGRAMMING mistake (a typo in a route),
+// and it is answered with the STRICTEST declared budget rather than with no budget at
+// all — an unlimited default is the one outcome a rate limiter must never have. It is
+// also logged, because a route silently running on the wrong budget should be findable.
+const CLAN_RATE_STRICTEST = Math.min(...Object.values(CLAN_RATE_LIMITS));
+
+/**
+ * WO-1846. Sliding-window counter for ONE wallet and ONE clan action, in a single
+ * atomic UPSERT. Modelled on touchGuestRate above, deliberately and line for line.
+ *
+ * ⛔ IT IS CALLED BEFORE THE ACTION, NOT AFTER IT, AND THAT IS ON PURPOSE. A refused
+ *    attempt (a Member spamming /promote and collecting 403s) still spends budget —
+ *    otherwise the cheapest request in the system is the one an attacker repeats, and
+ *    the limiter would only ever throttle legitimate work.
+ *
+ * ⛔ FAIL-OPEN ON A MISSING TABLE, for the same reason touchGuestRate is: this is abuse
+ *    control, not authorization. The caller has ALREADY proven wallet ownership by the
+ *    time we get here, so a deploy that lands the code before migration 0032 must
+ *    degrade to a logged warning and keep serving clans — never 500 every clan request.
+ *    THIS FUNCTION MUST NEVER THROW.
+ *
+ * `retryAfterSeconds` is computed IN SQL from the row the UPSERT just wrote, because the
+ * only clock that can answer "when does this window end" is the database's — comparing a
+ * serverless function's Date.now() against a timestamp written by Postgres is how a
+ * retry hint ends up negative on one region and minutes off on another.
+ *
+ * @param {Function} sql     neon(...) tagged-template client
+ * @param {string}   wallet  a wallet whose ownership has ALREADY been proven
+ * @param {string}   action  one of CLAN_RATE_LIMITS' keys
+ * @returns {Promise<{ok:boolean, hits?:number, code?:string, detail?:object, degraded?:boolean}>}
+ */
+async function touchClanRate(sql, wallet, action) {
+    const act = String(action || '').trim().toLowerCase();
+    let max = CLAN_RATE_LIMITS[act];
+    if (typeof max !== 'number') {
+        console.warn('[wallet-auth] clan rate: undeclared action "' + act + '" — applying the strictest budget');
+        max = CLAN_RATE_STRICTEST;
+    }
+
+    try {
+        const rows = await sql`
+            INSERT INTO clan_rate_limit (wallet, action, window_started_at, hits, last_seen, total_hits)
+            VALUES (${wallet}, ${act}, NOW(), 1, NOW(), 1)
+            ON CONFLICT (wallet, action) DO UPDATE SET
+                window_started_at = CASE
+                    WHEN clan_rate_limit.window_started_at < NOW() - (${CLAN_RATE_WINDOW_SECONDS} * INTERVAL '1 second')
+                    THEN NOW() ELSE clan_rate_limit.window_started_at END,
+                hits = CASE
+                    WHEN clan_rate_limit.window_started_at < NOW() - (${CLAN_RATE_WINDOW_SECONDS} * INTERVAL '1 second')
+                    THEN 1 ELSE clan_rate_limit.hits + 1 END,
+                last_seen = NOW(),
+                total_hits = clan_rate_limit.total_hits + 1
+            RETURNING hits, total_hits,
+                GREATEST(0, CEIL(EXTRACT(EPOCH FROM
+                    (window_started_at + (${CLAN_RATE_WINDOW_SECONDS} * INTERVAL '1 second') - NOW())
+                )))::int AS retry_after
+        `;
+        const row = rows && rows[0] ? rows[0] : null;
+        const hits = row ? Number(row.hits) : 1;
+        if (hits > max) {
+            const retryAfter = row && row.retry_after != null
+                ? Number(row.retry_after) : CLAN_RATE_WINDOW_SECONDS;
+            return {
+                ok: false,
+                code: AuthCode.CLAN_RATE_LIMITED,
+                detail: {
+                    action: act, hits: hits, max: max,
+                    windowSeconds: CLAN_RATE_WINDOW_SECONDS,
+                    retryAfterSeconds: retryAfter > 0 ? retryAfter : 1,
+                },
+            };
+        }
+        return { ok: true, hits: hits, action: act, max: max };
+    } catch (err) {
+        console.warn('[wallet-auth] clan rate table unavailable — allowing (fail-open):', err.message);
+        return { ok: true, hits: -1, action: act, degraded: true };
+    }
+}
+
 /**
  * WO-1844 (clan step 1). Record that this PROVEN wallet was seen, in one atomic UPSERT.
  *
@@ -1014,6 +1113,8 @@ module.exports = {
     GUEST_MAX_PER_WINDOW,
     GUEST_MAX_BODY_BYTES,
     WALLET_MAX_BODY_BYTES,
+    CLAN_RATE_WINDOW_SECONDS,   // ← WO-1846
+    CLAN_RATE_LIMITS,
     AuthCode,
     WALLET_RE,
     GUEST_RE,
@@ -1034,6 +1135,7 @@ module.exports = {
     verifyGuest,
     verifyAndConsume,   // back-compat
     touchWalletIdentity,  // ← WO-1844: fail-open identity tracking. Decides nothing.
+    touchClanRate,        // ← WO-1846: per-wallet, per-action clan budgets. Fail-open.
     authenticate,          // ← self-service routes (own row): save, load, generate, tower-swap
     authenticateGranting,  // ← ANY route that hands out value: referral claim, entitlements, …
     authenticatePromoRedeem, // ← /api/promo/redeem ONLY (owner ruling 2026-09-06). One caller.
