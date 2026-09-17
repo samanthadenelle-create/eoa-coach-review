@@ -306,6 +306,61 @@ namespace DeNelle.Wallet
                 ? "$" + UsdEffective.Value.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)
                 : string.Empty;
 
+        // =====================================================================
+        //  ⭐ THE SKR-ONLY, FLAT SHELF (WO-1815, owner 2026-09-16: "change the
+        //  store to SKR only and set to flat amounts").
+        // ---------------------------------------------------------------------
+        //  The shelf prints ONE figure and it is SKR. These three members are
+        //  what the sale sign needs to say so in SKR instead of dollars.
+        //
+        //  ⛔ STILL NO PRICE ARITHMETIC. SkrEffectiveLabel formats UiAmount —
+        //  the transported integer, decoded — and the two anchor members take
+        //  the authored flat amount as a PARAMETER and do nothing to it but
+        //  COMPARE and FORMAT. Nothing here multiplies a price by a percentage,
+        //  and nothing here invents a figure when one is missing: every member
+        //  returns EMPTY or false instead.
+        //
+        //  ⛔ AND THE STRUCK ANCHOR IS A CONSTANT, WHICH IS THE ONLY REASON IT
+        //  MAY COME FROM THE CLIENT'S OWN CATALOG AT ALL. `pricing.skr` is dead
+        //  data precisely because it is a stale opinion about a MOVING number;
+        //  `pricing.skrFlat` does not move, the server prices from the same
+        //  authored row through the verbatim generated mirror, and a regression
+        //  pins the two copies equal. If that ever stops being true, the honest
+        //  fix is to transport the anchor (WO-1815 §6.5), not to derive it.
+        // =====================================================================
+
+        /// <summary>
+        /// True when this quote was priced from the FLAT SKR ladder rather than a market rate.
+        /// <para>A TRANSPORTED fact, not a deduction about money: a flat quote carries no
+        /// <c>rate</c> because none was used, while a rate-derived one always carries the figure that
+        /// priced it and a pinned canary is its own third case. The confirm step reads this to decide
+        /// whether a rate line is owed to the player — a rate that priced the charge must always be
+        /// disclosed, and a rate that did not must never be implied.</para>
+        /// </summary>
+        public bool IsFlatPriced => !Pinned && !Rate.HasValue;
+
+        /// <summary>The served SKR as digits, e.g. <c>"210 SKR"</c>. Empty when nothing was served.</summary>
+        public string SkrEffectiveLabel =>
+            BaseUnits > 0 ? $"{UiAmount:0.######} SKR" : string.Empty;
+
+        /// <summary>
+        /// True when this sale card may strike an SKR anchor: a sale is live, an authored flat amount
+        /// exists, a figure was served, and the served figure is STRICTLY LOWER than the anchor.
+        /// <para>⛔ FAIL-CLOSED, and the last clause is the one that matters. Before the server prices
+        /// flat (WO-1815 §6) the served figure is rate-derived and can sit ABOVE the authored ladder
+        /// rung — striking the anchor then would cross out the CHEAPER number and advertise a discount
+        /// upwards. No strike is a missing flourish; a backwards strike is a wrong price.</para>
+        /// </summary>
+        public bool HasStruckSkr(double authoredFlatSkr) =>
+            IsOnSale && authoredFlatSkr > 0d && BaseUnits > 0 && UiAmount < authoredFlatSkr;
+
+        /// <summary>The authored flat amount as digits, for striking through. Empty unless
+        /// <see cref="HasStruckSkr"/> allows it.</summary>
+        public string SkrAnchorLabel(double authoredFlatSkr) =>
+            HasStruckSkr(authoredFlatSkr)
+                ? authoredFlatSkr.ToString("0.######", System.Globalization.CultureInfo.InvariantCulture) + " SKR"
+                : string.Empty;
+
         /// <summary>The sale's end instant as UTC, or null when absent/unparseable/not a sale.</summary>
         public DateTime? SaleEndsAtUtc
         {
@@ -448,10 +503,35 @@ namespace DeNelle.Wallet
         /// The envelope is strongly typed; only the rows are deferred — a malformed envelope is a
         /// genuine refusal, while a malformed ROW should cost only that row.
         /// </summary>
+        // =====================================================================
+        //  ⛔ `Rate` IS NULLABLE ON BOTH OF THESE, AND IT IS THE SAME DEFECT THAT
+        //  ALREADY BLANKED THIS SHELF ONCE — ONE FIELD FURTHER OUT.
+        // ---------------------------------------------------------------------
+        //  `PurchaseQuote.UsdAnchor` carries the record (see its own header): it
+        //  was a non-nullable `double`, the server legitimately sent null for the
+        //  pinned canary, Newtonsoft threw JsonSerializationException on the WHOLE
+        //  RESPONSE, and EVERY pack on the shelf read "Price unavailable" because
+        //  of one unpriceable row. That fix made the ROW nullable and added the
+        //  row-level guard below.
+        //
+        //  ⚠ BUT THE ENVELOPE'S OWN `rate` WAS LEFT AS A BARE double, AND THE
+        //  ROW-LEVEL GUARD CANNOT SAVE IT: the envelope is deserialized in one
+        //  call, OUTSIDE the per-row try. WO-1818 now sends `rate: null` for a
+        //  flat-priced SKU (there is no market rate, because none was used), so
+        //  the moment the list is all-flat the envelope throws and the shelf goes
+        //  blank again — through the identical door, wearing a different field
+        //  name. Nullable here is not defensive style; it is the contract.
+        //
+        //  ⛔ AND THE READER MUST NOT DEREFERENCE IT. A flat list has no rate to
+        //  print, so the trace says so in words rather than printing 0.00000000,
+        //  which reads as "the rate is zero" — a lie about money in the one line a
+        //  diagnosis starts from.
+        // =====================================================================
+
         private sealed class ListEnvelope
         {
             [JsonProperty("success")] public bool Success;
-            [JsonProperty("rate")] public double Rate;
+            [JsonProperty("rate")] public double? Rate;
             [JsonProperty("rateSource")] public string RateSource;
             [JsonProperty("prices")] public List<Newtonsoft.Json.Linq.JObject> Prices;
         }
@@ -459,7 +539,7 @@ namespace DeNelle.Wallet
         private sealed class ListResponse
         {
             [JsonProperty("success")] public bool Success;
-            [JsonProperty("rate")] public double Rate;
+            [JsonProperty("rate")] public double? Rate;
             [JsonProperty("rateSource")] public string RateSource;
             [JsonProperty("prices")] public List<PurchaseQuote> Prices;
         }
@@ -577,10 +657,17 @@ namespace DeNelle.Wallet
             }
             int notSellable = 0;
             foreach (var kv in _displayPrices) if (!kv.Value.IsSellable) notSellable++;
+            // ⛔ NO RATE IS A STATE, NOT A ZERO. A flat-priced list carries `rate: null` because none was
+            // used; formatting that through "0.########" prints "$0.00000000/SKR", which reads as a rate
+            // of zero — a false statement about money in the one line a diagnosis starts from. The words
+            // name the pricing MODE instead, which is the fact the reader actually wants.
+            string rateClause = response.Rate.HasValue
+                ? $"at ${response.Rate.Value:0.########}/SKR ({response.RateSource})"
+                : $"at a FLAT SKR price - no market rate was used ({response.RateSource ?? "no source"})";
             // Say BOTH numbers. "12 priced" alone cannot distinguish a healthy shelf from one where
             // every buy button is dead, and that ambiguity is what made the blank-shelf case silent.
             FlowTrace.Step("Store", $"quote list ISSUED: {_displayPrices.Count} priced SKUs on {network} " +
-                                    $"at ${response.Rate:0.########}/SKR ({response.RateSource}); " +
+                                    $"{rateClause}; " +
                                     $"{notSellable} marked NOT sellable to this viewer" +
                                     (notSellable > 0 ? " (cards show the price with a worded reason)." : "."));
             return _displayPrices.Count > 0;

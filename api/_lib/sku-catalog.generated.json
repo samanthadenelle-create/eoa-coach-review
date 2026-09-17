@@ -15,6 +15,7 @@
     "impulsePacks": "Packs 14-25 (tiers 14-25) are the WO-1037 SINGLE-RESOURCE IMPULSE PACKS, authored 2026-08-17 under the owner ruling of 2026-08-16 (option (b), verbatim: \"we should have small instant packs\" / \"small wood only\") and legalised by the WO-947 s12 amendment (the PURCHASE boundary is not the COST boundary). ONE family per harvestable resource (wood, iron, stone, crystals) x small/medium/large. THE LOAD-BEARING RULE: each of these SKUs carries EXACTLY ONE economy key and an EMPTY cosmetics + convenience list. A multi-resource impulse bundle would re-mix the WO-947 cost baskets through the back door and is FORBIDDEN (WO-947 s12c guardrail 1) - asserted headlessly by DeNelle.Editor.Regression.ImpulsePackRegression [impulse-pack], which also pins the $5 PRICE CEILING (owner standing ruling, memory solana-store-early-access-pack-pricing) and the no-structures/no-levels/no-queue-completions rule. AMOUNTS ARE PENDING OWNER RATIFICATION - they were sized against the REAL demand curve read out of building-tiers.json (tier costWood 500..16000, costFood 300..13000, costCrystal 100..4800) and structures-catalog.json (repo.upgradeCost iron 20..1440): small closes the cheapest tier upgrade (the Lumber Mill T1 900-wood shortfall in the screenshot that prompted this WO), medium closes a mid-ladder step, large closes a late step but deliberately NOT the Barracks T6 16000-wood ceiling, so the top pack does not trivialise the game. The optional impulse/impulseResource/impulseSize fields are the machine-readable family tag ShortfallPackOffer resolves on; older packs omit them (absent = false/null, no migration break).",
     "cosmeticGrant": "Every cosmetics SKU is recorded in OwnedItemIds and CosmeticOwnershipService.",
     "shelf": "storeVisible is the SINGLE shelf flag (PackStore.Render line ~327 filters on it). WO-1118 proposed a separate `shelf: live|hidden|legacy` string; that was NOT added, because a second flag over the same decision is duplicated state and the two would drift (see CLAUDE.md S2/S5). storeVisible:false HIDES the row from browse/Buy but KEEPS it loadable, so an existing owner's entitlement still resolves via PackCatalog.Find. Every hidden row carries _hiddenReason.",
+    "skrFlat": "WO-1815 (owner 2026-09-16, verbatim: \"change the store to SKR only and set to flat amounts\" + \"only do straight SKR for SKR build 100 200 300 500 9999\"). skrFlat is the FLAT, market-independent SKR amount for this pack, mapped by USD ANCHOR rung: $1.99 -> 100, $2.99 -> 200, $4.99 -> 300, $9.99 -> 500, $19.99 -> 1000 (this rung is NOT in the owner ladder - her five rungs do not cover the shelf's six USD bands; it is a proposal she can re-rule), $49.99 -> 9999. Packs sharing a usd anchor share an skrFlat, because test/purchases.quote.test.js judges domination AT A SHARED ANCHOR. THE SERVER IS STILL THE PRICE AUTHORITY: this field reaches api/_lib/sku-catalog.generated.json through the verbatim tools/gen-sku-catalog.mjs copy and the server prices from it; the CLIENT never renders it as a price (that is the WO-1158 paid-but-not-granted defect), only as the STRUCK anchor on a sale card and as the regression/capture oracle. pricing.skr is LEFT ALONE - correcting a dead field would create a second opinion about one number. pricing.usd also stays: PurchaseGate.RequiresWallet derives the wallet rule from it and the Google Play + Pi rails price themselves off it.",
     "skrPeg": "ONE peg, no second SKR table: skrPerUsd ~= 12.5. $1.99 -> 25 SKR, $2.99 -> 36 SKR, $4.99 -> 60 SKR, $9.99 -> 120 SKR, $19.99 -> 240 SKR, $49.99 -> 600 SKR (authored figures; 2.99*12.5=37.4 is authored down to 36 to keep the rung spacing even). ⚠ THE '$4.99 CEILING' SENTENCE THAT USED TO END THIS NOTE IS RETIRED (WO-1121, owner 2026-08-21): it was an EARLY-ACCESS constraint that WO-1118 applied as though permanent. The ceiling is $49.99 - the full monetization-v2-spec §4 ladder. What did NOT change: the covenant (convenience and beauty, never combat power) and the $5 ceiling on the IMPULSE family specifically, which ImpulsePackRegression still pins.",
     "convenienceRedeemers": "LEGAL != REDEEMABLE. PackCatalog.ConvenienceAllowList says a kind is covenant-legal; PackCatalog.IsRedeemableConvenience says something in THIS build actually spends it. Live redeemers: lantern-oil-2x/3x-expedition (Lantern.cs); permanent-builder (WO-1253, BuildTimerService.SlotCount reads SKU ownership in OwnedItemIds - NOT a GearInventory count, so re-settle is idempotent); instant-build / instant-repair / harvest-auto-collect / xp-weekend (WO-1246, Village/Monetization/ConvenienceRedeemer.cs). Still vapor as PACK TOKENS: harvest_boost (HarvestBoostService is crystal/ad, not GearInventory), instant_fill_storage, workforce_slot, storage_tier_jump, offline_window_extension. A storeVisible pack may not advertise a kind that is not on the redeemable list.",
     "shelfCurated": "Impulse SKUs are shortfall-only by default (WO-947 s12c.4). shelfCurated:true opts ONE row per resource onto the browsable shelf - owner ruling 2026-08-21, 'Middle - one impulse tier per resource'. Exactly three carry it today: impulse-{wood,iron,stone}-medium. The flag lives here rather than as a SKU list in PackStore.cs so the merchandising choice is re-ruled by editing data. Promoting a fourth row is an OWNER decision, not a code cleanup.",
@@ -23,7 +24,7 @@
     "walletGate": "WO-1121 owner ruling 2026-08-21: a pack priced ABOVE $4.99 requires a CONNECTED, ATTESTED wallet to buy; $4.99 and under stays guest-buyable. A guest save key is guest-local-<sha256(deviceId)> - device-derived, with no proven restore path after a reinstall or a new phone. At $4.99 a lost entitlement is an annoyance; at $49.99 it is a chargeback on a LIVE dApp Store listing. ⛔ THE THRESHOLD IS DERIVED FROM pricing.usd IN CODE (PurchaseGate.WalletRequiredAboveUsd) AND IS DELIBERATELY NOT AUTHORED AS A PER-PACK FIELD - a `requiresWallet` boolean here would be a second copy of a decision the price already makes, and the two would drift. Enforced in PurchaseGate.CanBuy(pack), which BOTH the card builder and the PackStore.Purchase() charge path call, so it cannot be bypassed by a non-UI caller."
   },
   "version": 5,
-  "currencyDisclaimer": "Token price moves with the market.",
+  "currencyDisclaimer": "Priced in SKR - token value moves.",
   "packs": [
     {
       "sku": "hearth-spark",
@@ -37,7 +38,8 @@
         "usd": 4.99,
         "usdc": 4.99,
         "sol": 0.018,
-        "skr": 25
+        "skr": 25,
+        "skrFlat": 300
       },
       "contents": {
         "cosmetics": [],
@@ -65,7 +67,8 @@
         "usd": 4.99,
         "usdc": 4.99,
         "sol": 0.045,
-        "skr": 60
+        "skr": 60,
+        "skrFlat": 300
       },
       "contents": {
         "cosmetics": [],
@@ -94,7 +97,8 @@
         "usd": 9.99,
         "usdc": 9.99,
         "sol": 0.09,
-        "skr": 120
+        "skr": 120,
+        "skrFlat": 500
       },
       "contents": {
         "cosmetics": [],
@@ -130,7 +134,8 @@
         "usd": 19.99,
         "usdc": 19.99,
         "sol": 0.18,
-        "skr": 240
+        "skr": 240,
+        "skrFlat": 1000
       },
       "contents": {
         "cosmetics": [],
@@ -166,7 +171,8 @@
         "usd": 49.99,
         "usdc": 49.99,
         "sol": 0.45,
-        "skr": 600
+        "skr": 600,
+        "skrFlat": 9999
       },
       "contents": {
         "cosmetics": [],
@@ -201,7 +207,8 @@
         "usd": 9.99,
         "usdc": 9.99,
         "sol": 0.09,
-        "skr": 120
+        "skr": 120,
+        "skrFlat": 500
       },
       "contents": {
         "cosmetics": [
@@ -239,7 +246,8 @@
         "usd": 9.99,
         "usdc": 9.99,
         "sol": 0.09,
-        "skr": 120
+        "skr": 120,
+        "skrFlat": 500
       },
       "contents": {
         "cosmetics": [
@@ -277,7 +285,8 @@
         "usd": 4.99,
         "usdc": 4.99,
         "sol": 0.045,
-        "skr": 60
+        "skr": 60,
+        "skrFlat": 300
       },
       "contents": {
         "cosmetics": [
@@ -318,7 +327,8 @@
         "usd": 4.99,
         "usdc": 4.99,
         "sol": 0.045,
-        "skr": 60
+        "skr": 60,
+        "skrFlat": 300
       },
       "contents": {
         "cosmetics": [],
@@ -355,7 +365,8 @@
         "usd": 1.99,
         "usdc": 1.99,
         "sol": 0.018,
-        "skr": 25
+        "skr": 25,
+        "skrFlat": 100
       },
       "contents": {
         "cosmetics": [],
@@ -386,7 +397,8 @@
         "usd": 19.99,
         "usdc": 19.99,
         "sol": 0.18,
-        "skr": 240
+        "skr": 240,
+        "skrFlat": 1000
       },
       "contents": {
         "cosmetics": [
@@ -432,7 +444,8 @@
         "usd": 9.99,
         "usdc": 9.99,
         "sol": 0.09,
-        "skr": 120
+        "skr": 120,
+        "skrFlat": 500
       },
       "contents": {
         "cosmetics": [
@@ -470,7 +483,8 @@
         "usd": 9.99,
         "usdc": 9.99,
         "sol": 0.09,
-        "skr": 120
+        "skr": 120,
+        "skrFlat": 500
       },
       "contents": {
         "cosmetics": [
@@ -508,7 +522,8 @@
         "usd": 19.99,
         "usdc": 19.99,
         "sol": 0.18,
-        "skr": 240
+        "skr": 240,
+        "skrFlat": 1000
       },
       "contents": {
         "cosmetics": [
@@ -555,7 +570,8 @@
         "usd": 1.99,
         "usdc": 1.99,
         "sol": 0.018,
-        "skr": 25
+        "skr": 25,
+        "skrFlat": 100
       },
       "contents": {
         "cosmetics": [],
@@ -582,7 +598,8 @@
         "usd": 2.99,
         "usdc": 2.99,
         "sol": 0.027,
-        "skr": 36
+        "skr": 36,
+        "skrFlat": 200
       },
       "contents": {
         "cosmetics": [],
@@ -610,7 +627,8 @@
         "usd": 4.99,
         "usdc": 4.99,
         "sol": 0.045,
-        "skr": 60
+        "skr": 60,
+        "skrFlat": 300
       },
       "contents": {
         "cosmetics": [],
@@ -634,7 +652,8 @@
         "usd": 1.99,
         "usdc": 1.99,
         "sol": 0.018,
-        "skr": 25
+        "skr": 25,
+        "skrFlat": 100
       },
       "contents": {
         "cosmetics": [],
@@ -661,7 +680,8 @@
         "usd": 2.99,
         "usdc": 2.99,
         "sol": 0.027,
-        "skr": 36
+        "skr": 36,
+        "skrFlat": 200
       },
       "contents": {
         "cosmetics": [],
@@ -689,7 +709,8 @@
         "usd": 4.99,
         "usdc": 4.99,
         "sol": 0.045,
-        "skr": 60
+        "skr": 60,
+        "skrFlat": 300
       },
       "contents": {
         "cosmetics": [],
@@ -716,7 +737,8 @@
         "usd": 1.99,
         "usdc": 1.99,
         "sol": 0.018,
-        "skr": 25
+        "skr": 25,
+        "skrFlat": 100
       },
       "contents": {
         "cosmetics": [],
@@ -746,7 +768,8 @@
         "usd": 2.99,
         "usdc": 2.99,
         "sol": 0.027,
-        "skr": 36
+        "skr": 36,
+        "skrFlat": 200
       },
       "contents": {
         "cosmetics": [],
@@ -777,7 +800,8 @@
         "usd": 4.99,
         "usdc": 4.99,
         "sol": 0.045,
-        "skr": 60
+        "skr": 60,
+        "skrFlat": 300
       },
       "contents": {
         "cosmetics": [],
@@ -801,7 +825,8 @@
         "usd": 1.99,
         "usdc": 1.99,
         "sol": 0.018,
-        "skr": 25
+        "skr": 25,
+        "skrFlat": 100
       },
       "contents": {
         "cosmetics": [],
@@ -825,7 +850,8 @@
         "usd": 2.99,
         "usdc": 2.99,
         "sol": 0.027,
-        "skr": 36
+        "skr": 36,
+        "skrFlat": 200
       },
       "contents": {
         "cosmetics": [],
@@ -849,7 +875,8 @@
         "usd": 4.99,
         "usdc": 4.99,
         "sol": 0.045,
-        "skr": 60
+        "skr": 60,
+        "skrFlat": 300
       },
       "contents": {
         "cosmetics": [],
@@ -915,7 +942,8 @@
         "usd": 9.99,
         "usdc": 9.99,
         "sol": 0.09,
-        "skr": 120
+        "skr": 120,
+        "skrFlat": 500
       },
       "contents": {
         "cosmetics": [],
