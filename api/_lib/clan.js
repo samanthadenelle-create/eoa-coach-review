@@ -96,6 +96,15 @@ const TAG_MAX = 5;
 const LEADER = 'leader';
 const MEMBER = 'member';
 
+// ── WO-1851 (clan WO-8): join-policy vocabulary ──────────────────────────────
+// Owner ruling 2026-09-17: exactly two values. 'invite' (join requires the clan's
+// code — the current, unchanged server default) and 'open' (anyone may join without
+// a code — NOT built on this endpoint yet; storing it correctly now avoids a second
+// migration once join-without-code ships). Mirrors clans_join_policy_valid in
+// 20260917_0033_clan_join_policy_check.sql, and the two must never disagree.
+const JOIN_POLICY_INVITE = 'invite';
+const JOIN_POLICY_OPEN = 'open';
+
 // ── WO-1847 (clan step 4): message reporting ─────────────────────────────────
 // Cherry owns message persistence, so a reported id is an OPAQUE EXTERNAL STRING.
 // clan_reports.message_id is TEXT with no foreign key (migration 0031 says why), which
@@ -130,6 +139,7 @@ const ClanCode = {
     LEADER_MUST_TRANSFER: 'leader_must_transfer',
     CODE_UNAVAILABLE:     'CLAN_CODE_UNAVAILABLE',
     IDENTITY_MISSING:     'CLAN_IDENTITY_MISSING',
+    BAD_JOIN_POLICY:      'CLAN_BAD_JOIN_POLICY',     // 400 — not 'invite' or 'open'
 
     // ── WO-1846: the role-change refusals ────────────────────────────────────
     // ⛔ TARGET_NOT_IN_CLAN IS DELIBERATELY ONE CODE FOR TWO FACTS: "no such wallet
@@ -199,6 +209,22 @@ function normalizeCode(raw) {
         return { ok: false, code: ClanCode.BAD_CODE };
     }
     return { ok: true, value: code };
+}
+
+/**
+ * Normalise an optional join-policy field: trim, lowercase, default to 'invite' when
+ * absent or blank. Anything other than the two owner-ruled values is a BAD REQUEST —
+ * never silently coerced to the default, which would let a client sending a stale
+ * value (e.g. the client's old 'open'/'closed' vocabulary) believe its request
+ * succeeded as something other than what it asked for.
+ */
+function normalizeJoinPolicy(raw) {
+    if (raw == null || raw === '') return { ok: true, value: JOIN_POLICY_INVITE };
+    const value = String(raw).trim().toLowerCase();
+    if (value !== JOIN_POLICY_INVITE && value !== JOIN_POLICY_OPEN) {
+        return { ok: false, code: ClanCode.BAD_JOIN_POLICY };
+    }
+    return { ok: true, value: value };
 }
 
 /**
@@ -499,15 +525,22 @@ async function kickMember(sql, callerWallet, rawTarget) {
  * straight into the clan_members insert, so there is no window in which a clan exists
  * with no leader and no way for a crash between two calls to leave one behind.
  *
+ * @param {*} [rawJoinPolicy]  optional body.joinPolicy — 'invite' (default) or 'open'.
+ *                              ⚠ 'open' is stored as requested, but join-without-code
+ *                              SERVER BEHAVIOR is NOT built by this ticket (WO-1851):
+ *                              joinClan below still requires the invite code regardless
+ *                              of the clan's stored join_policy. Deliberate, known gap.
  * @returns {Promise<{ok:true, clanId:string, code:string, name:string, tag:string,
  *                    role:string, joinPolicy:string, createdAt:*}
  *                 | {ok:false, status:number, code:string, detail?:object}>}
  */
-async function createClan(sql, wallet, rawName, rawTag) {
+async function createClan(sql, wallet, rawName, rawTag, rawJoinPolicy) {
     const name = normalizeName(rawName);
     if (!name.ok) return { ok: false, status: 400, code: name.code };
     const tag = normalizeTag(rawTag);
     if (!tag.ok) return { ok: false, status: 400, code: tag.code };
+    const joinPolicy = normalizeJoinPolicy(rawJoinPolicy);
+    if (!joinPolicy.ok) return { ok: false, status: 400, code: joinPolicy.code };
 
     // Courtesy read (see property 2 in the header): gives the friendly refusal without
     // burning a code draw. The index is still the authority.
@@ -522,8 +555,8 @@ async function createClan(sql, wallet, rawName, rawTag) {
         try {
             rows = await sql`
                 WITH new_clan AS (
-                    INSERT INTO clans (code, name, tag, created_by_wallet)
-                    VALUES (${code}, ${name.value}, ${tag.value}, ${wallet})
+                    INSERT INTO clans (code, name, tag, join_policy, created_by_wallet)
+                    VALUES (${code}, ${name.value}, ${tag.value}, ${joinPolicy.value}, ${wallet})
                     RETURNING id, code, name, tag, join_policy, created_at
                 ), new_member AS (
                     INSERT INTO clan_members (clan_id, wallet, role)
@@ -861,6 +894,101 @@ async function reportMessage(sql, wallet, rawClanId, rawMessageId) {
     return { ok: true, reportId: String(r.id), clanId: String(r.clan_id) };
 }
 
+// ── WO-1850 (clan WO-7): the leaderboard ────────────────────────────────────
+
+// Mirrors api/leaderboard/get.js's own clamp — same DEFAULT/MAX shape, kept as a
+// SEPARATE pair of constants because WO-7's acceptance criteria pin this endpoint's
+// numbers (default 50, max 100) independently of whatever the unrelated leaderboard
+// ever does with its own. Copying the values is fine; sharing the constant across two
+// unrelated features is how one change silently moves the other's contract.
+const LEADERBOARD_DEFAULT_LIMIT = 50;
+const LEADERBOARD_MAX_LIMIT = 100;
+
+/**
+ * Clamp a requested top-N to [1, LEADERBOARD_MAX_LIMIT], defaulting when absent or
+ * not a finite number. Never throws — a garbage ?limit= is a clamp, not a 400,
+ * matching api/leaderboard/get.js's own clampInt so the two routes read the same to
+ * a client that queries both.
+ */
+function clampLeaderboardLimit(raw) {
+    const v = parseInt(raw, 10);
+    if (!Number.isFinite(v)) return LEADERBOARD_DEFAULT_LIMIT;
+    return Math.min(LEADERBOARD_MAX_LIMIT, Math.max(1, v));
+}
+
+/**
+ * WO-1850 (clan WO-7). Rank every clan by an HONEST-TODAY placeholder metric and
+ * return the top `limit`.
+ *
+ * ⚠ THE METRIC IS A NAMED PLACEHOLDER, NOT THE SPEC'S REAL ONE — read this before
+ * "fixing" it. `docs/SKR Integtration.md:525-526` (the WO-7 draft) names the ranking
+ * basis as `clan_vigil_weight` (WO-9: percentage-of-SKR-staked × tenure, summed across
+ * members), with an explicit fallback: `member_count × days_since_created`, "so WO-7
+ * can ship before WO-9; once WO-9 lands, the metric switches." `clan_vigil_weight`
+ * does NOT exist anywhere in this schema or codebase (grepped at source, 2026-09-17 —
+ * zero hits under api/ or in any migration) and WO-9 is unbuilt, so this function
+ * implements ONLY the fallback. Wiring the real Vigil weight in is WO-1852+
+ * territory (it depends on WO-1851's gate being open first, per the numbering
+ * banner's own dependency chain) and is explicitly OUT of this ticket's scope.
+ *
+ * ⛔ THE SHAPE IS BUILT SO THE FUTURE SWAP IS A ONE-COLUMN CHANGE. Every caller-facing
+ * name is already metric-neutral (`metric`, never `memberDays` or similar), and the
+ * ranking column lives in exactly one place — the `ranked` CTE's `days_since_created`
+ * and the outer SELECT's `metric` expression. Swapping in a real `clan_vigil_weight`
+ * column later means replacing the `member_count * days_since_created` expression in
+ * ONE SELECT with a reference to that column (or a join onto whatever WO-9 lands it
+ * in); the route, the response shape, the ORDER BY direction and the tie-break all
+ * stay exactly as they are.
+ *
+ * ⛔ NEVER SELECT A WALLET COLUMN HERE. `clans.created_by_wallet` and every
+ * `clan_members.wallet` sit one join away and are never referenced — a leaderboard
+ * is a public-shaped ranking surface, and the standing rule elsewhere in this API
+ * (api/admin/stats.js) is that a wallet address is never rendered where a rank or a
+ * count would do.
+ *
+ * Ties are broken by `created_at ASC` (older clans rank higher on ties) per the WO's
+ * own acceptance criterion — and it is also what keeps the order fully deterministic:
+ * two clans created in the same instant would otherwise sort non-reproducibly, the
+ * same "unordered pick" hazard leaveAsLeader's ORDER BY exists to close.
+ *
+ * @param {Function} sql   neon(...) tagged-template client
+ * @param {number} limit   already clamped by clampLeaderboardLimit
+ * @returns {Promise<Array<{rank:number, clanId:string, name:string, tag:string,
+ *                          metric:number, memberCount:number}>>}
+ */
+async function getLeaderboard(sql, limit) {
+    const rows = await sql`
+        WITH ranked AS (
+            SELECT
+                c.id AS clan_id,
+                c.name,
+                c.tag,
+                c.created_at,
+                (SELECT COUNT(*) FROM clan_members m WHERE m.clan_id = c.id)::int AS member_count,
+                GREATEST(EXTRACT(EPOCH FROM (NOW() - c.created_at)) / 86400.0, 0)::float8 AS days_since_created
+            FROM clans c
+        )
+        SELECT
+            ROW_NUMBER() OVER (
+                ORDER BY (member_count * days_since_created) DESC, created_at ASC
+            ) AS rank,
+            clan_id, name, tag, member_count,
+            (member_count * days_since_created) AS metric
+        FROM ranked
+        ORDER BY (member_count * days_since_created) DESC, created_at ASC
+        LIMIT ${limit}
+    `;
+    if (!rows || rows.length === 0) return [];
+    return rows.map((r) => ({
+        rank: Number(r.rank),
+        clanId: String(r.clan_id),
+        name: r.name,
+        tag: r.tag,
+        metric: Number(r.metric),
+        memberCount: Number(r.member_count),
+    }));
+}
+
 module.exports = {
     CODE_ALPHABET,
     CODE_RE,
@@ -873,6 +1001,10 @@ module.exports = {
     normalizeTag,
     normalizeCode,
     generateClanCode,
+    // ── WO-1851 (clan WO-8) — join-policy vocabulary ─────────────────────────
+    JOIN_POLICY_INVITE,
+    JOIN_POLICY_OPEN,
+    normalizeJoinPolicy,
     uniqueViolation,
     isMembershipCollision,
     isCodeCollision,
@@ -895,4 +1027,9 @@ module.exports = {
     normalizeClanId,
     normalizeMessageId,
     reportMessage,
+    // ── WO-1850 (clan WO-7) — leaderboard ───────────────────────────────────
+    LEADERBOARD_DEFAULT_LIMIT,
+    LEADERBOARD_MAX_LIMIT,
+    clampLeaderboardLimit,
+    getLeaderboard,
 };
