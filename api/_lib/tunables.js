@@ -219,6 +219,13 @@ const TUNABLE_KEYS = [
     // consumer clamps it tighter (25..400) than the roster knobs for that reason.
     { key: 'town.regenSuppressSecondsAfterHit', kind: 'int' },
     { key: 'town.regenPctDuringWave', kind: 'int' },
+    //   town.captureSalvagePct - build default 50 (WO-1872, owner ruling 2026-09-18). The
+    //     captured Iron Bastion now converts as the DESTROYED camp: its walls and watchtowers
+    //     arrive as rubble and the player clears each ruin for salvage worth this percent of
+    //     that structure's catalog build cost. 0 = clearing pays nothing; 100 = a full refund.
+    //     Clamped 0..100 at the consumer, deliberately not 0..1000: a ruin that paid more than
+    //     it cost to build would turn the perimeter into a resource printer.
+    { key: 'town.captureSalvagePct', kind: 'int' },
     { key: 'wave.hpGrowthPctPerWave', kind: 'int' },
     { key: 'wave.dmgGrowthPctPerWave', kind: 'int' },
     { key: 'wave.maxCountPct', kind: 'int' },
