@@ -36,6 +36,14 @@
 'use strict';
 
 const skr = require('./skr-staking');
+// ⛔ WO-1854, AND IT IS PURELY ADDITIVE — the work order's non-scope says so outright
+// ("does NOT replace WO-1852 — that stays the single-wallet path"). Nothing above this
+// line changed behaviour: a clan with no registered vault produces exactly the response
+// it produced before, with `vault: null` alongside it. clan-vaults.js requires
+// ./wallet-auth and ./genesis-token and NOTHING from this file, so there is no cycle, and
+// it does NOT load the Squads SDK on this path (see its loadSquads note — 300 ms of
+// module init is not a cost a clan's Vigil read may pay).
+const vaults = require('./clan-vaults');
 
 /**
  * How many member stake reads run at once.
@@ -146,7 +154,14 @@ async function readClanVigil(sql, clanId, opts) {
     const options = opts || {};
     const roster = await readClanVigilRoster(sql, clanId);
     if (roster.length === 0) {
-        return { members: [], vigilWeight: 0, degraded: false, memberCount: 0 };
+        // ⛔ AN EMPTY ROSTER STILL READS THE VAULT. A clan whose last member left could
+        // still have a registered vault row (clan_vaults cascades on the CLAN, not on
+        // membership), and returning early without looking would report `hardware_backed:
+        // false` for a vault that is perfectly intact — a wrong answer dressed as a cheap
+        // one. Costs one query in the case nobody hits.
+        const empty = await readCollective(sql, clanId, options);
+        return Object.assign(
+            { members: [], vigilWeight: 0, degraded: false, memberCount: 0 }, empty);
     }
 
     const limit = Number.isFinite(options.concurrency) && options.concurrency > 0
@@ -205,11 +220,58 @@ async function readClanVigil(sql, clanId, opts) {
         });
     }
 
-    return {
+    const collective = await readCollective(sql, clanId, options);
+
+    return Object.assign({
         members: members,
         vigilWeight: weight,
         degraded: anyDegraded,
         memberCount: roster.length,
+    }, collective);
+}
+
+/**
+ * WO-1854. The clan's COLLECTIVE Vigil, bolted on beside the per-member one.
+ *
+ * ⛔ IT CAN NEVER FAIL THE READ IT IS ATTACHED TO. This function has no throwing path:
+ * readCollectiveVigil is written not to throw, and the try/catch is here anyway because
+ * "an RPC failure is a 200 with a flag" (this file's own ruling, and /api/clan/vigil's
+ * acceptance criterion 4) has to keep holding after a feature was added underneath it. A
+ * clan with no vault, a clan_vaults table that has not been migrated yet, and a chain we
+ * cannot read are three DIFFERENT states and all three are a 200.
+ *
+ * ⛔ THE TWO WEIGHTS ARE NEVER ADDED TOGETHER, AND MUST NOT BE. `vigilWeight` is the sum
+ * of what the MEMBERS hold individually; `collectiveVigilWeight` is what the VAULT holds
+ * jointly. Summing them would double-count nothing today (they are disjoint positions) but
+ * would silently start double-counting the moment a member stakes through the vault they
+ * also signed for — and it would collapse the one distinction the whole feature is about:
+ * "several individual stakes added up" versus "a genuinely collectively-owned thing"
+ * (docs/SKR_ALANIA_ROOT_NETWORK_EXPLORATION_2026-09-17.md's own framing of the mechanic).
+ * Two numbers, reported separately, forever.
+ */
+async function readCollective(sql, clanId, options) {
+    let r;
+    try {
+        r = await vaults.readCollectiveVigil(sql, clanId, options);
+    } catch (err) {
+        console.warn('[clan-vigil] collective Vigil unavailable — continuing (fail-open):', err.message);
+        return { vault: null, collectiveVigilWeight: 0, hardwareBacked: false, collectiveDegraded: true };
+    }
+    if (!r || !r.vault) {
+        return {
+            vault: null,
+            collectiveVigilWeight: 0,
+            // ⛔ NO VAULT IS NOT HARDWARE-BACKED. There is nothing to be backed BY, and a
+            // truthy default here would hand the status to every clan in the game.
+            hardwareBacked: false,
+            collectiveDegraded: !!(r && r.degraded),
+        };
+    }
+    return {
+        vault: r.vault,
+        collectiveVigilWeight: r.vault.collectiveVigilWeight,
+        hardwareBacked: r.vault.hardwareBacked === true,
+        collectiveDegraded: r.degraded === true,
     };
 }
 
@@ -251,12 +313,41 @@ async function stampMemberVigil(sql, wallet) {
  * caller, and never let a wallet reach an ERROR body — the route answers refusals with
  * quietFail's code+ref and nothing else.
  */
+/**
+ * WO-1854 ADDS ONLY TOP-LEVEL FIELDS, AND THE PER-MEMBER OBJECT IS UNTOUCHED ON PURPOSE.
+ *
+ * ⛔ test/clan-vigil.test.js asserts the member object's key set with a `deepEqual` over
+ * `Object.keys(...).sort()`. Adding a field there would break WO-1852's own test — which is
+ * the correct signal, because a SIGNER is not a MEMBER: the two sets overlap by accident at
+ * best (a vault signer need not be in the clan, and a member need not be a signer), so
+ * hanging vault status off a roster row would state a relationship that does not exist.
+ *
+ * ⚠ BOTH SPELLINGS OF THE TWO NEW FIELDS ARE EMITTED, and that is not indecision. This
+ *   endpoint's established convention is snake_case (WO-1852 chose it because that work
+ *   order named its fields that way, and a client branches on those exact strings). WO-1854
+ *   names ITS fields in camelCase, and its acceptance criterion is written as a literal —
+ *   "returns `hardwareBacked: true`". Emitting one and not the other makes a stated
+ *   acceptance criterion false or breaks the file's convention. So both exist, with the
+ *   snake_case pair as the convention-carrying names and the camelCase pair as the work
+ *   order's — exactly the precedent skr-staking set with `totalRaw` / `balanceRaw`
+ *   ("the spec's field name exists and means what its test plan implies"). ⛔ They are
+ *   assigned from ONE source expression each, so they cannot drift apart.
+ */
 function toWire(vigil) {
+    const hardwareBacked = vigil.hardwareBacked === true;
+    const collectiveWeight = Number(vigil.collectiveVigilWeight) || 0;
     return {
         ok: true,
         vigil_weight: vigil.vigilWeight,
         member_count: vigil.memberCount,
         degraded: vigil.degraded,
+        // ── WO-1854, additive ────────────────────────────────────────────────
+        collective_vigil_weight: collectiveWeight,
+        collectiveVigilWeight: collectiveWeight,
+        hardware_backed: hardwareBacked,
+        hardwareBacked: hardwareBacked,
+        collective_degraded: vigil.collectiveDegraded === true,
+        vault: vaultToWire(vigil.vault),
         members: vigil.members.map((m) => ({
             wallet: m.wallet,
             role: m.role,
@@ -268,8 +359,43 @@ function toWire(vigil) {
     };
 }
 
+/**
+ * WO-1854. The vault's wire shape, or null.
+ *
+ * ⛔ THE SIGNER LIST IS RENDERED, AND THIS IS THE ONE SURFACE WHERE THAT IS ALLOWED, for
+ * exactly the reason toWire's own note gives for the roster: the caller has PROVEN
+ * membership of this clan, and its vault's signer set is clan-internal information they are
+ * entitled to. It is NOT the leaderboard, which renders no wallet at any depth.
+ *
+ * ⛔ AND THE VERIFIED COUNT IS RENDERED WITHOUT THE MINTS. `verified_signer_count` says how
+ * many signers hold a Genesis Token; `sgt_mint` is never emitted anywhere. A mint is a
+ * DEVICE identifier — one per physical phone — and publishing it, even to a clanmate, hands
+ * out a stable cross-wallet fingerprint for a person. Nothing in this feature needs it
+ * outside the database.
+ */
+function vaultToWire(vault) {
+    if (!vault) return null;
+    return {
+        vault_address: vault.vaultAddress,
+        multisig_address: vault.multisigAddress,
+        vault_index: vault.vaultIndex,
+        threshold: vault.threshold,
+        signer_count: vault.signerCount,
+        verified_signer_count: vault.verifiedSignerCount,
+        signer_wallets: vault.signerWallets,
+        percent_staked: vault.percentStaked != null ? vault.percentStaked : 0,
+        tenure_seconds: vault.tenureSeconds != null ? vault.tenureSeconds : 0,
+        collective_vigil_weight: vault.collectiveVigilWeight != null ? vault.collectiveVigilWeight : 0,
+        hardware_backed: vault.hardwareBacked === true,
+        degraded: vault.degraded === true,
+        verified_at: vault.verifiedAt,
+    };
+}
+
 module.exports = {
     VIGIL_READ_CONCURRENCY,
+    readCollective,        // ← WO-1854
+    vaultToWire,           // ← WO-1854
     readClanVigilRoster,
     readClanVigil,
     stampMemberVigil,

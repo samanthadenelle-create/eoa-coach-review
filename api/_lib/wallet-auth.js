@@ -958,6 +958,148 @@ async function stampFirstSeenStaked(sql, wallet) {
     }
 }
 
+// ── WO-1854 (clan WO-11): THE SEEKER GENESIS TOKEN BINDING ───────────────────
+/**
+ * BIND THIS WALLET TO THE SEEKER GENESIS TOKEN IT HOLDS, or say why it cannot be.
+ *
+ * ⛔ IT PROVES NOTHING ABOUT IDENTITY AND MUST NOT PRETEND TO — the work order's own
+ * first clause ("assumes the caller already proved wallet control via SIWS or session").
+ * It answers "what does address X hold" for an X somebody else already proved. Called
+ * from api/clan/vault/register.js AFTER beginClanRequest has verified the caller, and
+ * called for wallets that are NOT the caller (a vault's other signers), which is exactly
+ * why it cannot be allowed to look like an authentication step.
+ *
+ * ⛔ IT WRITES wallet_identity FOR A WALLET THAT MAY NEVER HAVE AUTHENTICATED, AND THAT
+ *    IS A FIRST FOR THIS FILE. Every other writer here is touchWalletIdentity on the
+ *    proven wallet rail. A vault signer, though, is an address the LEADER named: a real
+ *    Seeker owner who may have no row at all. The work order says "set sgt_mint /
+ *    sgt_verified_at on the current wallet's row" — but an UPDATE would move ZERO ROWS
+ *    for such a signer and the binding would silently not persist, which would leave the
+ *    reuse check with nothing to compare against and let a SECOND clan bind the same
+ *    device. So this is an INSERT … ON CONFLICT (wallet) DO UPDATE.
+ *    ⚠ api/_lib/clan-http.js's header states "ONLY the wallet rail ever writes that
+ *      table"; that sentence is now narrower than the truth. It is NOT edited here (that
+ *      file belongs to another lane this session) — it is flagged in this ticket's
+ *      implementation record for the lead, per CLAUDE.md §15.
+ *
+ * ⛔ AND `sgt_reused` IS DECIDED BY THE DATABASE, NOT BY A PRE-SELECT. Migration 0036
+ *    adds `wallet_identity_sgt_mint_unique` (partial, WHERE sgt_mint IS NOT NULL), so the
+ *    write is attempted and a 23505 IS the refusal. A read-then-write would let two
+ *    wallets verifying the same mint at the same moment both see "nobody has it" and both
+ *    succeed — the exact Sybil shape verifyGuest's honesty note describes, applied to a
+ *    device instead of a player id. The SELECT below runs only to LABEL the refusal, and
+ *    as the fallback for a deployment where 0036 has not been applied yet. Same division
+ *    of labour as consumeNonce: the write is the authority, the read is the diagnosis.
+ *
+ * NEVER THROWS. Every outcome is `{ok:false, reason}` or `{ok:true, mint}`.
+ *
+ * @param {Function} sql     neon(...) tagged-template client
+ * @param {string}   wallet  a base58 wallet whose control the CALLER has already proven
+ *                           (or, for a vault signer, an address named by a proven Leader)
+ * @param {{rpcUrl?:string, nowSeconds?:number, noCache?:boolean}} [opts] test seams only
+ * @returns {Promise<{ok:true, mint:string, memberNumber?:number|null, alreadyBound?:boolean}
+ *                 | {ok:false, reason:string, detail?:object}>}
+ */
+async function verifyGenesisToken(sql, wallet, opts) {
+    const address = wallet != null ? String(wallet).trim() : '';
+    if (!isWalletId(address)) {
+        return { ok: false, reason: 'bad_wallet', detail: { len: address.length } };
+    }
+
+    let found;
+    try {
+        // Lazily required for the same reason stampFirstSeenStaked requires skr-staking
+        // lazily: this is the only place wallet-auth reaches the chain for an SGT, and a
+        // module-load failure there must not take down the auth gate for every route.
+        // eslint-disable-next-line global-require
+        const sgt = require('./genesis-token');
+        found = await sgt.findSgtMint(address, opts || {});
+    } catch (err) {
+        console.warn('[wallet-auth] Genesis Token read unavailable:', err && err.message ? err.message : String(err));
+        return { ok: false, reason: 'rpc_unavailable', detail: { threw: true } };
+    }
+
+    if (!found || found.ok !== true) {
+        // Pass the reason THROUGH unchanged. `no_sgt` (we looked, they hold none) and
+        // `rpc_unavailable` (we could not look) are the two answers the work order's
+        // acceptance criteria distinguish, and flattening them here would be the exact
+        // collapse genesis-token.js's header forbids.
+        return {
+            ok: false,
+            reason: found && found.reason ? found.reason : 'rpc_unavailable',
+            detail: found && found.detail ? found.detail : {},
+        };
+    }
+
+    const mint = String(found.mint);
+
+    let wrote;
+    try {
+        wrote = await sql`
+            INSERT INTO wallet_identity (wallet, first_seen_at, last_seen_at, sgt_mint, sgt_verified_at)
+            VALUES (${address}, NOW(), NOW(), ${mint}, NOW())
+            ON CONFLICT (wallet) DO UPDATE SET
+                sgt_mint = ${mint},
+                sgt_verified_at = NOW(),
+                last_seen_at = NOW()
+            RETURNING sgt_mint, sgt_verified_at
+        `;
+    } catch (err) {
+        // ⛔ THE UNIQUE VIOLATION IS THE ANSWER, NOT AN ERROR. 23505 on
+        // wallet_identity_sgt_mint_unique means this mint is already bound to a DIFFERENT
+        // wallet — one device, one wallet.
+        if (err && (err.code === '23505' || /duplicate key|unique constraint/i.test(String(err.message || '')))) {
+            return { ok: false, reason: 'sgt_reused', detail: await describeReuse(sql, mint, address) };
+        }
+        console.warn('[wallet-auth] sgt_mint write failed:', err && err.message ? err.message : String(err));
+        return { ok: false, reason: 'write_failed', detail: { dbError: true } };
+    }
+
+    // THE FALLBACK PATH FOR AN UNMIGRATED DEPLOYMENT. Without 0036's index the write above
+    // cannot fail, so the reuse has to be detected after the fact — and it is detected,
+    // rather than assumed away, because a missing migration must degrade the RACE-PROOFING
+    // and not the RULE itself. (Deploy order has burned this repo before: see renewSession's
+    // note on the missing signed_at column.)
+    const other = await describeReuse(sql, mint, address);
+    if (other && other.otherWallet) {
+        return { ok: false, reason: 'sgt_reused', detail: other };
+    }
+
+    const row = wrote && wrote[0] ? wrote[0] : null;
+    return {
+        ok: true,
+        mint: mint,
+        memberNumber: found.memberNumber != null ? found.memberNumber : null,
+        verifiedAt: row ? row.sgt_verified_at : null,
+        via: found.via || null,
+        fromCache: found.fromCache === true,
+    };
+}
+
+/**
+ * WHO ELSE holds this mint bound. Diagnosis only — it never grants and never refuses on
+ * its own, and it must never throw: a failure to LABEL a refusal cannot be allowed to
+ * turn into a different refusal.
+ *
+ * The other wallet's address IS returned, and that is deliberate and scoped: the caller
+ * (api/clan/vault/register.js) puts it nowhere near a response body. The work order
+ * permits naming the OFFENDING SIGNER a Leader supplied, which is a different wallet and
+ * a different question.
+ */
+async function describeReuse(sql, mint, currentWallet) {
+    try {
+        const rows = await sql`
+            SELECT wallet FROM wallet_identity
+            WHERE sgt_mint = ${mint} AND wallet <> ${currentWallet}
+            LIMIT 1
+        `;
+        if (rows && rows.length > 0) return { otherWallet: String(rows[0].wallet), mint: mint };
+        return { otherWallet: null, mint: mint };
+    } catch (err) {
+        return { otherWallet: null, mint: mint, classifyFailed: true };
+    }
+}
+
 /**
  * WO-1852. THE SWITCH ON THE AUTH-PATH VIGIL PROBE.
  *
@@ -1237,6 +1379,8 @@ module.exports = {
     touchWalletIdentity,  // ← WO-1844: fail-open identity tracking. Decides nothing.
     stampFirstSeenStaked,      // ← WO-1852: begins a wallet's Vigil, once. Fail-open.
     vigilStampOnAuthEnabled,   // ← WO-1852: the auth-path probe switch (default ON)
+    verifyGenesisToken,   // ← WO-1854: binds a wallet to its Seeker Genesis Token mint.
+                          //   NOT an authentication step — see its header.
     touchClanRate,        // ← WO-1846: per-wallet, per-action clan budgets. Fail-open.
     authenticate,          // ← self-service routes (own row): save, load, generate, tower-swap
     authenticateGranting,  // ← ANY route that hands out value: referral claim, entitlements, …
