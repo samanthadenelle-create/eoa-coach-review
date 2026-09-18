@@ -30,6 +30,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using DeNelle.Core.Backend;
 using DeNelle.Core.Diagnostics;
+using DeNelle.Core.UI;   // LocalizedText - WO-1857; every swap status line already had a swap.* row
 
 namespace DeNelle.Web3
 {
@@ -131,7 +132,7 @@ namespace DeNelle.Web3
         public void ApplyInitialiseBaseline()
         {
             ClearQuoteDisplay();
-            SetStatus("Enter an amount to see the rate.", isError: false);
+            SetStatus(new LocalizedText("swap.statusEnter").Resolve(), isError: false);
             SetConfirmEnabled(false);
         }
 
@@ -146,12 +147,12 @@ namespace DeNelle.Web3
 
             if (!decimal.TryParse(newValue, out decimal amount) || amount <= 0)
             {
-                SetStatus("Enter a valid amount.", isError: false);
+                SetStatus(new LocalizedText("swap.status_invalid_amount").Resolve(), isError: false);
                 return;
             }
 
             _currentInput = amount;
-            SetStatus("Getting rate...", isError: false);
+            SetStatus(new LocalizedText("swap.statusLoading").Resolve(), isError: false);
 
             // Cancel any in-flight debounce and start a new one.
             if (_debounceCts != null)
@@ -185,7 +186,7 @@ namespace DeNelle.Web3
             if (quote == null)
             {
                 FlowTrace.Warn("Swap", $"DebounceQuote: GetQuoteAsync returned null for {_currentInput} USDC — rate unavailable.");
-                SetStatus("Could not fetch rate. Check connection.", isError: true);
+                SetStatus(new LocalizedText("swap.statusError").Resolve(), isError: true);
                 return;
             }
 
@@ -194,7 +195,9 @@ namespace DeNelle.Web3
 
             bool walletConnected = !string.IsNullOrEmpty(_backend.ConnectedWalletKey);
             SetConfirmEnabled(walletConnected);
-            SetStatus(walletConnected ? string.Empty : "Connect your wallet to swap.", isError: false);
+            SetStatus(walletConnected
+                ? string.Empty
+                : new LocalizedText("swap.statusConnect").Resolve(), isError: false);
         }
 
         // ── Confirm — the MONEY PATH (guards preserved VERBATIM) ─────────────
@@ -218,12 +221,12 @@ namespace DeNelle.Web3
             if (string.IsNullOrEmpty(walletKey))
             {
                 FlowTrace.Warn("Swap", "OnConfirmTapped: no connected wallet — swap blocked (player NOT charged).");
-                SetStatus("Connect your wallet to swap.", isError: true);
+                SetStatus(new LocalizedText("swap.statusConnect").Resolve(), isError: true);
                 return;
             }
 
             SetConfirmEnabled(false);
-            SetStatus("Sending to wallet for approval...", isError: false);
+            SetStatus(new LocalizedText("swap.statusSigning").Resolve(), isError: false);
 
             bool ok;
             try
@@ -236,7 +239,7 @@ namespace DeNelle.Web3
                 // Fail loudly (outcome indeterminate = possible partial/charged swap), and re-enable.
                 FlowTrace.Fail("Swap",
                     $"OnConfirmTapped: ExecuteSwapAsync THREW: {ex.GetType().Name}: {ex.Message} — swap outcome indeterminate.");
-                SetStatus("Swap failed. Please try again.", isError: true);
+                SetStatus(new LocalizedText("swap.statusFailed").Resolve(), isError: true);
                 SetConfirmEnabled(true);
                 return;
             }
@@ -244,7 +247,7 @@ namespace DeNelle.Web3
             if (!ok)
             {
                 FlowTrace.Fail("Swap", "OnConfirmTapped: ExecuteSwapAsync returned FALSE — swap failed.");
-                SetStatus("Swap failed. Please try again.", isError: true);
+                SetStatus(new LocalizedText("swap.statusFailed").Resolve(), isError: true);
                 SetConfirmEnabled(true);
             }
             else
