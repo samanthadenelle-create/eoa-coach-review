@@ -852,33 +852,133 @@ async function touchClanRate(sql, wallet, action) {
  *    deploy-order failure that 500'd every wallet session mint for a week over
  *    auth_sessions.identity_kind (see test/migrations.runner.test.js's header).
  *
- * ⛔ AND IT WRITES ONLY TWO COLUMNS. `first_seen_staked_at`, `sgt_mint` and
- *    `sgt_verified_at` exist in the table for later steps in this chain (the Vigil read,
- *    Genesis Token binding). Nothing here may set, read or reason about them.
+ * ⚠ THE PARAGRAPH THAT STOOD HERE UNTIL 2026-09-17 IS NOW PARTLY FALSE, and is corrected
+ *   rather than left to mislead (CLAUDE.md §15). It read: "AND IT WRITES ONLY TWO COLUMNS.
+ *   `first_seen_staked_at`, `sgt_mint` and `sgt_verified_at` … Nothing here may set, read or
+ *   reason about them." WO-1852 (clan WO-9) is that later step, and it lands HERE by the work
+ *   order's own instruction: this function may now also stamp `first_seen_staked_at`, once,
+ *   on the first observation of a staked wallet. `sgt_mint` and `sgt_verified_at` remain
+ *   untouched and the original rule still holds for them.
+ *
+ * ⛔ THE STAMP IS WRITTEN WITH POSTGRES' CLOCK AND IS IDEMPOTENT BY ITS WHERE CLAUSE.
+ *    `SET first_seen_staked_at = NOW() … WHERE first_seen_staked_at IS NULL` — so two
+ *    concurrent requests cannot produce two different origins, and a later request can never
+ *    move a tenure that has already begun. NOW() rather than a Node timestamp because a
+ *    serverless function's clock is not the one `NOW() - first_seen_staked_at` is later
+ *    measured against (the same honest-clock rule touchClanRate's retryAfter follows).
+ *
+ * ⛔ AND IT COSTS RPC CALLS ON THE AUTH PATH, WHICH IS WHY IT HAS A SWITCH. See
+ *    vigilStampOnAuthEnabled below. Nothing about the stamp may make this function throw,
+ *    slower to fail, or capable of denying a request: every branch is inside the same
+ *    never-throw envelope, and a Vigil read that fails leaves the column NULL and says
+ *    nothing to the caller.
  *
  * @param {Function} sql     neon(...) tagged-template client
  * @param {string}   wallet  a wallet whose ownership has ALREADY been proven
- * @returns {Promise<{ok:true, firstSeenAt?:string, lastSeenAt?:string, degraded?:boolean}>} always ok
+ * @returns {Promise<{ok:true, firstSeenAt?:string, lastSeenAt?:string,
+ *                    firstSeenStakedAt?:string, stakedStamped?:boolean, degraded?:boolean}>} always ok
  */
 async function touchWalletIdentity(sql, wallet) {
+    let row = null;
     try {
         const rows = await sql`
             INSERT INTO wallet_identity (wallet, first_seen_at, last_seen_at)
             VALUES (${wallet}, NOW(), NOW())
             ON CONFLICT (wallet) DO UPDATE SET
                 last_seen_at = NOW()
-            RETURNING first_seen_at, last_seen_at
+            RETURNING first_seen_at, last_seen_at, first_seen_staked_at
         `;
-        const row = rows && rows[0] ? rows[0] : null;
-        return {
-            ok: true,
-            firstSeenAt: row ? row.first_seen_at : null,
-            lastSeenAt: row ? row.last_seen_at : null,
-        };
+        row = rows && rows[0] ? rows[0] : null;
     } catch (err) {
         console.warn('[wallet-auth] wallet_identity unavailable — continuing (fail-open):', err.message);
         return { ok: true, degraded: true };
     }
+
+    const base = {
+        ok: true,
+        firstSeenAt: row ? row.first_seen_at : null,
+        lastSeenAt: row ? row.last_seen_at : null,
+        firstSeenStakedAt: row ? row.first_seen_staked_at : null,
+    };
+
+    // Already stamped, or the stamp is switched off: nothing to read, no RPC spent.
+    // The already-stamped early return is what keeps the cost bounded to wallets that
+    // have never been seen staked — a staker pays for the probe exactly once, ever.
+    if (!row || row.first_seen_staked_at != null || !vigilStampOnAuthEnabled()) {
+        return base;
+    }
+
+    return Object.assign(base, await stampFirstSeenStaked(sql, wallet));
+}
+
+/**
+ * WO-1852. Observe the wallet's stake and, if any of its SKR is staked, begin its Vigil.
+ *
+ * Split out of touchWalletIdentity so the hot path above reads as the two-column UPSERT it
+ * has always been, and so this — the part that touches the network — is one testable unit.
+ * NEVER THROWS, NEVER DENIES: every failure is a logged warning and a NULL column.
+ */
+async function stampFirstSeenStaked(sql, wallet) {
+    let vigil;
+    try {
+        // Required lazily: this is the only place wallet-auth touches the chain, and a
+        // module-load failure in the staking reader must not take down the auth gate.
+        // eslint-disable-next-line global-require
+        const skr = require('./skr-staking');
+        vigil = await skr.getStakedPercentage(wallet);
+    } catch (err) {
+        console.warn('[wallet-auth] Vigil read unavailable — first_seen_staked_at left NULL:',
+            err && err.message ? err.message : String(err));
+        return { stakedStamped: false, vigilDegraded: true };
+    }
+
+    // ⛔ ONLY A TRUSTWORTHY, POSITIVE READ STAMPS. `degraded` means we could not read the
+    //    chain, and `percent > 0` on a degraded read is impossible by construction — but the
+    //    check is explicit anyway, because beginning someone's tenure is not reversible and
+    //    an outage must never be the thing that starts it.
+    if (!vigil || vigil.degraded === true || !(vigil.percent > 0)) {
+        return { stakedStamped: false, vigilDegraded: !!(vigil && vigil.degraded) };
+    }
+
+    try {
+        const rows = await sql`
+            UPDATE wallet_identity
+            SET first_seen_staked_at = NOW()
+            WHERE wallet = ${wallet} AND first_seen_staked_at IS NULL
+            RETURNING first_seen_staked_at
+        `;
+        const stamped = !!(rows && rows.length > 0);
+        return {
+            stakedStamped: stamped,
+            firstSeenStakedAt: stamped ? rows[0].first_seen_staked_at : null,
+        };
+    } catch (err) {
+        console.warn('[wallet-auth] first_seen_staked_at stamp failed — continuing (fail-open):', err.message);
+        return { stakedStamped: false, degraded: true };
+    }
+}
+
+/**
+ * WO-1852. THE SWITCH ON THE AUTH-PATH VIGIL PROBE.
+ *
+ * ⚠ READ THE COST BEFORE CHANGING THE DEFAULT. touchWalletIdentity runs on EVERY proven
+ * wallet-rail request, and a wallet that has never staked keeps `first_seen_staked_at` NULL
+ * forever — so for that wallet the check never stops being reached. One probe is THREE RPC
+ * round-trips (two getAccountInfo + one getTokenAccountsByOwner), and the client syncs on the
+ * order of every 8 s (see GUEST_WINDOW_SECONDS' note above for the client's own cadence).
+ * skr-staking's 60-second per-wallet cache bounds this to at most one probe per wallet per
+ * minute per warm instance — but that is still ~60 probes/hour/active non-staked wallet, i.e.
+ * ~180 RPC calls, paid on an endpoint nobody has provisioned yet (see mainnetRpcUrl's TODO).
+ *
+ * DEFAULT ON, because the work order specifies the behaviour and a switch that defaults to
+ * doing nothing would have shipped the feature dark. Turning it OFF does not disable the
+ * Vigil: /api/clan/vigil stamps the column itself when it reads a member's stake, so tenure
+ * still begins on first observation — just on a clan read rather than on every auth.
+ */
+function vigilStampOnAuthEnabled() {
+    const v = process.env.VIGIL_STAMP_ON_AUTH;
+    if (v == null || v === '') return true;             // default ON
+    return !/^(0|false|off|no)$/i.test(String(v).trim());
 }
 
 /**
@@ -1135,6 +1235,8 @@ module.exports = {
     verifyGuest,
     verifyAndConsume,   // back-compat
     touchWalletIdentity,  // ← WO-1844: fail-open identity tracking. Decides nothing.
+    stampFirstSeenStaked,      // ← WO-1852: begins a wallet's Vigil, once. Fail-open.
+    vigilStampOnAuthEnabled,   // ← WO-1852: the auth-path probe switch (default ON)
     touchClanRate,        // ← WO-1846: per-wallet, per-action clan budgets. Fail-open.
     authenticate,          // ← self-service routes (own row): save, load, generate, tower-swap
     authenticateGranting,  // ← ANY route that hands out value: referral claim, entitlements, …

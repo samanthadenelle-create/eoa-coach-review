@@ -146,6 +146,18 @@ const CACHE_TTL_SECONDS = 300;
 const MANUAL_REFRESH_COOLDOWN_SECONDS = 60;
 
 /**
+ * WO-1852 (clan WO-9). The Vigil read's own cache window, per the work order's
+ * "Cache 60 seconds per wallet".
+ *
+ * ⛔ IT IS A SECOND TTL, NOT A SECOND CACHING MECHANISM. The work order says to
+ * reuse this file's existing freshness rule rather than invent one, so the rule
+ * itself now lives in exactly one function — isFreshWithin — and both
+ * isCacheFresh (300 s, Heartbound) and the Vigil (60 s) delegate to it. Two
+ * numbers, one comparison; a fix to the comparison fixes both.
+ */
+const VIGIL_CACHE_TTL_SECONDS = 60;
+
+/**
  * ⛔ TODO — OWNER DECISION REQUIRED (WO-1674, ruling 2026-09-10 13:10).
  *
  * The ruling says an RPC outage falls back to "last-known verified state with a
@@ -617,16 +629,332 @@ function resolveServedState(fresh, stored, nowSeconds) {
     };
 }
 
+/**
+ * THE ONE FRESHNESS COMPARISON IN THIS FILE (generalised for WO-1852).
+ *
+ * Extracted so the Heartbound cache (300 s) and the Vigil cache (60 s) are two
+ * NUMBERS rather than two implementations — the work order's "reuse the existing
+ * pattern rather than inventing a second caching mechanism", taken literally.
+ * Behaviour for the 300 s caller is byte-identical to the original inline form,
+ * including the falsy-timestamp guard (a NULL verified_at is never fresh).
+ */
+function isFreshWithin(atSeconds, nowSeconds, ttlSeconds) {
+    if (!atSeconds) return false;
+    return (nowSeconds - atSeconds) < ttlSeconds;
+}
+
 /** Is a stored snapshot still inside the 5-minute cache (spec :157)? */
 function isCacheFresh(verifiedAtSeconds, nowSeconds) {
-    if (!verifiedAtSeconds) return false;
-    return (nowSeconds - verifiedAtSeconds) < CACHE_TTL_SECONDS;
+    return isFreshWithin(verifiedAtSeconds, nowSeconds, CACHE_TTL_SECONDS);
 }
 
 /** Has the 60-second manual-refresh cooldown (spec :159) elapsed? */
 function manualRefreshAllowed(lastAttemptSeconds, nowSeconds) {
     if (!lastAttemptSeconds) return true;
     return (nowSeconds - lastAttemptSeconds) >= MANUAL_REFRESH_COOLDOWN_SECONDS;
+}
+
+// =============================================================================
+//  WO-1852 (clan WO-9) — THE VIGIL READ: what FRACTION of a wallet's SKR is staked
+// -----------------------------------------------------------------------------
+// ⭐ THE DENOMINATOR IS PROVEN AGAINST MAINNET, AND THE WORK ORDER'S OWN FORMULA
+//    IS NOT WHAT IT LOOKS LIKE. WO-1852 §1 says `percent = stakedRaw / balanceRaw`.
+//    Read as "staked divided by the wallet's SPL balance" that formula is a
+//    DIVIDE BY ZERO for every real staker, because STAKING MOVES THE TOKENS OUT
+//    OF THE WALLET:
+//
+//      StakeConfig.stake_vault (offset 73) = 8isViKbwhuhFhsv2t8vaFL74pKCqaFPQXo1KkeQwZbB8
+//      — read from the chain 2026-09-17, and it is the LARGEST SKR token account
+//      in existence (5,019,397,938.846808 SKR), owned by the StakeConfig PDA
+//      4HQy82s9CHTv1GsYKnANHMiHfhcqesYkK6sB3RDSYyqw, not by any player.
+//
+//    Five real top stakers were then read end to end at slot ~447954300:
+//      DLQtTaJKEU8yCxC2boPMdttJf3BWDNzFbJXGei8upiUZ  1,140,806,412 staked / 0 liquid
+//      FLyuVULVz1yFdtCnyMexct2weP6VWuuqrWLawC22Jt8X     57,040,320 staked / 0 liquid
+//      JBjKnMrQkGYtCK4d1X8fECg1w8jY8HD98cp7oXCeApNn     57,040,320 staked / 0 liquid
+//      6kMxQyLFybR1sDrjwWM1UftYZBpWbma3x1M5Y2P9UBAQ     57,040,320 staked / 0 liquid
+//      9hmq4gxbMcZsdPDfRQ5fKY8nwLTS7oC685T9a14mNcMQ     57,040,320 staked / 0 liquid
+//    Every one of them has a ZERO SPL balance. staked/balance is undefined for all
+//    five; staked/(staked+balance) is 1.0, which is the true and useful answer.
+//
+//    The work order's own TEST PLAN settles the intent and agrees: "Wallet A stakes
+//    100 SKR, holds 200 total -> percent_staked = 0.5" is only satisfiable if the
+//    denominator is TOTAL HOLDINGS (100 staked + 100 liquid), not the liquid
+//    balance alone. So `balanceRaw` in the spec means TOTAL, and that is what is
+//    returned — under the name `totalRaw`, with `balanceRaw` kept as an alias so
+//    the spec's field name exists and means what its test plan implies.
+//
+// ⛔ AND THE BALANCE READ SUMS EVERY TOKEN ACCOUNT, NEVER JUST THE ATA. Proven on
+//    the same run: owner 4HQy82s9CHTv1GsYKnANHMiHfhcqesYkK6sB3RDSYyqw holds TWO
+//    SKR accounts — 5BxcwkSrbZs4RT1we2xABuJ9XDyqT1pfehZVGaZ5qgFF (26 SKR) and
+//    8isViKbwhuhFhsv2t8vaFL74pKCqaFPQXo1KkeQwZbB8 (5,019,397,722 SKR). An
+//    ATA-only read would have reported one of those and been wrong by eight orders
+//    of magnitude. A wallet may hold arbitrarily many accounts for one mint; the
+//    only correct balance is the sum.
+//
+// ⛔ UNSTAKING SKR COUNTS IN THE DENOMINATOR, AND THE DISCRIMINATING CASE IS
+//    WRITTEN DOWN SO NOBODY HAS TO GUESS LATER: a wallet with 50 active, 50
+//    unstaking and 0 liquid reads 0.5 with unstaking included and 1.0 with it
+//    excluded. Included is the honest "share of your SKR that is on Vigil" —
+//    tokens mid-cooldown are still the player's SKR and are provably NOT actively
+//    staked (see this file's header on `shares` already excluding them). The
+//    NUMERATOR is activeStakedRaw alone, unchanged.
+// =============================================================================
+
+/**
+ * A wallet's TOTAL SKR held in SPL token accounts, in base units.
+ *
+ * ⭐ THE CALL SHAPE IS MEASURED, NOT REMEMBERED. Executed against mainnet
+ * 2026-09-17 (apiVersion 4.3.0-alpha.2, slot 447954298):
+ *
+ *   getTokenAccountsByOwner
+ *     [ <owner>, { mint: SKR_MINT }, { encoding: 'jsonParsed', commitment: 'confirmed' } ]
+ *   -> { context: { slot }, value: [ { pubkey, account: { data: { parsed: { info: {
+ *          mint, owner, state, tokenAmount: { amount, decimals, uiAmount, uiAmountString }
+ *        } } } } } ] }
+ *
+ * The three answers that decide the error handling, all observed rather than assumed:
+ *   • an owner holding no SKR -> HTTP 200 with `value: []`  (a REAL zero, not a fault)
+ *   • a malformed owner       -> HTTP 200 with JSON-RPC error -32602 "Invalid param"
+ *   • the mint filter really filters (the same owner returned 0 USDC accounts)
+ *
+ * `amount` is read as a STRING into BigInt. Never Number: total supply is
+ * 10,599,697,046.828418 SKR = 1.0599e16 base units, already past 2^53.
+ */
+async function readSkrBalance(url, walletAddress) {
+    const r = await rpcCall(url, 'getTokenAccountsByOwner', [
+        walletAddress,
+        { mint: SKR_MINT },
+        { encoding: 'jsonParsed', commitment: 'confirmed' },
+    ]);
+    if (!r.ok) return r;
+
+    const context = r.result && r.result.context;
+    const slot = context && Number.isFinite(context.slot) ? context.slot : null;
+    const value = r.result && r.result.value;
+
+    // An ABSENT value is not an empty one. `[]` is the proven shape for "holds
+    // none"; anything else means the response was not what this function reads,
+    // and reporting that as a zero balance would fabricate a 100%-staked player.
+    if (!Array.isArray(value)) return { ok: false, reason: 'invalid_response', slot: slot };
+
+    let total = 0n;
+    for (const entry of value) {
+        const info = entry && entry.account && entry.account.data
+            && entry.account.data.parsed && entry.account.data.parsed.info;
+        // jsonParsed silently degrades to base64 when the parser does not know an
+        // account, so a missing `parsed` is a real possibility and NOT a zero.
+        if (!info || !info.tokenAmount || typeof info.tokenAmount.amount !== 'string') {
+            return { ok: false, reason: 'invalid_response', slot: slot };
+        }
+        // Belt and braces: the RPC already filtered by mint, so a foreign mint here
+        // means the filter did not apply and the sum would be of the wrong token.
+        if (info.mint && info.mint !== SKR_MINT) {
+            return { ok: false, reason: 'invalid_response', slot: slot };
+        }
+        try {
+            total += BigInt(info.tokenAmount.amount);
+        } catch (_) {
+            return { ok: false, reason: 'invalid_response', slot: slot };
+        }
+    }
+    return { ok: true, balanceRaw: total, accountCount: value.length, slot: slot };
+}
+
+/**
+ * PERCENT AS AN EXACT SCALED INTEGER, then once as a float at the edge.
+ *
+ * Returned in PARTS PER MILLION so the ratio itself never passes through a
+ * double: `Number(active)/Number(total)` loses bits above 2^53 and both operands
+ * routinely exceed it (see readSkrBalance). Nothing in this file produces a float
+ * except the final, deliberate division by 1e6.
+ */
+function vigilPercentPpm(activeStakedRaw, totalRaw) {
+    if (totalRaw === null || totalRaw === undefined) return null;
+    const total = BigInt(totalRaw);
+    if (total <= 0n) return 0n;
+    const active = BigInt(activeStakedRaw || 0n);
+    if (active <= 0n) return 0n;
+    // A player cannot be more than wholly staked; clamp rather than emit >1, which
+    // could only arise from a torn read across two RPC calls at different slots.
+    const ppm = (active * 1000000n) / total;
+    return ppm > 1000000n ? 1000000n : ppm;
+}
+
+/** parts-per-million BigInt -> the 0..1 float the wire carries. Never NaN. */
+function ppmToFraction(ppm) {
+    if (ppm === null || ppm === undefined) return 0;
+    return Number(ppm) / 1000000;
+}
+
+/**
+ * THE 60-SECOND PER-WALLET CACHE (work order acceptance criterion 5).
+ *
+ * ⚠ IN-PROCESS AND THEREFORE PER-INSTANCE, STATED PLAINLY RATHER THAN IMPLIED.
+ * On Vercel each warm lambda holds its own Map, so "two calls within 60 seconds
+ * produce exactly one RPC round-trip per wallet" holds WITHIN a warm instance and
+ * not across a cold start or a second region. That is the honest bound.
+ *
+ * ⛔ IT DELIBERATELY DOES NOT WRITE `skr_stake_snapshots`. That table's
+ * `verified_at` advancing is the mechanism behind Heartbound's grace-window ruling
+ * (api/heartbound/status.js:191-196): a Vigil read touching it would silently
+ * change how Heartbound behaves during an RPC outage — a different feature's
+ * fairness decision, altered as a side effect. The Vigil keeps its own memory.
+ *
+ * ⛔ FAILURES ARE CACHED TOO, ON PURPOSE. A clan roster is read member by member;
+ * with failures uncached, a dead RPC would cost (members x 3) round-trips on every
+ * single request and turn an outage into a self-inflicted stampede.
+ */
+const vigilCache = new Map();
+
+/** Test seam. Never called by production code. */
+function _resetVigilCache() {
+    vigilCache.clear();
+}
+
+/**
+ * WHAT FRACTION OF THIS WALLET'S SKR IS ACTIVELY STAKED. Read-only, never throws.
+ *
+ * Takes a WALLET ADDRESS and nothing else, exactly as verifyStake does — product
+ * rule 7 is enforced by the shape of the signature, not by a check inside it.
+ * `opts` carries only test seams (rpcUrl, nowSeconds, noCache).
+ *
+ * ⛔ NULL IS NEVER QUIETLY A ZERO. A wallet that genuinely holds no SKR and stakes
+ * none reads `percent: 0` with `degraded: false` — a real zero. Anything we could
+ * not read reads `percent: 0` with `degraded: true` and NULL amounts, because a
+ * fabricated zero is indistinguishable from a real one and that confusion is the
+ * whole reason this module exists (see resolveServedState's note). A caller that
+ * wants to know whether the number can be trusted reads `degraded`.
+ *
+ * @param {string} walletAddress base58 wallet (the authenticated player id)
+ * @param {{rpcUrl?:string, nowSeconds?:number, noCache?:boolean}} [opts] test seams only
+ */
+async function getStakedPercentage(walletAddress, opts) {
+    const options = opts || {};
+    const nowSeconds = Number.isFinite(options.nowSeconds)
+        ? options.nowSeconds
+        : Math.floor(Date.now() / 1000);
+
+    const key = typeof walletAddress === 'string' ? walletAddress : '';
+    if (!options.noCache) {
+        const hit = vigilCache.get(key);
+        if (hit && isFreshWithin(hit.atSeconds, nowSeconds, VIGIL_CACHE_TTL_SECONDS)) {
+            return Object.assign({}, hit.result, { fromCache: true });
+        }
+    }
+
+    const result = await readVigilUncached(walletAddress, options, nowSeconds);
+    // `atSeconds` must be truthy for isFreshWithin to ever call it fresh, and a
+    // nowSeconds of 0 is only reachable from a test seam — clamp rather than
+    // silently create an entry that can never be a hit.
+    vigilCache.set(key, { atSeconds: nowSeconds || 1, result: result });
+    return result;
+}
+
+/** The uncached body of getStakedPercentage. Never throws. */
+async function readVigilUncached(walletAddress, options, nowSeconds) {
+    const empty = {
+        walletAddress: walletAddress || null,
+        activeStakedRaw: null,
+        unstakingRaw: null,
+        liquidRaw: null,
+        totalRaw: null,
+        balanceRaw: null,        // ← the work order's field name; an alias of totalRaw
+        percentPpm: null,
+        percent: 0,
+        verificationStatus: VerificationStatus.INVALID_RESPONSE,
+        errorCode: null,
+        sourceSlot: null,
+        degraded: true,
+        fromCache: false,
+    };
+
+    if (!walletAddress || typeof walletAddress !== 'string') {
+        return Object.assign(empty, {
+            verificationStatus: VerificationStatus.WALLET_NOT_LINKED,
+            errorCode: 'wallet_missing',
+        });
+    }
+
+    const url = options.rpcUrl || mainnetRpcUrl();
+    if (!url) {
+        return Object.assign(empty, {
+            verificationStatus: VerificationStatus.RPC_UNAVAILABLE,
+            errorCode: 'rpc_url_unset',
+        });
+    }
+
+    // Both reads at once: the stake side is two getAccountInfo calls and the
+    // balance side is one getTokenAccountsByOwner, and they do not depend on each
+    // other. Sequentially that is three round-trips of latency per member of a
+    // clan roster; in parallel it is two.
+    let stake;
+    let balance;
+    try {
+        [stake, balance] = await Promise.all([
+            verifyStake(walletAddress, { rpcUrl: url, nowSeconds: nowSeconds }),
+            readSkrBalance(url, walletAddress),
+        ]);
+    } catch (err) {
+        // verifyStake and readSkrBalance are both written never to throw, so this
+        // is unreachable by design — kept because "never throws" is a promise this
+        // function makes to an auth path (touchWalletIdentity) that must not 500.
+        return Object.assign(empty, {
+            verificationStatus: VerificationStatus.INVALID_RESPONSE,
+            errorCode: 'vigil_read_threw',
+        });
+    }
+
+    const stakeReadable = stake && (stake.verificationStatus === VerificationStatus.VERIFIED ||
+                                    stake.verificationStatus === VerificationStatus.NO_STAKE);
+
+    if (!stakeReadable) {
+        return Object.assign(empty, {
+            userStakeAddress: stake ? stake.userStakeAddress : null,
+            verificationStatus: stake ? stake.verificationStatus : VerificationStatus.INVALID_RESPONSE,
+            errorCode: stake ? stake.errorCode : 'stake_unreadable',
+            sourceSlot: stake ? stake.sourceSlot : null,
+        });
+    }
+
+    // A ratio needs BOTH halves. A readable stake with an unreadable balance is
+    // still degraded: we know the numerator and cannot state the fraction.
+    if (!balance || !balance.ok) {
+        return Object.assign(empty, {
+            userStakeAddress: stake.userStakeAddress,
+            activeStakedRaw: stake.activeStakedRaw,
+            unstakingRaw: stake.unstakingRaw,
+            verificationStatus: balance && balance.reason === 'rpc_unavailable'
+                ? VerificationStatus.RPC_UNAVAILABLE
+                : VerificationStatus.INVALID_RESPONSE,
+            errorCode: 'skr_balance_' + ((balance && balance.reason) || 'unavailable'),
+            sourceSlot: stake.sourceSlot,
+        });
+    }
+
+    const activeRaw = BigInt(stake.activeStakedRaw || 0n);
+    const unstakingRaw = BigInt(stake.unstakingRaw || 0n);
+    const liquidRaw = BigInt(balance.balanceRaw || 0n);
+    const totalRaw = activeRaw + unstakingRaw + liquidRaw;
+    const ppm = vigilPercentPpm(activeRaw, totalRaw);
+
+    return {
+        walletAddress: walletAddress,
+        userStakeAddress: stake.userStakeAddress,
+        activeStakedRaw: activeRaw,
+        unstakingRaw: unstakingRaw,
+        liquidRaw: liquidRaw,
+        totalRaw: totalRaw,
+        balanceRaw: totalRaw,     // the spec's name for the denominator
+        splAccountCount: balance.accountCount,
+        percentPpm: ppm,
+        percent: ppmToFraction(ppm),
+        verificationStatus: stake.verificationStatus,
+        errorCode: null,
+        sourceSlot: stake.sourceSlot != null ? stake.sourceSlot : balance.slot,
+        degraded: false,
+        fromCache: false,
+    };
 }
 
 module.exports = {
@@ -642,6 +970,7 @@ module.exports = {
     STAKE_CONFIG_SIZE,
     CACHE_TTL_SECONDS,
     MANUAL_REFRESH_COOLDOWN_SECONDS,
+    VIGIL_CACHE_TTL_SECONDS,   // ← WO-1852
     DEFAULT_STALE_GRACE_SECONDS,
     VerificationStatus,
     ALL_STATUSES,
@@ -654,9 +983,16 @@ module.exports = {
     deriveUserStakePda,
     resolveServedState,
     isCacheFresh,
+    isFreshWithin,             // ← WO-1852: the ONE freshness comparison
     manualRefreshAllowed,
     staleGraceSeconds,
     mainnetRpcUrl,
+    // pure — WO-1852 Vigil arithmetic
+    vigilPercentPpm,
+    ppmToFraction,
     // network
     verifyStake,
+    readSkrBalance,            // ← WO-1852
+    getStakedPercentage,       // ← WO-1852
+    _resetVigilCache,          // ← WO-1852 test seam
 };
