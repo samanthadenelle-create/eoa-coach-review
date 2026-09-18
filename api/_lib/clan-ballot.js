@@ -1,15 +1,6 @@
 // =============================================================================
 // api/_lib/clan-ballot.js — WO-1853 (clan WO-10). The perk ballot.
 // -----------------------------------------------------------------------------
-// ⛔ WO-2031 (owner decisions 2026-09-24) CHANGED THE SHAPE BELOW: no one proposes any
-// more (POST /propose is 410 Gone); the ballot OPENS ON ITS OWN each epoch (rollEpoch,
-// lazily on read) with the fixed three-banner slate in api/_lib/order-perk-catalog.js;
-// a vote is FINAL (upsertVote is insert-only; a second vote is 409
-// CLAN_BALLOT_ALREADY_VOTED); and ONE perk is active per Order, each epoch's winner
-// replacing the last. The tier/propose prose that follows describes the WO-1853 design and
-// is kept for the parts that still hold (the weighted plurality, the turnout bands, the
-// Postgres clock); PERK_OPTIONS is retired from every player-facing path.
-//
 // A clan proposes a perk at a TIER its Vigil has earned, its members vote, and when
 // the epoch boundary passes the ballot closes itself on the next request. Two rules
 // decide the outcome and they are INDEPENDENT — the owner's ruling of 2026-09-17,
@@ -52,8 +43,6 @@
 
 const { readClanVigil } = require('./clan-vigil');
 const { uniqueViolation, UUID_RE } = require('./clan');
-const orderPerks = require('./order-perk-catalog');
-const { readTunables } = require('./tunables');
 
 // ── Machine codes ────────────────────────────────────────────────────────────
 // Prefixed CLAN_BALLOT_ so no code here can ever be confused with one of ClanCode's,
@@ -68,36 +57,8 @@ const BallotCode = {
     NOT_FOUND:          'CLAN_BALLOT_NOT_FOUND',           // 404 — no such ballot in YOUR clan
     ALREADY_OPEN:       'CLAN_BALLOT_ALREADY_OPEN',        // 409 — one open ballot per clan
     CLOSED:             'CLAN_BALLOT_CLOSED',              // 409 — voting on a ballot that has closed
-    ALREADY_VOTED:      'CLAN_BALLOT_ALREADY_VOTED',       // 409 — WO-2031: votes are final, one per member
-    PROPOSE_GONE:       'CLAN_BALLOT_PROPOSE_GONE',        // 410 — WO-2031: no one proposes; ballots auto-open
     WEIGHT_UNAVAILABLE: 'CLAN_BALLOT_WEIGHT_UNAVAILABLE',  // 503 — the chain read degraded; ask again
 };
-
-// ── WO-2031: the automatic epoch ballot ─────────────────────────────────────
-//
-// Owner decisions 2026-09-24 (WO-2029, "All five answers confirmed"): the ballot OPENS ON
-// ITS OWN each epoch with the fixed three-banner slate (api/_lib/order-perk-catalog.js);
-// no one proposes; a vote is final; ONE active perk per Order, each epoch's winner
-// replacing the last; perks are visual + narrative only (ruling 3). The fixed vote SKIPS
-// the Vigil > 0 tier check for opening (`meetsTier` is never consulted by rollEpoch),
-// because otherwise a new Order would never get a vote.
-
-/**
- * `clan_ballots.tier` is NOT NULL and CHECKed 1..5 (migration 0035). An automatic ballot
- * has no tier — its slate is the fixed catalog — so it carries tier 1 to satisfy the
- * constraint and nothing reads it as a tier gate. The ballot's identity is its
- * `epoch_index`; `kind: 'epoch'` on the wire says so.
- */
-const AUTO_BALLOT_TIER = 1;
-
-/**
- * `clan_perks`' primary key is (clan_id, tier). Every epoch perk is written into ONE slot,
- * tier 0 — outside the retired 1..5 stat ladder, and clan_perks carries no tier CHECK — so
- * a later winner lands on the same row and REPLACES it by construction. The partial unique
- * index clan_perks_one_active_per_clan (migration 0044) states the one-active rule as a
- * database fact on top of that.
- */
-const EPOCH_PERK_SLOT = 0;
 
 // ── The epoch ────────────────────────────────────────────────────────────────
 
@@ -120,160 +81,6 @@ const EPOCH_ANCHOR_ISO = '2026-01-01T00:00:00Z';
 
 /** 48 hours, the owner-ruled cadence. */
 const EPOCH_SECONDS = 172800;
-
-// ── The close-early override (Command Center, server-only) ──────────────────
-//
-// Owner-delegated design, 2026-09-30: a PERMANENT Command Center lever that lets an admin
-// close an Order ballot early WITHOUT touching the epoch anchor. It is the serverOnly
-// tunable `order.epochCloseEarlySeconds` (api/_lib/tunables.js), written only through
-// api/admin/ops.js tunable.set / tunable.clear (both audited: recordOpsWrite writes an
-// `admin_ops_write` analytics row, and client_tunables carries updated_by / updated_at).
-//
-// ⛔ WHAT IT CHANGES, AND ONLY THIS: a ballot's EXPIRY. An open ballot expires at its
-// EFFECTIVE close instead of its stored `closes_at`:
-//
-//     offset  = 0   ->  effective = closes_at                         (byte-identical to before)
-//     offset  > 0   ->  effective = GREATEST(closes_at - offset,
-//                                            LEAST(closes_at, opened_at + MIN_OPEN))
-//
-// The epoch index math (readEpoch, epochIndexFromTimestamp) does NOT read it, the stored
-// `closes_at` is never rewritten by it, and rollEpoch's "the index never goes backwards"
-// target rule is untouched. So CLEARING the row is safe by construction: a ballot the
-// offset already closed stays closed (closed_at is set; nothing reopens a closed row), and
-// a still-open ballot simply falls back to its stored `closes_at`.
-//
-// ⛔ WHY NEGATIVE VALUES CLAMP TO 0 (a deliberate deviation from "clamp to +-one epoch").
-// normalizeValue accepts any signed 9-digit int, so a negative can land in the table. A
-// negative offset would HOLD a ballot open past its stored close — and the admin demo lever
-// api/admin/order-epoch-force.js ends an epoch by writing `closes_at = NOW()` and relies on
-// the very next read seeing `expired`. Under a negative offset that force would silently do
-// nothing for |offset| seconds. "Close early" never means "close later"; the read clamps to
-// 0..EPOCH_CLOSE_EARLY_MAX_SECONDS.
-
-/** The serverOnly tunable key. The Command Center card and the allowlist name it. */
-const EPOCH_CLOSE_EARLY_KEY = 'order.epochCloseEarlySeconds';
-
-/** Resting state: no override. The ONE home of the default (tunable-manifest.js references it). */
-const EPOCH_CLOSE_EARLY_DEFAULT_SECONDS = 0;
-
-/**
- * Strictly LESS than one epoch. An offset of a whole epoch or more would make every ballot's
- * effective close land at or before the previous boundary — i.e. at or before it opened —
- * which the MIN_OPEN floor would then turn into a 60-second ballot every time.
- */
-const EPOCH_CLOSE_EARLY_MAX_SECONDS = EPOCH_SECONDS - 1;
-
-/**
- * The shortest time an open ballot stays open while an offset is pulling its close earlier.
- *
- * WHY THE FLOOR EXISTS: a ballot INSERTED with less time left than the offset — the first
- * ballot of an Order founded late in an epoch, or the one rollEpoch opens right after an
- * early settle when the offset is large — would otherwise have an effective close at or
- * before its own opened_at. The next read would see it expired with zero votes, settle it
- * `no_votes`, switch the Order's active banner OFF (applyEpochOutcome -> deactivatePerksBefore)
- * and spend an epoch index — a ballot nobody could ever have voted on. The floor keeps it
- * open for at least this long. It is a guard against a zero-length ballot, NOT a player-
- * fairness window; 60 s is enough for the request that opened it and its client's re-read to
- * see it open. LEAST(closes_at, ...) keeps the floor from ever pushing a close LATER than the
- * stored one, so a forced close (closes_at = NOW()) still expires immediately.
- */
-const EPOCH_MIN_OPEN_SECONDS = 60;
-
-/**
- * The live close-early offset from a readTunables() result. PURE. Mirrors
- * realm-stake.js resolveThreshold: `source` is 'tunable' | 'default', `why` names the reason.
- *
- * FAIL-SAFE TO 0: an unreadable table, an absent row or a junk value all answer the default,
- * which is "no override" — exactly the pre-override behaviour.
- *
- * @param {{ok:boolean, values:object, reason?:string}} tunables
- * @returns {{seconds:number, source:'tunable'|'default', why:string, clamped:boolean}}
- */
-function resolveCloseEarlySeconds(tunables) {
-    if (!tunables || tunables.ok !== true) {
-        return { seconds: EPOCH_CLOSE_EARLY_DEFAULT_SECONDS, source: 'default', clamped: false,
-                 why: 'tunables unreadable (' + ((tunables && tunables.reason) || 'no read') + ')' };
-    }
-    const raw = tunables.values ? tunables.values[EPOCH_CLOSE_EARLY_KEY] : undefined;
-    if (raw == null || raw === '') {
-        return { seconds: EPOCH_CLOSE_EARLY_DEFAULT_SECONDS, source: 'default', clamped: false,
-                 why: 'no Command Center row' };
-    }
-    const s = String(raw).trim();
-    const n = /^-?\d+$/.test(s) ? parseInt(s, 10) : NaN;
-    if (!Number.isFinite(n)) {
-        return { seconds: EPOCH_CLOSE_EARLY_DEFAULT_SECONDS, source: 'default', clamped: false,
-                 why: 'Command Center row "' + raw + '" is not an integer' };
-    }
-    const seconds = Math.min(EPOCH_CLOSE_EARLY_MAX_SECONDS, Math.max(0, n));
-    return {
-        seconds: seconds,
-        source: 'tunable',
-        clamped: seconds !== n,
-        why: seconds !== n
-            ? 'Command Center row ' + n + ' clamped to ' + seconds + ' (0..' + EPOCH_CLOSE_EARLY_MAX_SECONDS + ')'
-            : 'Command Center row',
-    };
-}
-
-/**
- * Read the live offset. NEVER throws: readTunables never rejects (it answers ok:false on
- * any failure), and the belt-and-braces catch here answers 0 as well.
- */
-async function readCloseEarly(sql) {
-    try {
-        return resolveCloseEarlySeconds(await readTunables(sql));
-    } catch (err) {
-        console.warn('[clan-ballot] close-early override read threw (' + (err && err.message) +
-            ') - offset 0, stored closes_at governs');
-        return { seconds: EPOCH_CLOSE_EARLY_DEFAULT_SECONDS, source: 'default', clamped: false,
-                 why: 'read threw' };
-    }
-}
-
-/** The offset a caller passed in (opts.closeEarlySeconds), clamped; null when none was passed. */
-function passedCloseEarly(opts) {
-    if (!opts || opts.closeEarlySeconds == null) return null;
-    const n = Math.floor(Number(opts.closeEarlySeconds));
-    if (!Number.isFinite(n)) return null;
-    return Math.min(EPOCH_CLOSE_EARLY_MAX_SECONDS, Math.max(0, n));
-}
-
-/** The offset for one read: the caller's, else a fresh (memoised, 5 s) read of the table. */
-async function closeEarlyFor(sql, opts) {
-    const passed = passedCloseEarly(opts);
-    if (passed != null) return passed;
-    return (await readCloseEarly(sql)).seconds;
-}
-
-function parseTimeMs(value) {
-    if (value instanceof Date) {
-        const t = value.getTime();
-        return Number.isFinite(t) ? t : null;
-    }
-    if (value == null) return null;
-    const t = Date.parse(String(value));
-    return Number.isFinite(t) ? t : null;
-}
-
-/**
- * Epoch a timestamp sits just after, treating it as an epoch boundary.
- * closes_at starts the next epoch, so settled index = floor((t - anchor) / period) - 1.
- * Unparseable input (tests use 'T1') returns null, never NaN.
- */
-function epochIndexFromTimestamp(value) {
-    const ms = parseTimeMs(value);
-    if (ms == null) return null;
-    const anchorMs = Date.parse(EPOCH_ANCHOR_ISO);
-    if (!Number.isFinite(anchorMs)) return null;
-    const idx = Math.floor((ms - anchorMs) / (EPOCH_SECONDS * 1000)) - 1;
-    return Number.isFinite(idx) ? idx : null;
-}
-
-function settledEpochIndex(ballot) {
-    if (!ballot) return null;
-    return epochIndexFromTimestamp(ballot.closesAt);
-}
 
 /**
  * The epoch, as POSTGRES sees it. The one place the anchor arithmetic is spelled.
@@ -338,18 +145,6 @@ async function readEpoch(sql) {
  */
 const TIER_THRESHOLDS = { 1: 0, 2: 86400, 3: 604800, 4: 2592000, 5: 7776000 };
 
-/** Vigil-weight words, 1:1 with the ballot tiers. Vigil 0 is not Ember. */
-const TIER_WORDS = { 1: 'Ember', 2: 'Flame', 3: 'Beacon', 4: 'Pyre', 5: 'Dawn' };
-
-/** Ceremony of Vigil one-liners. Dawn must not reuse the T5 perk title. */
-const TIER_LINES = {
-    1: 'A spark moves beneath the roots. The Circle has begun.',
-    2: 'The Circle keeps its watch. The Heart is warm.',
-    3: 'The Heart answers. Light climbs the trunk.',
-    4: 'The crown blooms. The ancestors are near.',
-    5: 'The canopy shifts. The Circle has been heard.',
-};
-
 const MIN_TIER = 1;
 const MAX_TIER = 5;
 
@@ -360,15 +155,6 @@ function meetsTier(weight, tier) {
     const bar = TIER_THRESHOLDS[tier];
     if (typeof bar !== 'number') return false;
     return tier === 1 ? w > 0 : w >= bar;
-}
-
-/** Highest unlocked tier for this vigil weight, or 0 if none (vigil 0 is not Ember). */
-function highestUnlockedTier(weight) {
-    let highest = 0;
-    for (let t = MIN_TIER; t <= MAX_TIER; t++) {
-        if (meetsTier(weight, t)) highest = t;
-    }
-    return highest;
 }
 
 function normalizeTier(raw) {
@@ -403,81 +189,43 @@ function normalizeTier(raw) {
  * The EFFECT magnitudes (+5% build speed and so on) are the work order's own table,
  * carried as a separate `effect` field so a balance retune never has to edit prose.
  */
-/**
- * ⛔⛔ RETIRED FROM EVERY PLAYER-FACING PATH — WO-2031 (owner, 2026-09-24). This is the
- * WO-1853 stat catalogue (+5% build speed and ten more), and ruling 3 (WO-1870:36,
- * 2026-09-18) forbids every row of it: "VISUAL + NARRATIVE outcomes only ... No stat
- * edge, no troop types." It is kept ONLY because the WO-1921 motif-map tests
- * (test/clan-ballot.test.js, regression row RP2-D-091) and the legacy tier helpers
- * (normalizeOptionIds, describeOption) still read it. NOTHING in toWire, tierWire,
- * ceremonyWire or any settle path resolves copy or a perk through it any more — the
- * wire speaks ONLY api/_lib/order-perk-catalog.js, and a test walks every response for
- * these titles, effects and descriptions. Do not wire it back up.
- *
- * ⭐ `treeMotifId` — WO-1921 lane 3, owner ruling 2 (2026-09-21), VERBATIM:
- * "Server returns a stable `treeMotifId` (a.k.a. `visualMotifId`) with the unlocked-perk
- * payload, NOT the gameplay perkId: gameplay identity and visual identity decoupled;
- * several perks may share a motif; art can change without migrating perk ids."
- *
- * It is authored HERE, as a field on the perk record, and nowhere else — a second
- * hand-maintained perkId->motifId table beside this one would be duplicated state and
- * would rot exactly the way CLAUDE.md §2/§5/§16 each describe. `PERK_MOTIFS` below is
- * DERIVED from these records, never typed twice. The three build-speed tiers share ONE
- * motif on purpose; ruling 2 explicitly permits several perks per motif.
- *
- * The motifs are described by FORM, never by hue — the owner is colourblind and no
- * colour name is asked of her (memory `owner-colorblind-delegate-visual-creative`). The
- * client binds each motif to one rune-mask channel; an unmapped or unknown perk resolves
- * to DEFAULT_TREE_MOTIF_ID ('motif_dormant'), never to null, so an unknown perk can never
- * blank the tree.
- */
 const PERK_OPTIONS = {
     1: [
         { optionId: 'build_speed_1', perkId: 'clan_build_speed_1',
           title: 'Steady Hands', effect: '+5% build speed',
-          treeMotifId: 'motif_hands',
           description: 'The ancestors steady every hammer in the town.' },
         { optionId: 'harvest_yield_1', perkId: 'clan_harvest_yield_1',
           title: 'Full Baskets', effect: '+3% harvest yield',
-          treeMotifId: 'motif_harvest',
           description: 'The ancestors bless the fields your people work.' },
     ],
     2: [
         { optionId: 'build_speed_2', perkId: 'clan_build_speed_2',
           title: 'Sure Hands', effect: '+10% build speed',
-          treeMotifId: 'motif_hands',
           description: 'Scaffolds rise without a wasted motion.' },
         { optionId: 'harvest_yield_2', perkId: 'clan_harvest_yield_2',
           title: 'Heavy Baskets', effect: '+6% harvest yield',
-          treeMotifId: 'motif_harvest',
           description: 'What the fields give, they give generously.' },
         { optionId: 'wall_hp_1', perkId: 'clan_wall_hp_1',
           title: 'Old Stone', effect: '+5% wall HP',
-          treeMotifId: 'motif_stone',
           description: 'The stones remember standing, and stand a little longer.' },
     ],
     3: [
         { optionId: 'build_speed_3', perkId: 'clan_build_speed_3',
           title: 'Tireless Hands', effect: '+15% build speed',
-          treeMotifId: 'motif_hands',
           description: 'The work goes on while the town sleeps.' },
         { optionId: 'harvest_yield_3', perkId: 'clan_harvest_yield_3',
           title: 'Overflowing Baskets', effect: '+10% harvest yield',
-          treeMotifId: 'motif_harvest',
           description: 'The fields answer the vigil that was kept over them.' },
         { optionId: 'wall_hp_2', perkId: 'clan_wall_hp_2',
           title: 'Deep Stone', effect: '+10% wall HP',
-          treeMotifId: 'motif_stone',
           description: 'What the ancestors laid down does not give way easily.' },
     ],
     4: [
         { optionId: 'new_building', perkId: 'clan_new_building',
           title: 'A Shape Remembered', effect: 'Unlocks a new building type',
-          treeMotifId: 'motif_shape',
           description: 'A structure your people had forgotten how to raise.' },
         { optionId: 'turret_variant', perkId: 'clan_turret_variant',
           title: 'The Watchful Tower', effect: 'Unlocks a defensive turret variant',
-          treeMotifId: 'motif_watch',
           description: 'A tower built the way the old defenders built them.' },
     ],
     5: [
@@ -488,47 +236,9 @@ const PERK_OPTIONS = {
         // to clear the participation threshold to pass. Flagged for the owner.
         { optionId: 'ancestor_troop', perkId: 'clan_ancestor_troop',
           title: 'The Ancestors Stir', effect: 'Unlocks an ancestor-summoned troop',
-          treeMotifId: 'motif_ancestor',
           description: 'The ancestors stir. A new shape is possible.' },
     ],
 };
-
-/**
- * The motif an unknown, retired or unmapped perk resolves to. NEVER null and never
- * absent: the client reads this field to pick a rune channel, and a null would blank
- * the Heart tree instead of leaving it dormant (WO-1921 §6b item 4).
- */
-const DEFAULT_TREE_MOTIF_ID = 'motif_dormant';
-
-/**
- * perkId -> treeMotifId, DERIVED from PERK_OPTIONS above. Exported so a test (and any
- * future consumer) can assert coverage without re-reading the nested catalogue — but it
- * is never authored by hand, so it cannot disagree with the perk records.
- */
-const PERK_MOTIFS = Object.freeze(
-    Object.keys(PERK_OPTIONS).reduce((acc, tier) => {
-        for (const o of PERK_OPTIONS[tier]) {
-            if (o.perkId) acc[o.perkId] = o.treeMotifId || DEFAULT_TREE_MOTIF_ID;
-        }
-        return acc;
-    }, {}),
-);
-
-/**
- * The motif for a perk id. Total: every input — null, '', a retired id, an id whose
- * record forgot the field — answers with a real motif id.
- *
- * ⛔ The fallback lives HERE and not in describePerk(), which must keep returning null
- * for an unknown perk: toWire and ceremonyWire both key their copy off that null
- * ("Never invents copy"), and making it return a stub row would put invented titles on
- * the wire.
- */
-function motifFor(perkId) {
-    const banner = orderPerks.findOrderPerk(perkId);
-    if (banner) return banner.treeMotifId || DEFAULT_TREE_MOTIF_ID;
-    const rec = describePerk(perkId);
-    return (rec && rec.treeMotifId) || DEFAULT_TREE_MOTIF_ID;
-}
 
 /** The headline copy, verbatim from the work order's copy rules. */
 const BALLOT_HEADLINE =
@@ -548,18 +258,6 @@ function describeOption(tier, optionId) {
 function perkIdFor(tier, optionId) {
     const o = describeOption(tier, optionId);
     return o.perkId || null;
-}
-
-/** Catalogue row for a perk id, or null. Never invents copy. */
-function describePerk(perkId) {
-    if (perkId == null) return null;
-    const id = String(perkId);
-    if (id === '') return null;
-    for (let t = MIN_TIER; t <= MAX_TIER; t++) {
-        const found = tierOptions(t).find((o) => o.perkId === id);
-        if (found) return found;
-    }
-    return null;
 }
 
 /** The proposer's chosen option ids: an array of DISTINCT ids from this tier's catalogue. */
@@ -723,79 +421,9 @@ function rowToBallot(r) {
         closesAt: r.closes_at,
         closedAt: r.closed_at != null ? r.closed_at : null,
         winningOption: r.winning_option != null ? String(r.winning_option) : null,
-        // WO-2031. The epoch an AUTOMATIC ballot runs in; NULL on a legacy proposed one.
-        epochIndex: r.epoch_index != null && Number.isFinite(Number(r.epoch_index))
-            ? Number(r.epoch_index) : null,
         // Computed by POSTGRES in the same statement, never by comparing Date.now().
         expired: r.expired === true,
-        // The close-early override. `effective_closes_at` is computed by POSTGRES in the
-        // readLatestBallot / readBallotInClan statement; every other read (the INSERT's
-        // RETURNING, readLastClosedBallot) does not spell it and falls back to the stored
-        // closes_at, which is exactly the effective close at offset 0. `closesAt` above stays
-        // the STORED value — settledEpochIndex derives an epoch from it, and that index math
-        // must never move with the override.
-        effectiveClosesAt: r.effective_closes_at != null ? r.effective_closes_at : r.closes_at,
-        closeOffsetSeconds: 0,
     };
-}
-
-/** Stamp the offset a read ran under onto the ballot it returned (null stays null). */
-function withOffset(b, offsetSeconds) {
-    if (b) b.closeOffsetSeconds = offsetSeconds;
-    return b;
-}
-
-// ── WO-2031: the live column guard (deploy-order safety) ─────────────────────
-
-let _epochColumnsEnsured = false;
-
-/**
- * Adds migration 0044's COLUMNS live, once per cold start, so code deployed before the
- * migration runs does not 500 on `epoch_index` / `active`. The same deploy-order pattern
- * as api/_lib/clan.js ensureCherryRoomColumns (WO-2027) — except that this one never throws. The two UNIQUE INDEXES are
- * migration-only — building an index is not something a cold start should do — and until
- * 0044 runs the 0035 partial index clan_ballots_one_open_per_clan still bounds a racing
- * auto-open to ONE open ballot per Order.
- *
- * ONE statement (the Neon HTTP driver sends one per call), every step guarded by
- * information_schema so an already-migrated database takes no ALTER at all.
- *
- * NEVER THROWS: if the guard itself is refused (a role without ALTER), the columns either
- * exist already (the migration ran) or the next query fails loudly on its own — a warn
- * here must not turn a working read into a 500.
- */
-async function ensureEpochColumns(sql) {
-    if (_epochColumnsEnsured) return;
-    try {
-        await sql`
-            DO $$
-            BEGIN
-                IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                               WHERE table_schema = 'public' AND table_name = 'clan_ballots'
-                                 AND column_name = 'epoch_index') THEN
-                    ALTER TABLE clan_ballots ADD COLUMN epoch_index INTEGER NULL;
-                END IF;
-                IF EXISTS (SELECT 1 FROM information_schema.columns
-                           WHERE table_schema = 'public' AND table_name = 'clan_ballots'
-                             AND column_name = 'proposed_by_wallet' AND is_nullable = 'NO') THEN
-                    ALTER TABLE clan_ballots ALTER COLUMN proposed_by_wallet DROP NOT NULL;
-                END IF;
-                IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                               WHERE table_schema = 'public' AND table_name = 'clan_perks'
-                                 AND column_name = 'epoch_index') THEN
-                    ALTER TABLE clan_perks ADD COLUMN epoch_index INTEGER NULL;
-                END IF;
-                IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                               WHERE table_schema = 'public' AND table_name = 'clan_perks'
-                                 AND column_name = 'active') THEN
-                    ALTER TABLE clan_perks ADD COLUMN active BOOLEAN NOT NULL DEFAULT FALSE;
-                END IF;
-            END $$
-        `;
-        _epochColumnsEnsured = true;
-    } catch (err) {
-        console.warn('[clan-ballot] epoch column guard refused (continuing):', err && err.message);
-    }
 }
 
 /** JSONB arrives as a JS array from neon; a string is the belt-and-braces path. */
@@ -817,70 +445,27 @@ function safeParseArray(text) {
  * rule clan.js readMemberInClan and clan-vigil.js readClanVigilRoster each state. The
  * clan id comes from the caller's proven membership and never from the request.
  */
-//
-// ⛔ THE EXPIRY VERDICT IS THE EFFECTIVE CLOSE, and both reads below spell it the same way
-// (see "The close-early override" near the top of this file). At offset 0 the CASE answers
-// the stored closes_at, so the verdict is byte-for-byte the old `closes_at <= NOW()`. The
-// offset and the floor are BOUND parameters; the clock is still Postgres's NOW().
-// `opts.closeEarlySeconds` lets a caller that already read the offset (rollEpoch) pass it
-// down; without it each read resolves the offset itself (readTunables memoises for 5 s).
-async function readLatestBallot(sql, clanId, opts) {
-    await ensureEpochColumns(sql);
-    const off = await closeEarlyFor(sql, opts);
+async function readLatestBallot(sql, clanId) {
     const rows = await sql`
-        SELECT b.*, (b.closed_at IS NULL AND b.effective_closes_at <= NOW()) AS expired
-        FROM (
-            SELECT id, clan_id, proposed_by_wallet, tier, options, opened_at,
-                   closes_at, closed_at, winning_option, epoch_index,
-                   CASE WHEN ${off}::int > 0
-                        THEN GREATEST(closes_at - (${off}::int * INTERVAL '1 second'),
-                                      LEAST(closes_at, opened_at + (${EPOCH_MIN_OPEN_SECONDS}::int * INTERVAL '1 second')))
-                        ELSE closes_at
-                   END AS effective_closes_at
-            FROM clan_ballots
-            WHERE clan_id = ${clanId}
-            ORDER BY opened_at DESC, id ASC
-            LIMIT 1
-        ) b
+        SELECT id, clan_id, proposed_by_wallet, tier, options, opened_at,
+               closes_at, closed_at, winning_option,
+               (closed_at IS NULL AND closes_at <= NOW()) AS expired
+        FROM clan_ballots
+        WHERE clan_id = ${clanId}
+        ORDER BY opened_at DESC, id ASC
+        LIMIT 1
     `;
-    return withOffset(rowToBallot(rows && rows[0] ? rows[0] : null), off);
+    return rowToBallot(rows && rows[0] ? rows[0] : null);
 }
 
 /** ONE ballot by id, and only if it belongs to the caller's own clan (see above). */
-async function readBallotInClan(sql, clanId, ballotId, opts) {
-    await ensureEpochColumns(sql);
-    const off = await closeEarlyFor(sql, opts);
-    const rows = await sql`
-        SELECT b.*, (b.closed_at IS NULL AND b.effective_closes_at <= NOW()) AS expired
-        FROM (
-            SELECT id, clan_id, proposed_by_wallet, tier, options, opened_at,
-                   closes_at, closed_at, winning_option, epoch_index,
-                   CASE WHEN ${off}::int > 0
-                        THEN GREATEST(closes_at - (${off}::int * INTERVAL '1 second'),
-                                      LEAST(closes_at, opened_at + (${EPOCH_MIN_OPEN_SECONDS}::int * INTERVAL '1 second')))
-                        ELSE closes_at
-                   END AS effective_closes_at
-            FROM clan_ballots
-            WHERE clan_id = ${clanId} AND id = ${ballotId}
-            LIMIT 1
-        ) b
-    `;
-    return withOffset(rowToBallot(rows && rows[0] ? rows[0] : null), off);
-}
-
-/**
- * WO-2031. The Order's most recently CLOSED ballot, or null. Once the next epoch's ballot
- * has auto-opened, the latest ballot is the open one — so "what did the last vote decide"
- * needs its own read. Scoped by clan_id for the same privacy reason as readLatestBallot.
- */
-async function readLastClosedBallot(sql, clanId) {
-    await ensureEpochColumns(sql);
+async function readBallotInClan(sql, clanId, ballotId) {
     const rows = await sql`
         SELECT id, clan_id, proposed_by_wallet, tier, options, opened_at,
-               closes_at, closed_at, winning_option, epoch_index, FALSE AS expired
+               closes_at, closed_at, winning_option,
+               (closed_at IS NULL AND closes_at <= NOW()) AS expired
         FROM clan_ballots
-        WHERE clan_id = ${clanId} AND closed_at IS NOT NULL
-        ORDER BY closed_at DESC, id ASC
+        WHERE clan_id = ${clanId} AND id = ${ballotId}
         LIMIT 1
     `;
     return rowToBallot(rows && rows[0] ? rows[0] : null);
@@ -916,99 +501,61 @@ async function readMemberCount(sql, clanId) {
     return rows && rows[0] ? Number(rows[0].member_count) || 0 : 0;
 }
 
-/**
- * The Order's ACTIVE perk, as a list of at most one (the shape every caller already
- * passes to toWire).
- *
- * ⛔ WO-2031: `WHERE active` IS THE STAT-PERK BLOCK AT THE SOURCE. Every legacy WO-1853
- * row (a stat perk, ruling 3) took `active = FALSE` from the column's default when 0044
- * added it, so no legacy row is ever read here; and anything that is somehow active but
- * not a catalog banner is dropped below rather than trusted.
- */
 async function readPerks(sql, clanId) {
-    await ensureEpochColumns(sql);
     const rows = await sql`
-        SELECT tier, perk_id, epoch_index, activated_at, expires_at
+        SELECT tier, perk_id, activated_at, expires_at
         FROM clan_perks
-        WHERE clan_id = ${clanId} AND active
-        ORDER BY activated_at DESC
-        LIMIT 1
+        WHERE clan_id = ${clanId}
+        ORDER BY tier ASC
     `;
     if (!rows || rows.length === 0) return [];
-    return rows
-        .filter((r) => orderPerks.isOrderPerkId(r.perk_id))
-        .map((r) => ({
-            tier: Number(r.tier),
-            perkId: String(r.perk_id),
-            epochIndex: r.epoch_index != null && Number.isFinite(Number(r.epoch_index))
-                ? Number(r.epoch_index) : null,
-            activatedAt: r.activated_at,
-            expiresAt: r.expires_at != null ? r.expires_at : null,
-        }));
+    return rows.map((r) => ({
+        tier: Number(r.tier),
+        perkId: String(r.perk_id),
+        activatedAt: r.activated_at,
+        expiresAt: r.expires_at != null ? r.expires_at : null,
+    }));
 }
 
 // ── Writes ───────────────────────────────────────────────────────────────────
 
 /**
- * WO-2031. Open the AUTOMATIC ballot for one epoch.
+ * Open a ballot. `closesAt` is the epoch boundary readEpoch() returned — a value Postgres
+ * computed, bound here, so the anchor arithmetic is not spelled a second time.
  *
- * `closesAt` is the CURRENT epoch's boundary exactly as readEpoch() returned it, and
- * `epochsAhead` is how many whole epochs past the current one this ballot runs in (0 on
- * every ordinary roll; > 0 only after api/admin/order-epoch-force.js closed an epoch
- * early). The anchor arithmetic is therefore still spelled ONCE, in readEpoch — this adds
- * whole epochs to a value Postgres computed.
- *
- * `proposed_by_wallet` is NULL: no one proposes (owner, 2026-09-24). The alternative, a
- * sentinel "system" wallet, would put a fake identity into wallet_identity (WO-2028 §3.2).
- *
- * ⛔ ON CONFLICT DO NOTHING, with no target, IS THE IDEMPOTENCE. Two unique indexes can
- * refuse this row — clan_ballots_one_per_epoch (clan_id, epoch_index), migration 0044, and
- * clan_ballots_one_open_per_clan, migration 0035 — and a racing second roll must lose to
- * either one quietly. Zero rows back means "somebody else opened it"; the caller re-reads.
+ * A 23505 here is the partial unique index refusing a SECOND open ballot, which is
+ * acceptance criterion 7's race arm and the caller answers as a 409.
  */
-async function insertEpochBallot(sql, clanId, epochIndex, optionIds, closesAt, epochsAhead) {
-    const ahead = Math.max(0, Math.floor(Number(epochsAhead) || 0));
+async function insertBallot(sql, clanId, wallet, tier, optionIds, closesAt) {
     const rows = await sql`
-        INSERT INTO clan_ballots (clan_id, proposed_by_wallet, tier, options, opened_at,
-                                  closes_at, epoch_index)
-        VALUES (${clanId}, NULL, ${AUTO_BALLOT_TIER}, ${JSON.stringify(optionIds)}::jsonb, NOW(),
-                ${closesAt}::timestamptz
-                    + ((${ahead}::int * ${EPOCH_SECONDS}::int) * INTERVAL '1 second'),
-                ${epochIndex})
-        ON CONFLICT DO NOTHING
+        INSERT INTO clan_ballots (clan_id, proposed_by_wallet, tier, options, opened_at, closes_at)
+        VALUES (${clanId}, ${wallet}, ${tier}, ${JSON.stringify(optionIds)}::jsonb, NOW(), ${closesAt})
         RETURNING id, clan_id, proposed_by_wallet, tier, options, opened_at,
-                  closes_at, closed_at, winning_option, epoch_index, FALSE AS expired
+                  closes_at, closed_at, winning_option, FALSE AS expired
     `;
     return rowToBallot(rows && rows[0] ? rows[0] : null);
 }
 
 /**
- * Cast one vote — ONCE. WO-2031 (owner, 2026-09-24: "No vote changes. A cast vote is
- * final.").
+ * Cast or MOVE one vote.
  *
- * ⛔ ON CONFLICT (ballot_id, wallet) DO NOTHING. The primary key is one vote per member
- * per ballot; a second vote now changes NOTHING — not the option, not the weight snapshot,
- * not voted_at — and RETURNING gives zero rows. That zero is the distinct result:
- *
- *   returns the recorded vote        the vote was cast by THIS call
- *   returns null                     this member had ALREADY voted; the route answers
- *                                    409 CLAN_BALLOT_ALREADY_VOTED (BallotCode.ALREADY_VOTED)
- *
- * (The name is kept because api/clan/ballot/vote.js — WO-2030's file this wave — calls it
- * by this name; `castVote` is the same function under the honest name.)
+ * ⛔ THE CONFLICT CLAUSE SETS option_id AND NOTHING ELSE — acceptance criterion 4,
+ * "re-voting updates the option, not the weight". `weight` and `voted_at` are the
+ * snapshot taken when the member FIRST voted, and a member who re-votes after their
+ * stake or tenure changed keeps the weight they had, in both directions. This is the
+ * same single-column discipline the WO-1844 invariant states for wallet_identity's
+ * `last_seen_at` UPSERT (test/clan-vigil.test.js:939 pins that one).
  */
 async function upsertVote(sql, ballotId, wallet, optionId, weight) {
     const rows = await sql`
         INSERT INTO clan_ballot_votes (ballot_id, wallet, option_id, voted_at, weight)
         VALUES (${ballotId}, ${wallet}, ${optionId}, NOW(), ${weight})
-        ON CONFLICT (ballot_id, wallet) DO NOTHING
+        ON CONFLICT (ballot_id, wallet) DO UPDATE SET
+            option_id = EXCLUDED.option_id
         RETURNING wallet, option_id, weight::float8 AS weight, voted_at
     `;
     const r = rows && rows[0] ? rows[0] : null;
-    if (!r) {
-        console.warn('[clan-ballot] vote refused: already voted (votes are final) ballot=' + ballotId);
-        return null;
-    }
+    if (!r) return null;
     return {
         wallet: String(r.wallet),
         optionId: String(r.option_id),
@@ -1041,60 +588,34 @@ async function closeBallot(sql, ballotId, winningOption) {
 }
 
 /**
- * WO-2031. Activate an epoch's winning banner, REPLACING the Order's previous perk.
+ * Activate a perk.
  *
- * ⛔ ONE STATEMENT, ONE SLOT. Every epoch perk lives at (clan_id, EPOCH_PERK_SLOT), so the
- * primary key makes "the winner replaces the last" true by construction (owner,
- * 2026-09-24: "perks replace each other every epoch"), with no read-then-write and no
- * second statement to fail between. Legacy stat rows (tiers 1..5) are all active = FALSE,
- * so this row is the only one clan_perks_one_active_per_clan ever sees.
+ * ⛔ ON CONFLICT (clan_id, tier) DO UPDATE — the primary key is (clan_id, tier), so a
+ * clan holds ONE perk per tier and a later winning ballot at the same tier REPLACES it.
+ * That is an engineering reading of a schema the work order fixed, not an owner ruling;
+ * the alternatives (refuse the write, or grow a history table) both contradict the
+ * schema as written. Recorded in the work order's implementation record.
  *
- * ⛔ MONOTONIC: the DO UPDATE only fires for an epoch at least as new as the stored one.
- * A late self-heal of an OLD ballot therefore returns zero rows and can never overwrite a
- * newer epoch's banner.
- *
- * `epoch_index` is the epoch the ballot RAN in; the banner applies to the next one
- * (`applies_to_epoch = epoch_index + 1` on the wire). expires_at stays NULL: the next
- * settle replaces the row, which is the whole lifetime rule.
+ * expires_at is written NULL, always. See the migration's header.
  */
-async function writeEpochPerk(sql, clanId, perkId, epochIndex) {
+async function writePerk(sql, clanId, tier, perkId) {
     const rows = await sql`
-        INSERT INTO clan_perks (clan_id, tier, perk_id, epoch_index, active, activated_at, expires_at)
-        VALUES (${clanId}, ${EPOCH_PERK_SLOT}, ${perkId}, ${epochIndex}, TRUE, NOW(), NULL)
+        INSERT INTO clan_perks (clan_id, tier, perk_id, activated_at, expires_at)
+        VALUES (${clanId}, ${tier}, ${perkId}, NOW(), NULL)
         ON CONFLICT (clan_id, tier) DO UPDATE SET
             perk_id = EXCLUDED.perk_id,
-            epoch_index = EXCLUDED.epoch_index,
-            active = TRUE,
             activated_at = NOW(),
             expires_at = NULL
-        WHERE clan_perks.epoch_index IS NULL OR clan_perks.epoch_index <= EXCLUDED.epoch_index
-        RETURNING clan_id, tier, perk_id, epoch_index, activated_at, expires_at
+        RETURNING clan_id, tier, perk_id, activated_at, expires_at
     `;
     const r = rows && rows[0] ? rows[0] : null;
     if (!r) return null;
     return {
         tier: Number(r.tier),
         perkId: String(r.perk_id),
-        epochIndex: r.epoch_index != null ? Number(r.epoch_index) : null,
         activatedAt: r.activated_at,
         expiresAt: r.expires_at != null ? r.expires_at : null,
     };
-}
-
-/**
- * WO-2031. A ballot that FAILED (no quorum, or no votes) writes no perk, and the Order
- * lives the next epoch with no banner (09-17 ruling; WO-2028 §3.5 "the Order lives
- * through the next epoch with no outcome"). So the previous epoch's banner is switched off
- * — but only one from an EARLIER epoch, for the same monotonic reason writeEpochPerk has.
- */
-async function deactivatePerksBefore(sql, clanId, epochIndex) {
-    const rows = await sql`
-        UPDATE clan_perks SET active = FALSE
-        WHERE clan_id = ${clanId} AND active
-          AND (epoch_index IS NULL OR epoch_index < ${epochIndex})
-        RETURNING perk_id
-    `;
-    return rows ? rows.length : 0;
 }
 
 // ── The outcome ──────────────────────────────────────────────────────────────
@@ -1173,20 +694,11 @@ async function settleBallot(sql, clanId, ballot, opts) {
             passed: passed,
             reason: passed ? REASON_PASSED : (votes.length > 0 ? REASON_INSUFFICIENT_TURNOUT : REASON_NO_VOTES),
         };
-        // ⛔ WO-2031: keyed on the EPOCH, not the tier — every automatic ballot is tier 1.
-        // A legacy (proposed, epoch_index NULL) ballot never grows a perk: its slate is
-        // the retired stat catalogue.
-        let perk = null;
+        let perk = await findPerk(sql, clanId, ballot.tier);
         let perkWritten = false;
-        if (ballot.epochIndex != null) {
-            const active = (await readPerks(sql, clanId))[0] || null;
-            if (outcomeIsStale(active, ballot, passed)) {
-                const applied = await applyEpochOutcome(sql, clanId, ballot);
-                perk = applied.perk;
-                perkWritten = applied.written;
-            } else if (passed && active && active.epochIndex === ballot.epochIndex) {
-                perk = active;
-            }
+        if (passed && !perk) {
+            perk = await tryWritePerk(sql, clanId, ballot.tier, perkIdFor(ballot.tier, ballot.winningOption));
+            perkWritten = perk != null;
         }
         return { ballot: ballot, votes: votes, memberCount: memberCount,
                  decision: decision, perk: perk, closedNow: false, perkWritten: perkWritten };
@@ -1197,20 +709,8 @@ async function settleBallot(sql, clanId, ballot, opts) {
     const won = await closeBallot(sql, ballot.ballotId, decision.passed ? decision.winner : null);
     if (!won.closed) {
         // Somebody else closed it between our read and our write. Their row is the truth.
-        const fresh = await readBallotInClan(sql, clanId, ballot.ballotId,
-            { closeEarlySeconds: ballot.closeOffsetSeconds });
+        const fresh = await readBallotInClan(sql, clanId, ballot.ballotId);
         return settleBallot(sql, clanId, fresh, opts);
-    }
-
-    // The close-early override's trace: EVERY settle this request made while the offset was
-    // non-zero says so, with the stored and the effective close side by side, so a ballot
-    // that closed "early" is never a mystery in the logs (CLAUDE.md s12: no silent branch).
-    if (Number(ballot.closeOffsetSeconds) > 0) {
-        console.warn('[clan-ballot] settle under close-early override ballot=' + ballot.ballotId +
-            ' clan=' + clanId + ' epoch=' + (ballot.epochIndex != null ? ballot.epochIndex : 'legacy') +
-            ' offset_s=' + ballot.closeOffsetSeconds + ' stored_closes_at=' + String(ballot.closesAt) +
-            ' effective_closes_at=' + String(ballot.effectiveClosesAt) +
-            ' passed=' + decision.passed + ' reason=' + decision.reason);
     }
 
     const closedBallot = Object.assign({}, ballot, {
@@ -1218,229 +718,36 @@ async function settleBallot(sql, clanId, ballot, opts) {
         winningOption: decision.passed ? decision.winner : null,
         expired: false,
     });
-    // (effectiveClosesAt / closeOffsetSeconds carry over from the read that saw it expire.)
-
-    console.log('[clan-ballot] settle closed ballot=' + ballot.ballotId + ' clan=' + clanId +
-        ' epoch=' + (ballot.epochIndex != null ? ballot.epochIndex : 'legacy') +
-        ' passed=' + decision.passed + ' reason=' + decision.reason +
-        ' winner=' + (decision.passed ? decision.winner : 'none'));
 
     let perk = null;
-    let perkWritten = false;
-    if (ballot.epochIndex != null) {
-        const applied = await applyEpochOutcome(sql, clanId, closedBallot);
-        perk = applied.perk;
-        perkWritten = applied.written;
-    } else if (decision.passed) {
-        // ⛔ A legacy proposed ballot's winner is a retired stat perk (ruling 3). It is
-        // recorded on the ballot row and activates NOTHING.
-        console.warn('[clan-ballot] legacy ballot ' + ballot.ballotId + ' closed — no perk (stat slate retired)');
+    if (decision.passed) {
+        perk = await tryWritePerk(sql, clanId, ballot.tier, perkIdFor(ballot.tier, decision.winner));
     }
     return { ballot: closedBallot, votes: votes, memberCount: memberCount,
-             decision: decision, perk: perk, closedNow: true, perkWritten: perkWritten };
+             decision: decision, perk: perk, closedNow: true, perkWritten: perk != null };
+}
+
+async function findPerk(sql, clanId, tier) {
+    const perks = await readPerks(sql, clanId);
+    return perks.find((p) => p.tier === Number(tier)) || null;
 }
 
 /**
- * Does the Order's active perk still need to catch up with this closed epoch ballot?
- * Passed: yes unless a banner from this epoch or a newer one is already active.
- * Failed: yes while a banner from an OLDER epoch is still active (it must go dark).
+ * NEVER THROWS. A perk that could not be written is re-attempted by the next read (see
+ * settleBallot); a throw here would turn a WON ballot into a 500 and lose the close that
+ * already committed.
  */
-function outcomeIsStale(active, ballot, passed) {
-    if (ballot == null || ballot.epochIndex == null) return false;
-    const activeIdx = active && active.epochIndex != null ? active.epochIndex : null;
-    if (passed) return activeIdx == null || activeIdx < ballot.epochIndex;
-    return active != null && (activeIdx == null || activeIdx < ballot.epochIndex);
-}
-
-/**
- * WO-2031. Make the Order's perk match one CLOSED epoch ballot: the winner's banner
- * becomes the one active perk, or — if it failed — the older banner goes dark.
- *
- * NEVER THROWS. A perk that could not be written is re-attempted by the next read
- * (settleBallot's closed branch, and rollEpoch's heal of the last closed ballot); a throw
- * here would turn a WON ballot into a 500 and lose the close that already committed.
- */
-async function applyEpochOutcome(sql, clanId, ballot) {
-    if (!ballot || ballot.epochIndex == null) return { perk: null, written: false };
-    if (ballot.winningOption == null) {
-        try {
-            const off = await deactivatePerksBefore(sql, clanId, ballot.epochIndex);
-            if (off > 0) {
-                console.log('[clan-ballot] no quorum: previous perk switched off clan=' + clanId +
-                    ' epoch=' + ballot.epochIndex);
-            }
-        } catch (err) {
-            console.error('[clan-ballot] perk switch-off failed — the next read will retry it:',
-                err && err.message);
-        }
-        return { perk: null, written: false };
-    }
-    const rec = orderPerks.findOrderPerk(ballot.winningOption);
-    if (!rec) {
-        console.warn('[clan-ballot] winning option ' + ballot.winningOption +
-            ' is not an Order perk — no perk written');
-        return { perk: null, written: false };
+async function tryWritePerk(sql, clanId, tier, perkId) {
+    if (!perkId) {
+        console.warn('[clan-ballot] winning option has no perk id (tier ' + tier + ') — no perk written');
+        return null;
     }
     try {
-        const perk = await writeEpochPerk(sql, clanId, rec.perkId, ballot.epochIndex);
-        if (perk) {
-            console.log('[clan-ballot] perk activated clan=' + clanId + ' perk=' + perk.perkId +
-                ' epoch=' + perk.epochIndex);
-            return { perk: perk, written: true };
-        }
-        // Zero rows: a NEWER epoch's banner already holds the slot (the monotonic guard).
-        const active = (await readPerks(sql, clanId))[0] || null;
-        return { perk: active, written: false };
+        return await writePerk(sql, clanId, tier, perkId);
     } catch (err) {
         console.error('[clan-ballot] perk write failed — the next read will retry it:', err && err.message);
-        return { perk: null, written: false };
+        return null;
     }
-}
-
-// ── WO-2031: the roll ────────────────────────────────────────────────────────
-
-/**
- * ROLL THE ORDER'S BALLOT FORWARD — lazily, on read, with no cron (the demo needs none).
- *
- *   1. An open LEGACY ballot (proposed under WO-1853, epoch_index NULL) is retired: closed
- *      with no winner and no perk. Its slate is the stat catalogue ruling 3 forbids, and it
- *      holds the one-open-ballot slot the automatic ballot needs.
- *   2. An open, EXPIRED epoch ballot is settled (settleBallot: conditional close + the one
- *      active perk).
- *   3. If the Order then has no ballot for the target epoch, one is opened with the fixed
- *      three-banner slate and proposed_by_wallet NULL.
- *
- * The target epoch is the current one — unless the latest closed ballot already ran in
- * the current epoch or later (only api/admin/order-epoch-force.js can do that, by ending
- * an epoch early), in which case it is the epoch after that ballot. That is what keeps the
- * unique (clan_id, epoch_index) index from refusing every roll after a forced close.
- *
- * ⛔ NO VIGIL READ, NO RPC. Opening skips the Vigil > 0 tier check by owner decision, so
- * a roll is pure SQL and an SKR outage can never stop a ballot opening.
- *
- * Idempotent: a second call finds the ballot the first one opened and does nothing, and a
- * racing call loses the INSERT quietly (ON CONFLICT DO NOTHING) and re-reads the winner.
- *
- * @returns {Promise<{epoch:object, ballot:object|null, opened:boolean,
- *                    closedNow:object|null, retired:object|null, targetIndex:number|null}>}
- */
-async function rollEpoch(sql, clanId, opts) {
-    const o = opts || {};
-    const epoch = o.epoch || await readEpoch(sql);
-    if (!epoch) throw new Error('epoch read returned no row');
-
-    // The close-early override, read ONCE for the whole roll and passed down, so the expiry
-    // verdict and the ballot the roll opens are judged under the same offset.
-    const off = await closeEarlyFor(sql, o);
-    const readOpts = { closeEarlySeconds: off };
-
-    let latest = await readLatestBallot(sql, clanId, readOpts);
-    let closedNow = null;
-    let retired = null;
-
-    if (latest && latest.closedAt == null) {
-        if (latest.epochIndex == null) {
-            const won = await closeBallot(sql, latest.ballotId, null);
-            console.log('[clan-ballot] roll retired legacy ballot=' + latest.ballotId + ' clan=' + clanId +
-                ' (proposed stat slate, no perk) closed=' + won.closed);
-            retired = Object.assign({}, latest, {
-                closedAt: won.closed ? won.closedAt : (latest.closedAt || 'closed'),
-                winningOption: null,
-                expired: false,
-            });
-            latest = retired;
-        } else if (latest.expired) {
-            closedNow = await settleBallot(sql, clanId, latest, { clanWeight: o.clanWeight });
-            latest = closedNow.ballot;
-        } else {
-            // The running ballot is the answer. Nothing to roll.
-            return { epoch: epoch, ballot: latest, opened: false, closedNow: null, retired: null,
-                     targetIndex: latest.epochIndex };
-        }
-    }
-
-    const cur = epoch.epochIndex;
-    const lastIdx = latest && latest.epochIndex != null ? latest.epochIndex : null;
-    const target = lastIdx != null && lastIdx >= cur ? lastIdx + 1 : cur;
-
-    const inserted = await insertEpochBallot(
-        sql, clanId, target, orderPerks.selectBallotOptions(), epoch.endsAt, target - cur);
-    if (inserted) {
-        console.log('[clan-ballot] roll opened ballot=' + inserted.ballotId + ' clan=' + clanId +
-            ' epoch=' + target + ' (current ' + cur + ') options=' + inserted.options.join(','));
-        let opened = withOffset(inserted, off);
-        if (off > 0) {
-            // The INSERT's RETURNING carries the STORED closes_at only (the effective-close
-            // expression is spelled in the two reads, not a third time here). Under a live
-            // offset the client must be told the EFFECTIVE close, so ONE re-read through the
-            // spelled expression. At offset 0 stored == effective and no query is spent.
-            const reread = await readLatestBallot(sql, clanId, readOpts);
-            if (reread && reread.ballotId === inserted.ballotId) opened = reread;
-            console.warn('[clan-ballot] roll opened ballot=' + inserted.ballotId + ' under close-early override' +
-                ' offset_s=' + off + ' stored_closes_at=' + String(inserted.closesAt) +
-                ' effective_closes_at=' + String(opened.effectiveClosesAt));
-        }
-        return { epoch: epoch, ballot: opened, opened: true, closedNow: closedNow, retired: retired,
-                 targetIndex: target };
-    }
-
-    // Lost the race (or the slot is held): the row that won is the truth. ONE re-read,
-    // never a retry loop.
-    const fresh = await readLatestBallot(sql, clanId, readOpts);
-    console.log('[clan-ballot] roll found epoch ' + target + ' already opened clan=' + clanId);
-    return { epoch: epoch, ballot: fresh || latest, opened: false, closedNow: closedNow, retired: retired,
-             targetIndex: target };
-}
-
-/**
- * WO-2031. What the Order's last CLOSED ballot decided, for `last_result` and the
- * ceremony — plus the self-heal: if that ballot's outcome never reached clan_perks (a
- * perk write that failed after the close committed), it is applied now.
- *
- * `known` is a settle result this request already holds (rollEpoch's `closedNow`); when
- * present it is used instead of re-reading.
- */
-async function readLastResult(sql, clanId, known) {
-    if (known && known.ballot && known.ballot.closedAt != null && known.decision) {
-        return { ballot: known.ballot, passed: known.decision.passed, reason: known.decision.reason };
-    }
-    const last = await readLastClosedBallot(sql, clanId);
-    if (!last) return null;
-    const passed = last.winningOption != null;
-    let reason = REASON_PASSED;
-    if (!passed) {
-        const votes = await readVotes(sql, last.ballotId);
-        reason = votes.length > 0 ? REASON_INSUFFICIENT_TURNOUT : REASON_NO_VOTES;
-    }
-    if (last.epochIndex != null) {
-        const active = (await readPerks(sql, clanId))[0] || null;
-        if (outcomeIsStale(active, last, passed)) await applyEpochOutcome(sql, clanId, last);
-    }
-    return { ballot: last, passed: passed, reason: reason };
-}
-
-/**
- * WO-2031. End ONE Order's epoch now — the admin demo lever
- * (api/admin/order-epoch-force.js). Sets the open ballot's closes_at to NOW(), then rolls:
- * the roll settles it (the one active perk) and opens the next epoch's ballot.
- *
- * ⛔ SCOPED BY clan_id IN THE STATEMENT ITSELF, so a wrong ballot id can never close
- * another Order's vote.
- */
-async function forceEpochEnd(sql, clanId) {
-    const latest = await readLatestBallot(sql, clanId);
-    let forcedBallotId = null;
-    if (latest && latest.closedAt == null) {
-        const rows = await sql`
-            UPDATE clan_ballots SET closes_at = NOW()
-            WHERE id = ${latest.ballotId} AND clan_id = ${clanId} AND closed_at IS NULL
-            RETURNING id
-        `;
-        if (rows && rows.length > 0) forcedBallotId = latest.ballotId;
-    }
-    console.log('[clan-ballot] force epoch end clan=' + clanId + ' ballot=' + (forcedBallotId || 'none-open'));
-    const rolled = await rollEpoch(sql, clanId);
-    return { forcedBallotId: forcedBallotId, rolled: rolled };
 }
 
 // ── The Vigil seam ───────────────────────────────────────────────────────────
@@ -1491,32 +798,12 @@ async function readVigilFor(sql, clanId, wallet, opts) {
  * in this API is that a wallet is never rendered where a tally or a count would do
  * (clan.js getLeaderboard's header states it). A secret ballot with public totals is
  * also the shape every real vote takes. Flagged for the owner as a reviewable ruling.
- *
- * ⛔ WO-2031: THE WIRE SPEAKS ONLY api/_lib/order-perk-catalog.js. Every option and every
- * perk is rendered as { id, name KEY, emblem id, motif id } — no title, no effect, no
- * description, no English at all (the client localizes the key, WO-2032). The retired
- * PERK_OPTIONS stat catalogue is never read on this path; test/clan-ballot.test.js walks
- * every response for its strings.
- *
- * The shape (WO-2031; the client lane WO-2032 reads it):
- *
- *   ballot  { ballot_id, kind:'epoch'|'legacy', epoch_index, tier, closed, opened_at,
- *             closes_at, closed_at, options:[ OPTION ], my_vote, can_vote, turnout }
- *   OPTION  { option_id, perk_id, name_key, emblem, tree_motif_id, weight, voters }
- *   result  { closed:true, passed, reason, winning_option, perk_id, epoch_index } — the
- *             Order's LAST CLOSED ballot (with auto-open, the current one is always open)
- *   perk    { perk_id, name_key, emblem, tree_motif_id, epoch_index, applies_to_epoch,
- *             activated_at } | null — the ONE active perk
- *   perks   [ perk ] — the same record as a 0..1 list, for the existing binding
  */
 function toWire(state) {
     const s = state || {};
     const ballot = s.ballot || null;
     const decision = s.decision || null;
     const epoch = s.epoch || null;
-    const closed = closedOutcome(s, ballot, decision);
-    const active = activePerk(s);
-    const wireEndsAt = epochWireEndsAt(epoch, ballot);
 
     const body = {
         ok: true,
@@ -1524,57 +811,43 @@ function toWire(state) {
         epoch: epoch ? {
             index: epoch.epochIndex,
             started_at: epoch.startedAt,
-            ends_at: wireEndsAt,
+            ends_at: epoch.endsAt,
             anchor: EPOCH_ANCHOR_ISO,
             seconds: EPOCH_SECONDS,
-            // The close-early override in force when this answer was built (0 = none). The
-            // client needs no change: ends_at / closes_at already carry the EFFECTIVE close.
-            close_offset_seconds: ballotOffset(ballot),
         } : null,
         tiers: tierWire(s.vigilWeight),
         vigil_weight: s.vigilWeight != null ? Number(s.vigilWeight) : null,
         vigil_degraded: s.vigilDegraded === true,
         ballot: null,
         result: null,
-        perk: active ? perkWire(active) : null,
-        perks: active ? [perkWire(active)] : [],
-        // WO-2061h - owner 2026-09-25: "We need the leaves to be added to tree on any votes" +
-        // "The higher the stake the more alive it displays" / "For all the circle". The whole
-        // Circle's verified stake (null when the route did not / could not read it) and the
-        // canopy fullness the SERVER derives from it: 0 with no resolved vote (no active banner),
-        // else api/_lib/realm-config.json circleCanopy. The client is told a float, never a ladder.
-        circle_staked_skr: Number.isFinite(s.circleStakedSkr) ? Math.floor(s.circleStakedSkr) : null,
-        canopy_density01: require('./realm-stake').circleCanopyDensity(
-            !!active, Number.isFinite(s.circleStakedSkr) ? s.circleStakedSkr : NaN),
+        perks: (s.perks || []).map((p) => ({
+            tier: p.tier, perk_id: p.perkId, activated_at: p.activatedAt, expires_at: p.expiresAt,
+        })),
     };
 
     if (ballot) {
         const tallies = decision ? decision.tally.tallies : [];
         const turnout = decision ? decision.turnout : null;
-        const isClosed = ballot.closedAt != null;
-        const myVote = s.myVote != null ? String(s.myVote) : null;
-        const kind = ballot.epochIndex != null ? 'epoch' : 'legacy';
         body.ballot = {
             ballot_id: ballot.ballotId,
-            kind: kind,
-            epoch_index: ballot.epochIndex != null ? ballot.epochIndex : null,
             tier: ballot.tier,
-            closed: isClosed,
+            closed: ballot.closedAt != null,
             opened_at: ballot.openedAt,
-            // The EFFECTIVE close (== the stored closes_at at offset 0), so a client counts
-            // down to the moment the server will actually settle this ballot.
-            closes_at: ballot.effectiveClosesAt != null ? ballot.effectiveClosesAt : ballot.closesAt,
+            closes_at: ballot.closesAt,
             closed_at: ballot.closedAt,
             options: ballot.options.map((id) => {
+                const o = describeOption(ballot.tier, id);
                 const t = tallies.find((x) => x.optionId === id);
-                return Object.assign(optionWire(id), {
+                return {
+                    option_id: o.optionId,
+                    title: o.title,
+                    effect: o.effect,
+                    description: o.description,
                     weight: t ? t.weight : 0,
                     voters: t ? t.voters : 0,
-                });
+                };
             }),
-            my_vote: myVote,
-            // Votes are FINAL (owner, 2026-09-24): once my_vote is set, never again.
-            can_vote: !isClosed && !ballot.expired && myVote == null && kind === 'epoch',
+            my_vote: s.myVote != null ? String(s.myVote) : null,
             turnout: turnout ? {
                 voters: turnout.voters,
                 member_count: turnout.memberCount,
@@ -1587,150 +860,20 @@ function toWire(state) {
         };
     }
 
-    if (closed) {
+    if (ballot && ballot.closedAt != null && decision) {
         body.result = {
             closed: true,
-            passed: closed.passed,
-            reason: closed.reason,
-            winning_option: closed.ballot.winningOption,
-            perk_id: closed.perkId,
-            epoch_index: closed.epochIndex,
+            passed: decision.passed,
+            reason: decision.reason,
+            winning_option: ballot.winningOption,
+            perk_id: s.perk ? s.perk.perkId : null,
         };
     }
 
-    body.ceremony = ceremonyWire(s, closed, active, epoch, wireEndsAt);
     return body;
 }
 
-/** The close-early offset the ballot was read under; 0 when there is no ballot or no offset. */
-function ballotOffset(ballot) {
-    const n = ballot ? Number(ballot.closeOffsetSeconds) : 0;
-    return Number.isFinite(n) && n > 0 ? n : 0;
-}
-
-/**
- * `epoch.ends_at` (and `ceremony.next_ends_at`, which the client treats as the same instant).
- *
- * Offset 0: epoch.endsAt, exactly as before — nothing about the wire changes while the
- * override is off. Offset > 0 with an OPEN epoch ballot: that ballot's EFFECTIVE close, the
- * moment the server will actually settle and roll. (Not `endsAt - offset`: after an early
- * settle the next ballot runs for the NEXT epoch index, and `endsAt - offset` would already
- * be in the past, so every countdown would read zero.) Anything else: epoch.endsAt.
- */
-function epochWireEndsAt(epoch, ballot) {
-    if (!epoch) return null;
-    if (ballotOffset(ballot) > 0 && ballot.closedAt == null && ballot.epochIndex != null &&
-        ballot.effectiveClosesAt != null) {
-        return ballot.effectiveClosesAt;
-    }
-    return epoch.endsAt;
-}
-
-/** One ballot option: catalog fields for a banner, bare id for a retired (legacy) option. */
-function optionWire(id) {
-    const rec = orderPerks.findOrderPerk(id);
-    return {
-        option_id: String(id),
-        perk_id: rec ? rec.perkId : null,
-        name_key: rec ? rec.nameKey : null,
-        emblem: rec ? rec.emblem : null,
-        tree_motif_id: motifFor(id),
-    };
-}
-
-/** The one active perk. Only a catalog banner is ever rendered — never a legacy stat row. */
-function perkWire(p) {
-    const rec = orderPerks.findOrderPerk(p.perkId);
-    const epochIndex = p.epochIndex != null ? p.epochIndex : null;
-    return {
-        perk_id: rec ? rec.perkId : null,
-        name_key: rec ? rec.nameKey : null,
-        emblem: rec ? rec.emblem : null,
-        tree_motif_id: motifFor(p.perkId),
-        // The epoch the vote RAN in; the banner is worn through the one after it.
-        epoch_index: epochIndex,
-        applies_to_epoch: epochIndex != null ? epochIndex + 1 : null,
-        activated_at: p.activatedAt != null ? p.activatedAt : null,
-    };
-}
-
-/** The Order's active perk record: the listed one, else the one this request just wrote. */
-function activePerk(s) {
-    const listed = (s.perks || []).find((p) => p && orderPerks.isOrderPerkId(p.perkId));
-    if (listed) return listed;
-    return s.perk && orderPerks.isOrderPerkId(s.perk.perkId) ? s.perk : null;
-}
-
-/**
- * The closed ballot the `result` and the ceremony describe: the caller's `lastResult`
- * (rollEpoch / readLastResult — the current ballot is open once the next epoch rolled), or
- * the ballot itself when IT is the closed one (the vote route's 409 path, legacy callers).
- */
-function closedOutcome(s, ballot, decision) {
-    let b = null;
-    let passed = false;
-    let reason = null;
-    if (s.lastResult && s.lastResult.ballot && s.lastResult.ballot.closedAt != null) {
-        b = s.lastResult.ballot;
-        passed = s.lastResult.passed === true;
-        reason = s.lastResult.reason || (passed ? REASON_PASSED : REASON_NO_VOTES);
-    } else if (ballot && ballot.closedAt != null && decision) {
-        b = ballot;
-        passed = decision.passed === true;
-        reason = decision.reason;
-    }
-    if (!b) return null;
-    const rec = passed && b.epochIndex != null ? orderPerks.findOrderPerk(b.winningOption) : null;
-    return {
-        ballot: b,
-        passed: passed,
-        reason: reason,
-        perkId: rec ? rec.perkId : null,
-        epochIndex: b.epochIndex != null ? b.epochIndex : settledEpochIndex(b),
-    };
-}
-
-/**
- * Additive ceremony object. Always present. Word follows CURRENT vigil_weight,
- * never the ballot's tier number.
- *
- * ⛔ WO-2031: the ceremony names its perk by catalog id + name KEY + emblem. The old
- * `perk_title` / `perk_description` fields carried the retired stat catalogue's English and
- * are GONE, not emptied — an empty string would still be a server-authored text field.
- */
-function ceremonyWire(s, closed, active, epoch, wireEndsAt) {
-    const unlocked = highestUnlockedTier(s.vigilWeight);
-    const passed = !!(closed && closed.passed);
-    // A closed ballot names its OWN outcome (a failed one names none, and its banner has
-    // gone dark); with no closed ballot yet, the active perk, if any.
-    const perkId = closed ? (passed ? closed.perkId : null) : (active ? active.perkId : null);
-    const rec = orderPerks.findOrderPerk(perkId);
-    let epochIndex = closed ? closed.epochIndex : null;
-    if (epochIndex == null && active && active.epochIndex != null) epochIndex = active.epochIndex;
-    return {
-        epoch_index: epochIndex,
-        word: TIER_WORDS[unlocked] || '',
-        line: TIER_LINES[unlocked] || '',
-        circle_name: s.circleName ? String(s.circleName) : '',
-        perk_id: rec ? rec.perkId : null,
-        perk_name_key: rec ? rec.nameKey : null,
-        perk_emblem: rec ? rec.emblem : null,
-        // WO-1921 state 4 fires off the CEREMONY, so the motif has to arrive on the same
-        // object as the perk. No perk (or an unknown one) reads as dormant, never null.
-        tree_motif_id: rec ? motifFor(rec.perkId) : DEFAULT_TREE_MOTIF_ID,
-        passed: passed,
-        // The same instant as epoch.ends_at (epochWireEndsAt), override included.
-        next_ends_at: wireEndsAt !== undefined
-            ? (wireEndsAt != null ? wireEndsAt : null)
-            : (epoch && epoch.endsAt != null ? epoch.endsAt : null),
-    };
-}
-
-/**
- * The Vigil ladder: each tier's bar and whether this Order's Vigil has reached it (the
- * ceremony word follows it). ⛔ WO-2031: NO `options` — the per-tier stat slate was the
- * propose menu, propose is gone (410), and those rows are ruling-3 stat perks.
- */
+/** Which tiers this clan's Vigil can currently open, and what each one offers. */
 function tierWire(vigilWeight) {
     const out = [];
     for (let tier = MIN_TIER; tier <= MAX_TIER; tier++) {
@@ -1739,6 +882,9 @@ function tierWire(vigilWeight) {
             threshold: TIER_THRESHOLDS[tier],
             // Tier 1's bar is "any Vigil at all"; meetsTier owns that asymmetry.
             unlocked: vigilWeight != null ? meetsTier(vigilWeight, tier) : null,
+            options: tierOptions(tier).map((o) => ({
+                option_id: o.optionId, title: o.title, effect: o.effect, description: o.description,
+            })),
         });
     }
     return out;
@@ -1754,13 +900,9 @@ module.exports = {
     EPOCH_ANCHOR_ISO,
     EPOCH_SECONDS,
     TIER_THRESHOLDS,
-    TIER_WORDS,
-    TIER_LINES,
     MIN_TIER,
     MAX_TIER,
     PERK_OPTIONS,
-    PERK_MOTIFS,
-    DEFAULT_TREE_MOTIF_ID,
     PARTICIPATION_BANDS,
     BALLOT_HEADLINE,
     REASON_PASSED,
@@ -1768,15 +910,11 @@ module.exports = {
     REASON_INSUFFICIENT_TURNOUT,
     // pure
     meetsTier,
-    highestUnlockedTier,
     normalizeTier,
     normalizeOptionIds,
     tierOptions,
     describeOption,
-    describePerk,
-    motifFor,
     perkIdFor,
-    settledEpochIndex,
     participationBand,
     requiredVoters,
     evaluateTurnout,
@@ -1792,30 +930,11 @@ module.exports = {
     readVotes,
     readMemberCount,
     readPerks,
-    readLastClosedBallot,
-    readLastResult,
-    insertEpochBallot,
+    insertBallot,
     upsertVote,
     closeBallot,
-    writeEpochPerk,
-    deactivatePerksBefore,
-    applyEpochOutcome,
-    outcomeIsStale,
+    writePerk,
     settleBallot,
-    rollEpoch,
-    forceEpochEnd,
-    ensureEpochColumns,
     readVigilFor,
     uniqueViolation,
-    // WO-2031
-    AUTO_BALLOT_TIER,
-    EPOCH_PERK_SLOT,
-    // The close-early override (Command Center, serverOnly)
-    EPOCH_CLOSE_EARLY_KEY,
-    EPOCH_CLOSE_EARLY_DEFAULT_SECONDS,
-    EPOCH_CLOSE_EARLY_MAX_SECONDS,
-    EPOCH_MIN_OPEN_SECONDS,
-    resolveCloseEarlySeconds,
-    readCloseEarly,
-    epochWireEndsAt,
 };
