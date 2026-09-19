@@ -211,7 +211,7 @@ namespace DeNelle.Wallet
 
         /// <summary>The exact SKR, stated as digits. Never rounded for looks.</summary>
         public string ExactSkrLabel =>
-            BaseUnits <= 0 ? StoreStringsUnavailable : $"{UiAmount:0.######} SKR";
+            BaseUnits <= 0 ? StoreCommerceText.PriceUnavailable.Resolve() : $"{UiAmount:0.######} SKR";
 
         /// <summary>
         /// True when the SERVER applied a discount to this quote. The bps figure is the fact;
@@ -395,7 +395,6 @@ namespace DeNelle.Wallet
             return "ends in " + (int)left.TotalMinutes + "m";
         }
 
-        internal const string StoreStringsUnavailable = "Price unavailable";
     }
 
     /// <summary>The outcome of asking for a binding quote. A failure always carries a WORDED reason.</summary>
@@ -421,18 +420,14 @@ namespace DeNelle.Wallet
         private const string QuoteUrl = BackendRequestSigner.BackendBase + "/api/purchases/quote";
         private const int TimeoutSeconds = 15;
 
-        /// <summary>Worded refusals. ⛔ Never a bare code and never silence: the player is mid-purchase.</summary>
-        public const string RateUnavailableMessage =
-            "We could not read a live SKR price just now, so we will not quote one. " +
-            "Nothing has been charged. Try again in a moment.";
-        public const string QuoteUnavailableMessage =
-            "We could not price this pack right now. Nothing has been charged.";
-        public const string WalletRequiredMessage =
-            "Connect a signing wallet before we can quote a price.";
+        /// <summary>Worded refusals. ⛔ Never a bare code and never silence: the player is mid-purchase.
+        /// WO-1892: resolves through LocalText (store.quote.*).</summary>
+        public static string RateUnavailableMessage => StoreCommerceText.QuoteRateUnavailable.Resolve();
+        public static string QuoteUnavailableMessage => StoreCommerceText.QuoteUnavailable.Resolve();
+        public static string WalletRequiredMessage => StoreCommerceText.QuoteWalletRequired.Resolve();
         /// <summary>Last-resort wording when the server marked a row unsellable but sent no sentence.
         /// ⛔ There is always a sentence — a disabled button with no words explains nothing.</summary>
-        public const string NotSellableFallbackMessage =
-            "This pack cannot be bought right now.";
+        public static string NotSellableFallbackMessage => StoreCommerceText.QuoteNotSellable.Resolve();
 
         // The last LIST response, keyed by sku. Display only — never paid against.
         private static readonly Dictionary<string, PurchaseQuote> _displayPrices =
@@ -740,7 +735,7 @@ namespace DeNelle.Wallet
             {
                 FlowTrace.Warn("Store", $"quote '{pack.Sku}' arrived already EXPIRED ({quote.ExpiresAt}) — refusing.");
                 return PurchaseQuoteResult.Refused(
-                    "That price expired before we could use it. Nothing has been charged; try again.");
+                    StoreCommerceText.QuoteExpired.Resolve());
             }
 
             _displayPrices[quote.Sku] = quote;   // the shelf now shows the number we will actually charge
