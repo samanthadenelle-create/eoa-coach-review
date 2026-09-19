@@ -82,6 +82,35 @@ const EPOCH_ANCHOR_ISO = '2026-01-01T00:00:00Z';
 /** 48 hours, the owner-ruled cadence. */
 const EPOCH_SECONDS = 172800;
 
+function parseTimeMs(value) {
+    if (value instanceof Date) {
+        const t = value.getTime();
+        return Number.isFinite(t) ? t : null;
+    }
+    if (value == null) return null;
+    const t = Date.parse(String(value));
+    return Number.isFinite(t) ? t : null;
+}
+
+/**
+ * Epoch a timestamp sits just after, treating it as an epoch boundary.
+ * closes_at starts the next epoch, so settled index = floor((t - anchor) / period) - 1.
+ * Unparseable input (tests use 'T1') returns null, never NaN.
+ */
+function epochIndexFromTimestamp(value) {
+    const ms = parseTimeMs(value);
+    if (ms == null) return null;
+    const anchorMs = Date.parse(EPOCH_ANCHOR_ISO);
+    if (!Number.isFinite(anchorMs)) return null;
+    const idx = Math.floor((ms - anchorMs) / (EPOCH_SECONDS * 1000)) - 1;
+    return Number.isFinite(idx) ? idx : null;
+}
+
+function settledEpochIndex(ballot) {
+    if (!ballot) return null;
+    return epochIndexFromTimestamp(ballot.closesAt);
+}
+
 /**
  * The epoch, as POSTGRES sees it. The one place the anchor arithmetic is spelled.
  *
@@ -145,6 +174,18 @@ async function readEpoch(sql) {
  */
 const TIER_THRESHOLDS = { 1: 0, 2: 86400, 3: 604800, 4: 2592000, 5: 7776000 };
 
+/** Vigil-weight words, 1:1 with the ballot tiers. Vigil 0 is not Ember. */
+const TIER_WORDS = { 1: 'Ember', 2: 'Flame', 3: 'Beacon', 4: 'Pyre', 5: 'Dawn' };
+
+/** Ceremony of Vigil one-liners. Dawn must not reuse the T5 perk title. */
+const TIER_LINES = {
+    1: 'A spark moves beneath the roots. The Circle has begun.',
+    2: 'The Circle keeps its watch. The Heart is warm.',
+    3: 'The Heart answers. Light climbs the trunk.',
+    4: 'The crown blooms. The ancestors are near.',
+    5: 'The canopy shifts. The Circle has been heard.',
+};
+
 const MIN_TIER = 1;
 const MAX_TIER = 5;
 
@@ -155,6 +196,15 @@ function meetsTier(weight, tier) {
     const bar = TIER_THRESHOLDS[tier];
     if (typeof bar !== 'number') return false;
     return tier === 1 ? w > 0 : w >= bar;
+}
+
+/** Highest unlocked tier for this vigil weight, or 0 if none (vigil 0 is not Ember). */
+function highestUnlockedTier(weight) {
+    let highest = 0;
+    for (let t = MIN_TIER; t <= MAX_TIER; t++) {
+        if (meetsTier(weight, t)) highest = t;
+    }
+    return highest;
 }
 
 function normalizeTier(raw) {
@@ -258,6 +308,18 @@ function describeOption(tier, optionId) {
 function perkIdFor(tier, optionId) {
     const o = describeOption(tier, optionId);
     return o.perkId || null;
+}
+
+/** Catalogue row for a perk id, or null. Never invents copy. */
+function describePerk(perkId) {
+    if (perkId == null) return null;
+    const id = String(perkId);
+    if (id === '') return null;
+    for (let t = MIN_TIER; t <= MAX_TIER; t++) {
+        const found = tierOptions(t).find((o) => o.perkId === id);
+        if (found) return found;
+    }
+    return null;
 }
 
 /** The proposer's chosen option ids: an array of DISTINCT ids from this tier's catalogue. */
@@ -820,9 +882,17 @@ function toWire(state) {
         vigil_degraded: s.vigilDegraded === true,
         ballot: null,
         result: null,
-        perks: (s.perks || []).map((p) => ({
-            tier: p.tier, perk_id: p.perkId, activated_at: p.activatedAt, expires_at: p.expiresAt,
-        })),
+        perks: (s.perks || []).map((p) => {
+            const desc = describePerk(p.perkId);
+            return {
+                tier: p.tier,
+                perk_id: p.perkId,
+                activated_at: p.activatedAt,
+                expires_at: p.expiresAt,
+                title: desc && desc.title ? desc.title : '',
+                description: desc && desc.description ? desc.description : '',
+            };
+        }),
     };
 
     if (ballot) {
@@ -870,7 +940,63 @@ function toWire(state) {
         };
     }
 
+    body.ceremony = ceremonyWire(s, ballot, decision, epoch);
     return body;
+}
+
+function mostRecentPerk(perks) {
+    const list = perks || [];
+    let best = null;
+    let bestMs = -Infinity;
+    for (const p of list) {
+        const ms = parseTimeMs(p && p.activatedAt);
+        if (ms == null) continue;
+        if (ms >= bestMs) {
+            bestMs = ms;
+            best = p;
+        }
+    }
+    if (best) return best;
+    return list.length > 0 ? list[list.length - 1] : null;
+}
+
+function ceremonyPerk(s, ballot, decision) {
+    const passed = !!(ballot && ballot.closedAt != null && decision && decision.passed);
+    if (passed) {
+        const perkId = (s.perk && s.perk.perkId) || perkIdFor(ballot.tier, ballot.winningOption);
+        return describePerk(perkId);
+    }
+    const recent = mostRecentPerk(s.perks);
+    return recent ? describePerk(recent.perkId) : null;
+}
+
+/**
+ * Additive ceremony object. Always present. Word follows CURRENT vigil_weight,
+ * never the ballot's tier number. perk_title/description never copy `effect`.
+ */
+function ceremonyWire(s, ballot, decision, epoch) {
+    const unlocked = highestUnlockedTier(s.vigilWeight);
+    const passed = !!(ballot && ballot.closedAt != null && decision && decision.passed);
+    let epochIndex = null;
+    if (ballot && ballot.closedAt != null) {
+        epochIndex = settledEpochIndex(ballot);
+    } else {
+        const recent = mostRecentPerk(s.perks);
+        if (recent && parseTimeMs(recent.activatedAt) != null) {
+            epochIndex = epochIndexFromTimestamp(recent.activatedAt);
+        }
+    }
+    const perk = ceremonyPerk(s, ballot, decision);
+    return {
+        epoch_index: epochIndex,
+        word: TIER_WORDS[unlocked] || '',
+        line: TIER_LINES[unlocked] || '',
+        circle_name: s.circleName ? String(s.circleName) : '',
+        perk_title: perk && perk.title ? String(perk.title) : '',
+        perk_description: perk && perk.description ? String(perk.description) : '',
+        passed: passed,
+        next_ends_at: epoch && epoch.endsAt != null ? epoch.endsAt : null,
+    };
 }
 
 /** Which tiers this clan's Vigil can currently open, and what each one offers. */
@@ -900,6 +1026,8 @@ module.exports = {
     EPOCH_ANCHOR_ISO,
     EPOCH_SECONDS,
     TIER_THRESHOLDS,
+    TIER_WORDS,
+    TIER_LINES,
     MIN_TIER,
     MAX_TIER,
     PERK_OPTIONS,
@@ -910,11 +1038,14 @@ module.exports = {
     REASON_INSUFFICIENT_TURNOUT,
     // pure
     meetsTier,
+    highestUnlockedTier,
     normalizeTier,
     normalizeOptionIds,
     tierOptions,
     describeOption,
+    describePerk,
     perkIdFor,
+    settledEpochIndex,
     participationBand,
     requiredVoters,
     evaluateTurnout,
