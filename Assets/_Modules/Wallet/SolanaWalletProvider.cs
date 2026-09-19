@@ -1051,6 +1051,53 @@ namespace DeNelle.Wallet
             }
         }
 
+        /// <summary>
+        /// Jupiter v0 swap: pass the opaque serialized tx to MWA (no SDK
+        /// Transaction.Deserialize). Player confirms in the wallet. Then RPC send.
+        /// </summary>
+        public async UniTask<(bool ok, string signature, string error)> SignAndSendSwapTransaction(
+            string swapTransactionBase64, WalletNetwork network)
+        {
+            if (!IsConnected)
+                return (false, null, "no wallet connected");
+            if (string.IsNullOrEmpty(_authToken))
+                return (false, null, "no MWA auth token — reconnect the wallet");
+            byte[] wire;
+            try { wire = Convert.FromBase64String(swapTransactionBase64); }
+            catch (Exception ex)
+            {
+                return (false, null, "swapTransaction was not base64: " + ex.Message);
+            }
+            if (wire == null || wire.Length == 0)
+                return (false, null, "empty swap wire");
+
+            byte[] signedWire;
+            try
+            {
+                var scenario = new TargetedLocalAssociationScenario();
+                signedWire = await scenario.SignTransaction(
+                    DappIdentityUri, DappIconUri, DappIdentityName,
+                    ClusterName(network), _authToken, wire);
+            }
+            catch (TimeoutException ex)
+            {
+                FlowTrace.Fail("Swap", "Jupiter swap sign TIMED OUT before submit: " + ex.Message);
+                return (false, null, TargetedLocalAssociationScenario.SignTimeoutMessage);
+            }
+            if (signedWire == null || signedWire.Length == 0)
+                return (false, null, "Wallet returned no signed swap (cancelled or refused).");
+
+            if (!TryReadPrimarySignature(signedWire, out string signedSignature))
+                return (false, null, "Wallet returned a malformed signed swap; nothing was submitted.");
+
+            var submitted = await SubmitSignedTransaction(
+                WalletEndpoints.RpcUrl(network), signedWire);
+            if (string.IsNullOrEmpty(submitted.signature))
+                return (false, signedSignature, submitted.error ?? "RPC returned no signature");
+            FlowTrace.Step("Swap", "Jupiter swap submitted " + submitted.signature);
+            return (true, submitted.signature, null);
+        }
+
         private static async UniTask<(string signature, string error)> SubmitSignedTransaction(
             string rpcUrl, byte[] signedWire)
         {

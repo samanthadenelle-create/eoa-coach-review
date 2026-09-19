@@ -31,6 +31,7 @@ using System;
 using System.Globalization;
 using System.Text;
 using System.Threading.Tasks;
+using Cysharp.Threading.Tasks;
 using DeNelle.Core;
 using DeNelle.Core.Backend;
 using DeNelle.Core.Diagnostics;
@@ -131,8 +132,17 @@ namespace DeNelle.Web3
 
         private WalletService ResolveWallet()
         {
+            // WalletService is NOT a UnityEngine.Object. PackStore's instance is
+            // stamped on WalletService.ConnectedInstance at Connect. The dialog
+            // constructs a second, disconnected WalletService in Awake — that is
+            // why Seeker 16:40:29 saw 1222 SKR in the store and "no connected
+            // wallet" on ExactOut.
+            if (WalletService.ConnectedInstance != null && WalletService.ConnectedInstance.IsConnected)
+                return WalletService.ConnectedInstance;
             if (_walletDialog == null)
                 _walletDialog = FindAnyObjectByType<WalletConnectDialog>(FindObjectsInactive.Include);
+            if (_walletDialog != null && _walletDialog.Wallet != null && _walletDialog.Wallet.IsConnected)
+                return _walletDialog.Wallet;
             return _walletDialog != null ? _walletDialog.Wallet : null;
         }
 
@@ -164,6 +174,12 @@ namespace DeNelle.Web3
             int platformFeeBps = _feeConfig != null ? _feeConfig.PlatformFeeBps : 20;
             string feeAccount = _feeConfig != null ? _feeConfig.FeeWalletAddress : string.Empty;
 
+            string skrMint = ResolvedSkrMint();
+            if (string.IsNullOrEmpty(skrMint) || skrMint == "REPLACE_WITH_SKR_MINT_ADDRESS")
+            {
+                FlowTrace.Fail("Swap", "GetQuoteAsync aborted: SKR mint unresolved.");
+                return null;
+            }
             string inputMint = input == SwapInputToken.SOL
                 ? WrappedSolMint
                 : WalletEndpoints.UsdcMint(WalletService.DefaultNetwork);
@@ -175,7 +191,7 @@ namespace DeNelle.Web3
 
             var sb = new StringBuilder(QuoteUrl);
             sb.Append("?inputMint=").Append(UnityWebRequest.EscapeURL(inputMint));
-            sb.Append("&outputMint=").Append(UnityWebRequest.EscapeURL(_skrMint));
+            sb.Append("&outputMint=").Append(UnityWebRequest.EscapeURL(skrMint));
             sb.Append("&amount=").Append(amountUnits.ToString(CultureInfo.InvariantCulture));
             sb.Append("&slippageBps=").Append(slippageBps.ToString(CultureInfo.InvariantCulture));
             sb.Append("&platformFeeBps=").Append(platformFeeBps.ToString(CultureInfo.InvariantCulture));
@@ -268,6 +284,12 @@ namespace DeNelle.Web3
             public bool wrapAndUnwrapSol;
         }
 
+        [Serializable]
+        private class SwapResponseDto
+        {
+            public string swapTransaction;
+        }
+
         public async Task<bool> ExecuteSwapAsync(SwapQuote quote, string userPublicKey)
         {
             FlowTrace.Step("Swap", $"ExecuteSwapAsync user='{(string.IsNullOrEmpty(userPublicKey) ? "<empty>" : userPublicKey)}' hasQuote={quote != null}");
@@ -299,21 +321,121 @@ namespace DeNelle.Web3
                 return false;
             }
 
-            FlowTrace.Warn("Swap", "/swap ok — handing to WalletBridgeStub (NO real signing; stub fires a fake sig in editor/dev, hard-fails in release — flag_14)");
-            // TODO(real-wallet): forward the serialised transaction to the real
-            // Solana signer. The project's SolanaWalletProvider (DeNelle.Wallet,
-            // behind the SOLANA_SDK define) signs SystemProgram/TokenProgram
-            // transfers but has NO Jupiter-swap-deserialise-and-sign path yet.
-            // Until that lands, hand off to the stub so the UI flow is testable.
             string swapJson = req.downloadHandler.text;
-            WalletBridgeStub.SignAndSendTransaction(swapJson, onSuccess: sig =>
+            var dto = JsonUtility.FromJson<SwapResponseDto>(swapJson);
+            if (dto == null || string.IsNullOrEmpty(dto.swapTransaction))
             {
-                Debug.Log($"[JupiterSwapService] Swap handed off. Stub signature: {sig}");
-                CloseSwapPanel();
-                // TODO: refresh SKR balance via the wallet stack after a real swap.
-            });
+                FlowTrace.Fail("Swap", "/swap ok but swapTransaction missing — cannot sign.");
+                return false;
+            }
 
+            var wallet = ResolveWallet();
+            if (wallet == null)
+            {
+                FlowTrace.Fail("Swap", "ExecuteSwapAsync: no WalletService — cannot sign.");
+                return false;
+            }
+
+            FlowTrace.Step("Swap", "/swap ok — opaque swapTransaction to wallet (no Transaction.Deserialize; Jupiter v0).");
+            var sent = await wallet.SignAndSendSwapTransaction(dto.swapTransaction);
+            if (!sent.ok)
+            {
+                FlowTrace.Fail("Swap", "wallet SignAndSendSwap FAILED: " + (sent.error ?? "unknown"));
+                return false;
+            }
+            FlowTrace.Step("Swap", "swap submitted sig=" + sent.signature);
+            CloseSwapPanel();
             return true;
+        }
+
+        /// <summary>
+        /// Night Market shortfall: ExactOut quote for <paramref name="minimumSkr"/> SKR,
+        /// then the connected wallet confirms. No silent send.
+        /// </summary>
+        public async Task<bool> TopUpSkrAsync(decimal minimumSkr)
+        {
+            FlowTrace.Step("Swap", "TopUpSkrAsync ExactOut minimumSkr=" + minimumSkr.ToString("0.##"));
+            if (minimumSkr <= 0m) return true;
+            string walletKey = ConnectedWalletKey;
+            if (string.IsNullOrEmpty(walletKey))
+            {
+                var w = ResolveWallet();
+                if (w != null && !w.IsConnected)
+                {
+                    FlowTrace.Step("Swap", "TopUpSkrAsync: wallet present but disconnected — Connect() then ExactOut.");
+                    try { await w.Connect(); }
+                    catch (Exception ex)
+                    {
+                        FlowTrace.Fail("Swap", "TopUpSkrAsync Connect threw " + ex.GetType().Name + ": " + ex.Message);
+                        return false;
+                    }
+                    walletKey = ConnectedWalletKey;
+                }
+            }
+            if (string.IsNullOrEmpty(walletKey))
+            {
+                FlowTrace.Warn("Swap", "TopUpSkrAsync: no connected wallet — blocked (player NOT charged).");
+                return false;
+            }
+            FlowTrace.Step("Swap", "TopUpSkrAsync wallet=" + walletKey.Substring(0, Math.Min(8, walletKey.Length)) + "…");
+
+            var quote = await GetQuoteExactOutAsync(minimumSkr);
+            if (quote == null)
+            {
+                FlowTrace.Fail("Swap", "TopUpSkrAsync: ExactOut quote failed.");
+                return false;
+            }
+            return await ExecuteSwapAsync(quote, walletKey);
+        }
+
+        private async Task<SwapQuote> GetQuoteExactOutAsync(decimal skrNeeded)
+        {
+            string skrMint = ResolvedSkrMint();
+            var wallet = ResolveWallet();
+            var net = wallet != null ? wallet.Network : WalletService.DefaultNetwork;
+            int skrDecimals = WalletEndpoints.SkrDecimals(net);
+            long outUnits = (long)(skrNeeded * (decimal)Math.Pow(10, skrDecimals));
+            if (outUnits <= 0)
+            {
+                FlowTrace.Warn("Swap", "GetQuoteExactOutAsync aborted: outUnits<=0");
+                return null;
+            }
+
+            int slippageBps = _feeConfig != null ? _feeConfig.SlippageBps : 50;
+            int platformFeeBps = _feeConfig != null ? _feeConfig.PlatformFeeBps : 20;
+            string usdc = WalletEndpoints.UsdcMint(net);
+
+            var sb = new StringBuilder(QuoteUrl);
+            sb.Append("?inputMint=").Append(UnityWebRequest.EscapeURL(usdc));
+            sb.Append("&outputMint=").Append(UnityWebRequest.EscapeURL(skrMint));
+            sb.Append("&amount=").Append(outUnits.ToString(CultureInfo.InvariantCulture));
+            sb.Append("&swapMode=ExactOut");
+            sb.Append("&slippageBps=").Append(slippageBps.ToString(CultureInfo.InvariantCulture));
+            sb.Append("&platformFeeBps=").Append(platformFeeBps.ToString(CultureInfo.InvariantCulture));
+
+            using var req = UnityWebRequest.Get(sb.ToString());
+            req.SetRequestHeader("Accept", "application/json");
+            var op = req.SendWebRequest();
+            while (!op.isDone) await Task.Yield();
+            if (req.result != UnityWebRequest.Result.Success)
+            {
+                FlowTrace.Warn("Swap", "ExactOut quote FAILED: " + req.error);
+                return null;
+            }
+            decimal inAmountGuess = skrNeeded; // ParseQuote uses this as the input display divisor
+            return ParseQuote(req.downloadHandler.text, inAmountGuess, UsdcDecimals, slippageBps);
+        }
+
+        private string ResolvedSkrMint()
+        {
+            var wallet = ResolveWallet();
+            var net = wallet != null ? wallet.Network : WalletService.DefaultNetwork;
+            string mint = WalletEndpoints.SkrMint(net);
+            if (!string.IsNullOrEmpty(mint) && mint != "REPLACE_WITH_SKR_MINT_ADDRESS")
+                return mint;
+            if (!string.IsNullOrEmpty(_skrMint) && _skrMint != "REPLACE_WITH_SKR_MINT_ADDRESS")
+                return _skrMint;
+            return WalletEndpoints.SkrMintMainnet;
         }
 
         // =====================================================================

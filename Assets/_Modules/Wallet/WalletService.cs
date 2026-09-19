@@ -303,6 +303,21 @@ namespace DeNelle.Wallet
         /// </summary>
         public WalletNetwork Network { get; private set; } = DefaultNetwork;
 
+        /// <summary>
+        /// The WalletService that last completed Connect. PackStore and Jupiter
+        /// swap must share this instance — WalletConnectDialog constructs its own
+        /// disconnected WalletService in Awake, so FindAnyObjectByType on the
+        /// dialog is the wrong wallet (Seeker 16:40:29, 1222 SKR in store, swap
+        /// saw none).
+        /// </summary>
+        public static WalletService ConnectedInstance { get; private set; }
+
+        /// <summary>Night Market / Jupiter must use THIS instance, not WalletConnectDialog's spare.</summary>
+        public void BindAsConnectedInstance()
+        {
+            if (IsConnected) ConnectedInstance = this;
+        }
+
         /// <summary>Human-readable label for the active network — used by UI badges.</summary>
         public string NetworkLabel => Network == WalletNetwork.Mainnet ? "Mainnet" : "Devnet";
 
@@ -467,7 +482,11 @@ namespace DeNelle.Wallet
         public async UniTask<WalletAccount> Connect()
         {
             using var _ = FlowTrace.Enter("Wallet", $"Connect (provider={ProviderName}, {NetworkLabel})");
-            if (IsConnected) return Account;
+            if (IsConnected)
+            {
+                ConnectedInstance = this;
+                return Account;
+            }
 
             SetStatus(WalletStatus.Connecting);
             LastConnectError = string.Empty;
@@ -499,6 +518,7 @@ namespace DeNelle.Wallet
                 // a real signer (SolanaWalletProvider) is connected.
                 if (account.IsValid)
                 {
+                    ConnectedInstance = this;
                     CoreServices.RegisterWalletSigner(this);
                     // PRIVACY (security audit 2026-08-02): log the MASKED address only.
                     // FlowTrace lines ride WebTraceSink -> api/trace.js into analytics_events
@@ -593,6 +613,7 @@ namespace DeNelle.Wallet
             finally
             {
                 CoreServices.UnregisterWalletSigner(this); // WO-121
+                if (ReferenceEquals(ConnectedInstance, this)) ConnectedInstance = null;
                 SetStatus(WalletStatus.Disconnected);
                 // Same seam as the connect publish above - a view that showed the
                 // connected address must fall back to its connect label, never keep
@@ -797,6 +818,25 @@ namespace DeNelle.Wallet
         }
 
         // =====================================================================
+        /// <summary>
+        /// Signs an opaque Jupiter v0 swap transaction (base64) via the connected
+        /// wallet and submits it. Does NOT deserialize as SDK Transaction (1.2.9
+        /// has no VersionedTransaction). Returns ok=false if this provider cannot.
+        /// </summary>
+        public async UniTask<(bool ok, string signature, string error)> SignAndSendSwapTransaction(
+            string swapTransactionBase64)
+        {
+            if (string.IsNullOrEmpty(swapTransactionBase64))
+                return (false, null, "empty swapTransaction");
+            if (_provider is StubWalletProvider)
+                return (false, null, "stub wallet cannot sign a Jupiter swap");
+#if SOLANA_SDK
+            if (_provider is SolanaWalletProvider sol)
+                return await sol.SignAndSendSwapTransaction(swapTransactionBase64, Network);
+#endif
+            return (false, null, "this wallet cannot sign a Jupiter swap");
+        }
+
         //  IWalletSigner — backend save-auth signing seam (WO-121)
         // =====================================================================
 
