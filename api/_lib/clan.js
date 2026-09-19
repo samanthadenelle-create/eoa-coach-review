@@ -165,6 +165,8 @@ const ClanCode = {
     // ── WO-1847: the message-report refusals ─────────────────────────────────
     BAD_CLAN_ID:          'CLAN_BAD_CLAN_ID',         // 400 — missing or not UUID-shaped
     BAD_MESSAGE_ID:       'CLAN_BAD_MESSAGE_ID',      // 400 — missing, blank, or over the ceiling
+    // WO-1873: roomKind must be global|order (circle accepted as order on the wire).
+    BAD_ROOM_KIND:        'CLAN_BAD_ROOM_KIND',
     // 403 — the caller is not a member of the clan they are reporting into. Deliberately
     // NOT split from "no such clan": answering those separately would turn /report-message
     // into a clan-existence oracle for any authenticated wallet. The single CTE cannot
@@ -963,9 +965,13 @@ function normalizeMessageId(raw) {
 }
 
 /**
- * Record a report against one Cherry message, by a member of the clan it was sent in.
+ * Record a report against one Cherry message.
  *
- * ONE STATEMENT, and here that is the membership CHECK as well as the write (property 3
+ * WO-1873 room kinds:
+ *   - `global` (Commons): any authenticated wallet; clan_id is NULL; no membership check.
+ *   - `order` (Order room, wire alias `circle`): membership-gated INSERT, same as WO-1847.
+ *
+ * For Order, ONE STATEMENT is the membership CHECK as well as the write (property 3
  * in this file's header): the INSERT's rows come from a SELECT over clan_members, so a
  * caller who is not a member of that clan inserts ZERO rows and there is no window in
  * which a membership read passes and a leave lands before the insert. A separate
@@ -982,22 +988,47 @@ function normalizeMessageId(raw) {
  *
  * @param {Function} sql        neon(...) tagged-template client
  * @param {string} wallet       a wallet whose ownership has ALREADY been proven
- * @param {*} rawClanId         body.clanId
+ * @param {*} rawClanId         body.clanId (required for order; ignored for global)
  * @param {*} rawMessageId      body.messageId
- * @returns {Promise<{ok:true, reportId:string, clanId:string}
+ * @param {*} rawRoomKind       body.roomKind — global|order (circle → order)
+ * @returns {Promise<{ok:true, reportId:string, clanId:string|null, roomKind:string}
  *                 | {ok:false, status:number, code:string, detail?:object}>}
  */
-async function reportMessage(sql, wallet, rawClanId, rawMessageId) {
-    const clanId = normalizeClanId(rawClanId);
-    if (!clanId.ok) return { ok: false, status: 400, code: clanId.code };
+async function reportMessage(sql, wallet, rawClanId, rawMessageId, rawRoomKind) {
+    const { normalizeRoomKind } = require('./clan-chat');
+    const kind = normalizeRoomKind(rawRoomKind);
+    if (!kind.ok) return { ok: false, status: 400, code: ClanCode.BAD_ROOM_KIND };
+
     const messageId = normalizeMessageId(rawMessageId);
     if (!messageId.ok) return { ok: false, status: 400, code: messageId.code };
+
+    if (kind.value === 'global') {
+        let rows;
+        try {
+            rows = await sql`
+                INSERT INTO clan_reports (reporter_wallet, message_id, clan_id, room_kind)
+                VALUES (${wallet}, ${messageId.value}, NULL, 'global')
+                RETURNING id, clan_id, reported_at
+            `;
+        } catch (err) {
+            if (identityForeignKeyViolation(err)) {
+                return { ok: false, status: 500, code: ClanCode.IDENTITY_MISSING, detail: { migration: '0029/0039' } };
+            }
+            throw err;
+        }
+        const g = rows && rows[0] ? rows[0] : null;
+        if (!g) return { ok: false, status: 500, code: ClanCode.IDENTITY_MISSING };
+        return { ok: true, reportId: String(g.id), clanId: null, roomKind: 'global' };
+    }
+
+    const clanId = normalizeClanId(rawClanId);
+    if (!clanId.ok) return { ok: false, status: 400, code: clanId.code };
 
     let rows;
     try {
         rows = await sql`
-            INSERT INTO clan_reports (reporter_wallet, message_id, clan_id)
-            SELECT ${wallet}, ${messageId.value}, m.clan_id
+            INSERT INTO clan_reports (reporter_wallet, message_id, clan_id, room_kind)
+            SELECT ${wallet}, ${messageId.value}, m.clan_id, 'order'
             FROM clan_members m
             WHERE m.clan_id = ${clanId.value}::uuid AND m.wallet = ${wallet}
             RETURNING id, clan_id, reported_at
@@ -1015,7 +1046,7 @@ async function reportMessage(sql, wallet, rawClanId, rawMessageId) {
     const r = rows && rows[0] ? rows[0] : null;
     if (!r) return { ok: false, status: 403, code: ClanCode.REPORT_NOT_MEMBER };
 
-    return { ok: true, reportId: String(r.id), clanId: String(r.clan_id) };
+    return { ok: true, reportId: String(r.id), clanId: String(r.clan_id), roomKind: 'order' };
 }
 
 // ── WO-1850 (clan WO-7): the leaderboard ────────────────────────────────────
