@@ -408,6 +408,12 @@ namespace DeNelle.Wallet
             // called un-attested. Desktop remains LOCAL-ONLY by design - a devnet
             // stub address must never key a shared cloud save row. This change only
             // stops Connect from erroring; it grants the stub nothing.
+#if UNITY_WEBGL && !UNITY_EDITOR && SOLANA_SDK
+            _provider = new WebGLWalletProvider();
+            FlowTrace.Once("Wallet", "wo1887-webgl-adapter",
+                "WebGLWalletProvider selected - Magicblock Wallet Standard (not StubWalletProvider, not MWA).");
+            Debug.Log("[WalletService] Using WebGLWalletProvider (SolanaWalletAdapter / Wallet Standard).");
+#else
             if (SolanaWalletProvider.IsSupportedOnThisPlatform)
             {
                 _provider = new SolanaWalletProvider();
@@ -432,6 +438,7 @@ namespace DeNelle.Wallet
                       "Android device - editor/desktop/WebGL run the devnet mock; saves stay local-only)."
                     : "[WalletService] Using StubWalletProvider (Solana Unity SDK absent - devnet mock).");
             }
+#endif
         }
 
         /// <summary>
@@ -470,6 +477,11 @@ namespace DeNelle.Wallet
             // Timeout below uses UnscaledDeltaTime and a paused/slowed game must not skew the branch.
             float connectStartedAt = Time.realtimeSinceStartup;
             DateTime associationCloseBefore = TargetedLocalAssociationScenario.LastAssociationCloseUtc;
+#if UNITY_WEBGL && !UNITY_EDITOR
+            float connectCeiling = 90f;
+#else
+            float connectCeiling = ConnectTimeoutSeconds;
+#endif
             try
             {
                 // TIME-BOUNDED (security audit 2026-08-02): an unanswered MWA handshake
@@ -477,7 +489,7 @@ namespace DeNelle.Wallet
                 // TimeoutException, which lands in the catch below as a normal failure -
                 // status returns to Disconnected and the caller gets an honest reason.
                 var account = await _provider.Connect(Network)
-                    .Timeout(TimeSpan.FromSeconds(ConnectTimeoutSeconds), DelayType.UnscaledDeltaTime);
+                    .Timeout(TimeSpan.FromSeconds(connectCeiling), DelayType.UnscaledDeltaTime);
                 SetStatus(account.IsValid ? WalletStatus.Connected : WalletStatus.Disconnected);
 
                 // WO-121: expose this connected wallet as the backend save-auth
@@ -526,7 +538,7 @@ namespace DeNelle.Wallet
             catch (TimeoutException ex)
             {
                 float elapsed = Time.realtimeSinceStartup - connectStartedAt;
-                bool ourDeadline = elapsed >= ConnectTimeoutSeconds;
+                bool ourDeadline = elapsed >= connectCeiling;
 
                 // WO-1420 item 2: name the association close in the SAME line when it happened
                 // during THIS attempt, so a triage never again has to correlate two threads by
@@ -539,10 +551,10 @@ namespace DeNelle.Wallet
 
                 if (ourDeadline)
                 {
-                    LastConnectError = "Your wallet did not respond in " + (int)ConnectTimeoutSeconds +
+                    LastConnectError = "Your wallet did not respond in " + (int)connectCeiling +
                                        " seconds. Open your wallet app and try again.";
                     FlowTrace.Fail("Wallet",
-                        $"Connect TIMED OUT after {elapsed:F1}s (our {ConnectTimeoutSeconds}s deadline expired - " +
+                        $"Connect TIMED OUT after {elapsed:F1}s (our {connectCeiling}s deadline expired - " +
                         "no wallet app installed, or the handshake was never answered) — staying disconnected." +
                         closeNote);
                 }
