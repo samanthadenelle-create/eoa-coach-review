@@ -753,6 +753,7 @@ const CLAN_RATE_LIMITS = {
     promote: 20,
     demote:  20,
     kick:    20,
+    rename:  10, // WO-1890: Order rename (credit-gated; budget stops thrash)
 };
 // An action nobody declared a budget for is a PROGRAMMING mistake (a typo in a route),
 // and it is answered with the STRICTEST declared budget rather than with no budget at

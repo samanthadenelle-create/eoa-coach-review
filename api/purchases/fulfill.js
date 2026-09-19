@@ -9,6 +9,7 @@ const { applyCors, newRef, quietFail, readBodyExact } = require('../_lib/http');
 const { logAuthReject } = require('../_lib/audit');
 const { walletAllowed } = require('../_lib/purchase-catalog');
 const { markEntitlementFulfilled } = require('../_lib/purchase-fulfilment');
+const { skuGrantsOrderRenameCredit, grantOrderRenameCredit } = require('../_lib/clan');
 const pi = require('../_lib/pi-payments');
 
 // ⛔ SOLANA'S SIGNATURE SHAPE. base58 (no 0 O I l), 80-90 chars. DO NOT RELAX IT
@@ -76,8 +77,26 @@ async function handler(req, res) {
 
     // THE transition lives in api/_lib/purchase-fulfilment.js — one statement,
     // two callers (this route and api/pi/fulfill.js). See that file's header.
-    try { await markEntitlementFulfilled(sql, rows[0], playerId, ref); }
-    catch (_) { return quietFail(res, 500, AuthCode.SERVER_ERROR, ref); }
+    let flipped = false;
+    try {
+        const outcome = await markEntitlementFulfilled(sql, rows[0], playerId, ref);
+        flipped = !!(outcome && outcome.flipped);
+    } catch (_) { return quietFail(res, 500, AuthCode.SERVER_ERROR, ref); }
+
+    // WO-1890: Order rename credit lives on the clan row (server), not in the local
+    // save. Grant ONLY on the first flip so a replay ack cannot mint a second credit.
+    // Documented alternate door: POST /api/clan/rename-credit.
+    if (flipped && skuGrantsOrderRenameCredit(sku)) {
+        try {
+            const granted = await grantOrderRenameCredit(sql, playerId, 1);
+            if (!granted.ok) {
+                console.warn('[purchases/fulfill] order rename credit not granted:',
+                    granted.code, 'sku=' + sku + ' wallet=' + playerId);
+            }
+        } catch (err) {
+            console.warn('[purchases/fulfill] order rename credit threw:', err && err.message);
+        }
+    }
 
     return res.status(200).json({ success: true, state: 'fulfilled', sku,
         network, txSignature: signature, entitlementId: String(rows[0].entitlement_id) });

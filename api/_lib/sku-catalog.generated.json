@@ -958,6 +958,31 @@
       },
       "storeSection": "essentials",
       "_shelfNote": "WO-1253. Permanent builder is CONCURRENCY (+1 crew on ChannelId.Builder), never queue depth. Redeemed by BuildTimerService.SlotCount reading OwnedItemIds for this SKU. Grant is idempotent under re-settle. Crystal extra-slot sink (TryBuySlot) is KEEP BOTH and still buys DEPTH. Priced at $9.99 so PurchaseGate requires an attested wallet - a reinstall-safe entitlement must not live on a guest-local key."
+    },
+    {
+      "sku": "order_rename",
+      "tier": 30,
+      "storeSection": "essentials",
+      "storeVisible": false,
+      "_hiddenReason": "WO-1890 Order rename is bought from the Order screen (leader), not the Night Market shelf. SKR channel. Hidden on Google Play HUD via #if GOOGLE_PLAY.",
+      "name": "Order Rename",
+      "tagline": "One rename of your Order. Leaders only.",
+      "theme": "WO-1890: renaming an Order costs 100 SKR so names are not changed for free. Grants one rename credit on the clan row; POST /api/clan/rename consumes it.",
+      "founderOnly": false,
+      "pricing": {
+        "usd": 1.99,
+        "usdc": 1.99,
+        "sol": 0.018,
+        "skr": 25,
+        "skrFlat": 100
+      },
+      "contents": {
+        "cosmetics": [],
+        "economy": {},
+        "convenience": [],
+        "orderRename": 1
+      },
+      "_shelfNote": "WO-1890 (owner 2026-09-19): renaming an Order costs 100 SKR. Server is price authority (skrFlat 100). Game never holds SKR — buy this SKU, fulfill grants clans.rename_credits += 1, POST /api/clan/rename consumes one credit. Empty economy so it does not dominate impulse rungs at \\.99. Not a Play product — HUD hides the SKR rename on GOOGLE_PLAY. Hidden from Night Market browse (storeVisible:false); purchase door is the Order HUD."
     }
   ]
 }

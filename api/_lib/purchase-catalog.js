@@ -97,6 +97,9 @@ const USD_ANCHORS = Object.freeze({
     // WO-1449: the $1.99 first-buy micro (packs.json `builders-hour`). Small basket
     // + ONE temporary builder crew for six hours - a CONSUMABLE, nothing permanent.
     'builders-hour': 1.99,
+    // WO-1890: one Order rename credit. Empty economy bag — does not dominate impulse
+    // rungs at the shared $1.99 anchor. SKR channel only (hide on GOOGLE_PLAY HUD).
+    'order_rename': 1.99,
     'impulse-wood-small': 1.99,
     'impulse-wood-medium': 2.99,
     'impulse-wood-large': 4.99,

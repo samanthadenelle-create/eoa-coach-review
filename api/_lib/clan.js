@@ -96,6 +96,13 @@ const TAG_MAX = 5;
 const LEADER = 'leader';
 const MEMBER = 'member';
 
+// ── WO-1890: Order rename costs 100 SKR (one credit per paid SKU) ─────────────
+// Game never holds SKR. Buy SKU order_rename → grant one rename_credits on the
+// clan → POST /api/clan/rename consumes one credit then updates clans.name.
+// Server is the price authority; this constant is the documented flat ladder rung.
+const ORDER_RENAME_COST_SKR = 100;
+const ORDER_RENAME_SKU = 'order_rename';
+
 // ── WO-1851 (clan WO-8): join-policy vocabulary ──────────────────────────────
 // Owner ruling 2026-09-17: exactly two values. 'invite' (join requires the clan's
 // code — the current, unchanged server default) and 'open' (anyone may join without
@@ -163,7 +170,44 @@ const ClanCode = {
     // into a clan-existence oracle for any authenticated wallet. The single CTE cannot
     // tell them apart either, so the collapse is structural rather than remembered.
     REPORT_NOT_MEMBER:    'CLAN_REPORT_NOT_MEMBER',
+
+    // ── WO-1890: Order rename (player-facing Order; persistence stays clan_*) ─
+    // Spelled ORDER_RENAME_NO_CREDIT on purpose — the work order names this code
+    // for the client branch, not CLAN_*.
+    ORDER_RENAME_NO_CREDIT: 'ORDER_RENAME_NO_CREDIT',
 };
+
+// Memoised so the ensure DDL runs once per cold start, not on every membership read.
+let _renameCreditsEnsured = false;
+
+/**
+ * WO-1890. Idempotent ADD COLUMN for clans.rename_credits — same ensure shape other
+ * clan columns used (migration + live ALTER so a deploy that lands code before the
+ * migration file still serves rename rather than 500ing on a missing column).
+ */
+async function ensureRenameCreditsColumn(sql) {
+    if (_renameCreditsEnsured) return;
+    await sql`ALTER TABLE clans ADD COLUMN IF NOT EXISTS rename_credits INTEGER NOT NULL DEFAULT 0`;
+    _renameCreditsEnsured = true;
+}
+
+/** True when a pack SKU itself is order_rename, or its contents.orderRename is > 0. */
+function skuGrantsOrderRenameCredit(sku, contents) {
+    if (String(sku || '') === ORDER_RENAME_SKU) return true;
+    let bag = contents;
+    if (bag == null) {
+        try {
+            const catalog = require('./sku-catalog.generated.json');
+            const packs = (catalog && catalog.packs) || [];
+            const pack = packs.find((p) => p && String(p.sku) === String(sku));
+            bag = pack && pack.contents;
+        } catch (_) {
+            bag = null;
+        }
+    }
+    const n = bag && bag.orderRename != null ? Number(bag.orderRename) : 0;
+    return Number.isFinite(n) && n > 0;
+}
 
 // ── Validation ───────────────────────────────────────────────────────────────
 
@@ -300,8 +344,9 @@ function identityForeignKeyViolation(err) {
  * @param {string} wallet    a wallet whose ownership has ALREADY been proven
  */
 async function readMembership(sql, wallet) {
+    await ensureRenameCreditsColumn(sql);
     const rows = await sql`
-        SELECT c.id AS clan_id, c.code, c.name, c.tag, c.join_policy, c.created_at,
+        SELECT c.id AS clan_id, c.code, c.name, c.tag, c.join_policy, c.rename_credits, c.created_at,
                m.role, m.joined_at,
                (SELECT COUNT(*) FROM clan_members x WHERE x.clan_id = c.id)::int AS member_count
         FROM clan_members m
@@ -317,6 +362,7 @@ async function readMembership(sql, wallet) {
         name: r.name,
         tag: r.tag,
         joinPolicy: r.join_policy,
+        renameCredits: Number(r.rename_credits) || 0,
         createdAt: r.created_at,
         role: r.role,
         joinedAt: r.joined_at,
@@ -446,6 +492,84 @@ async function demoteMember(sql, callerWallet, rawTarget) {
         return { ok: false, status: 409, code: ClanCode.RACED, detail: { op: 'demote' } };
     }
     return { ok: true, clanId: ctx.caller.clanId, wallet: String(rows[0].wallet), role: rows[0].role };
+}
+
+/**
+ * WO-1890. Rename the caller's Order. Leader only. Consumes one rename_credits.
+ *
+ * Create stays free; a second name change without a credit returns ORDER_RENAME_NO_CREDIT.
+ * Tag change is out of scope.
+ *
+ * @returns {Promise<{ok:true, name:string, renameCredits:number}
+ *                 | {ok:false, status:number, code:string, detail?:object}>}
+ */
+async function renameClan(sql, callerWallet, rawName) {
+    await ensureRenameCreditsColumn(sql);
+    const name = normalizeName(rawName);
+    if (!name.ok) return { ok: false, status: 400, code: name.code };
+
+    const caller = await readMembership(sql, callerWallet);
+    if (!caller) return { ok: false, status: 404, code: ClanCode.NOT_IN_CLAN };
+    if (caller.role !== LEADER) {
+        return { ok: false, status: 403, code: ClanCode.FORBIDDEN, detail: { role: caller.role } };
+    }
+    if (caller.renameCredits <= 0) {
+        return { ok: false, status: 400, code: ClanCode.ORDER_RENAME_NO_CREDIT };
+    }
+
+    // Authorization + credit restated inside the UPDATE so a demotion or a raced
+    // rename between the read and the write cannot still spend a credit.
+    const rows = await sql`
+        UPDATE clans SET name = ${name.value}, rename_credits = rename_credits - 1
+        WHERE id = ${caller.clanId}
+          AND rename_credits > 0
+          AND EXISTS (
+              SELECT 1 FROM clan_members m
+              WHERE m.clan_id = ${caller.clanId}
+                AND m.wallet = ${callerWallet}
+                AND m.role = ${LEADER}
+          )
+        RETURNING name, rename_credits
+    `;
+    if (!rows || rows.length === 0) {
+        const again = await readMembership(sql, callerWallet);
+        if (!again) return { ok: false, status: 404, code: ClanCode.NOT_IN_CLAN };
+        if (again.role !== LEADER) {
+            return { ok: false, status: 409, code: ClanCode.RACED, detail: { op: 'rename' } };
+        }
+        if (again.renameCredits <= 0) {
+            return { ok: false, status: 400, code: ClanCode.ORDER_RENAME_NO_CREDIT };
+        }
+        return { ok: false, status: 409, code: ClanCode.RACED, detail: { op: 'rename' } };
+    }
+    return {
+        ok: true,
+        name: rows[0].name,
+        renameCredits: Number(rows[0].rename_credits) || 0,
+    };
+}
+
+/**
+ * WO-1890. Grant one (or N) Order-rename credit(s) to the clan the wallet belongs to.
+ * Used by the purchase fulfill hook and by POST /api/clan/rename-credit.
+ *
+ * @returns {Promise<{ok:true, clanId:string, renameCredits:number}
+ *                 | {ok:false, status:number, code:string}>}
+ */
+async function grantOrderRenameCredit(sql, wallet, amount) {
+    await ensureRenameCreditsColumn(sql);
+    // A paid SKU always means at least one rename; garbage / absent amount → 1.
+    const parsed = Math.floor(Number(amount));
+    const n = Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+    const rows = await sql`
+        UPDATE clans c
+           SET rename_credits = c.rename_credits + ${n}
+          FROM clan_members m
+         WHERE c.id = m.clan_id AND m.wallet = ${wallet}
+     RETURNING c.id AS clan_id, c.rename_credits
+    `;
+    if (!rows || rows.length === 0) return { ok: false, status: 404, code: ClanCode.NOT_IN_CLAN };
+    return { ok: true, clanId: String(rows[0].clan_id), renameCredits: Number(rows[0].rename_credits) || 0 };
 }
 
 /**
@@ -1032,4 +1156,11 @@ module.exports = {
     LEADERBOARD_MAX_LIMIT,
     clampLeaderboardLimit,
     getLeaderboard,
+    // ── WO-1890 — Order rename credits (100 SKR) ─────────────────────────────
+    ORDER_RENAME_COST_SKR,
+    ORDER_RENAME_SKU,
+    ensureRenameCreditsColumn,
+    skuGrantsOrderRenameCredit,
+    renameClan,
+    grantOrderRenameCredit,
 };
