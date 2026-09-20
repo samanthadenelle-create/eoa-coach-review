@@ -9,6 +9,7 @@
     { "path": "/api/cron/heart-pulse", "schedule": "0 5 * * *" }
   ],
   "rewrites": [
+    { "source": "/admin", "destination": "/api/admin/console" },
     { "source": "/privacy", "destination": "/privacy.html" },
     { "source": "/terms", "destination": "/terms.html" },
     { "source": "/.well-known/assetlinks.json", "destination": "/api/assetlinks" },
