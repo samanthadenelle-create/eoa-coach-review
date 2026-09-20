@@ -9,6 +9,8 @@
          Pi.init + Pi.authenticate are driven from C# via PiBridge.jslib /
          PiSignInController - we only LOAD the SDK here so window.Pi exists. -->
     <script src="https://sdk.minepi.com/pi-sdk.js"></script>
+    <!-- AppLixir rewarded video (itch / Vercel WebGL). Pi Browser uses PiAdProvider instead. -->
+    <script src="https://cdn.applixir.com/applixir.app.v6.1.0.js"></script>
 
     <link rel="shortcut icon" href="TemplateData/favicon.ico" />
     <link rel="stylesheet" href="TemplateData/style.css" />
@@ -47,9 +49,10 @@
   </head>
   <body>
     <div id="unity-container">
-      <canvas id="unity-canvas" tabindex="-1"></canvas>
+      <canvas id="unity-canvas" width="1920" height="1080" tabindex="-1"></canvas>
       <div id="unity-loading-bar">Loading {{{ PRODUCT_NAME }}}...</div>
     </div>
+    <div id="applixir-ad-container"></div>
     <div id="pi-landscape-gate" role="dialog" aria-modal="true" aria-label="Landscape required">
       <div>Echoes of Elarion plays in landscape.<br />Rotate your device, then enter landscape.</div>
       <button id="pi-landscape-button" type="button">ENTER LANDSCAPE</button>
