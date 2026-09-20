@@ -98,6 +98,9 @@ namespace DeNelle.Editor
             "cryptoconfig",
             "cryptostream",
             "cryptoservice",
+            // 2026-09-20 Play AAB: OrderScreenVM maps the server error AUTH_CRYPTO_UNAVAILABLE.
+            // Token crypto is not short, so AUTH_CRYPTO_* fires. Protocol code, not a product rail.
+            "auth_crypto",
             // 'crypto' inside the Android/Java platform. javax.crypto is the JCE package,
             // present in every dex that touches TLS or keystores.
             "javax.crypto",
@@ -273,7 +276,18 @@ namespace DeNelle.Editor
             // change, not a spelling change. Holds the token skr at offset 12; the
             // surrounding characters are hyphens, so the whole-identity rule is what scopes
             // it, and no other vocabulary entry is a substring of it.
-            "dotr-arena-skr-balance"
+            "dotr-arena-skr-balance",
+            // 2026-09-20 Play AAB dump (EchoesOfElarion-GooglePlay-20260920-102232.REJECTED):
+            // globalgamemanagers.assets.split0 carries Unity MonoScript type names for
+            // Core.Backend types that are #if !GOOGLE_PLAY. The player still records the
+            // SCRIPT FILE type string. Not a live Jupiter UI.
+            "JupiterSwapDoor",
+            "IJupiterService",
+            // Same dump: System.Security.Cryptography* and AUTH_CRYPTO_UNAVAILABLE.
+            // crypto is not a short token so Cryptography fires on a leading-boundary-only
+            // match. AUTH_CRYPTO_UNAVAILABLE is a server error code OrderScreenVM maps.
+            "Cryptography",
+            "AUTH_CRYPTO_UNAVAILABLE",
         };
 
         // Tokens the PLAY-NEUTRAL AUTHORING SWEEP polices that the ARTIFACT scan deliberately
