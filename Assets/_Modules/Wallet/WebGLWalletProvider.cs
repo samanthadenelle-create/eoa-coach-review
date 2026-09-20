@@ -5,6 +5,8 @@ using System;
 using Cysharp.Threading.Tasks;
 using Solana.Unity.SDK;
 using UnityEngine;
+using UnityEngine.Networking;
+using DeNelle.Core.Backend;
 using DeNelle.Core.Diagnostics;
 
 namespace DeNelle.Wallet
@@ -84,9 +86,41 @@ namespace DeNelle.Wallet
             return UniTask.CompletedTask;
         }
 
-        public UniTask<WalletBalance> GetBalance(WalletNetwork network)
+        public async UniTask<WalletBalance> GetBalance(WalletNetwork network)
         {
-            return UniTask.FromResult(default(WalletBalance));
+            var balance = default(WalletBalance);
+            if (!_connected || !_account.IsValid) return balance;
+
+            // Browser CORS cannot hit public Solana RPC reliably. Our API
+            // proxies getTokenAccountsByOwner (itch 2026-09-20: chip said
+            // "SKR balance unavailable" because this used to return default 0).
+            string url = BackendRequestSigner.BackendBase + "/api/wallet/skr-balance?address="
+                         + UnityWebRequest.EscapeURL(_account.Address);
+            using var req = UnityWebRequest.Get(url);
+            var op = req.SendWebRequest();
+            while (!op.isDone) await UniTask.Yield();
+            if (req.result != UnityWebRequest.Result.Success)
+            {
+                FlowTrace.Warn("Wallet",
+                    "WebGL GetBalance HTTP " + req.responseCode + " " + req.error);
+                return balance;
+            }
+            var dto = JsonUtility.FromJson<SkrBalanceDto>(req.downloadHandler.text);
+            if (dto == null || !dto.ok)
+            {
+                FlowTrace.Warn("Wallet", "WebGL GetBalance body not ok");
+                return balance;
+            }
+            balance.Skr = dto.skr;
+            FlowTrace.Step("Wallet", "WebGL GetBalance skr=" + dto.skr.ToString("0.##"));
+            return balance;
+        }
+
+        [Serializable]
+        private class SkrBalanceDto
+        {
+            public bool ok;
+            public double skr;
         }
 
         public UniTask<PaymentResult> SendPayment(
