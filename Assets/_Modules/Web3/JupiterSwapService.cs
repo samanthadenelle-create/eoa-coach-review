@@ -45,12 +45,56 @@ namespace DeNelle.Web3
     [RequireComponent(typeof(UIDocument))]
     public sealed class JupiterSwapService : MonoBehaviour, IJupiterService
     {
-        // ── Jupiter REST endpoints ───────────────────────────────────────────
-        // OWNER-CONFIG: Jupiter aggregator API base. These are the public
-        // mainnet endpoints. If/when a self-hosted or paid Jupiter API is used,
-        // change the base here. NOTE the devnet/mainnet caveat in the file header.
-        private const string QuoteUrl = "https://quote-api.jup.ag/v6/quote";
-        private const string SwapUrl = "https://quote-api.jup.ag/v6/swap";
+        // ── Jupiter REST endpoints (WO-1901) ─────────────────────────────────
+        // OWNER-CONFIG: Jupiter aggregator API base. These are the public mainnet
+        // endpoints and they are the SINGLE pair — never re-type a Jupiter host
+        // anywhere else in the codebase (JupiterEndpointRegression pins that).
+        //
+        // ⛔ THE RETIRED v6 HOST NO LONGER RESOLVES. Until 2026-09-20 these two
+        // consts named Jupiter's retired v6 aggregator host; its DNS record is
+        // gone, UnityWebRequest surfaces a DNS failure as the useless string
+        // "Unknown Error", and EVERY swap in EVERY build (web + Android) failed
+        // closed with funnel reason=provider-refused. That is why the failure
+        // paths below log responseCode + host + body, not just req.error.
+        // Probed live 2026-09-20: /swap/v1/quote returns HTTP 200 for USDC->SKR
+        // ExactOut with access-control-allow-origin: * (WebGL-safe).
+        private const string QuoteUrl = "https://lite-api.jup.ag/swap/v1/quote";
+        private const string SwapUrl = "https://lite-api.jup.ag/swap/v1/swap";
+
+        // Host only — safe to log (carries no amounts, no wallet, no fee account).
+        private static string HostOf(string url)
+        {
+            try { return new Uri(url).Host; } catch { return "<unparsable-url>"; }
+        }
+
+        /// <summary>
+        /// First-use marker naming the Jupiter host this build talks to, so a
+        /// trace PROVES which endpoint answered instead of leaving it inferred.
+        /// </summary>
+        private static void TraceEndpointOnce()
+        {
+            FlowTrace.Once("Swap", "swap-endpoint",
+                "Jupiter host=" + HostOf(QuoteUrl) + " quotePath=/swap/v1/quote swapPath=/swap/v1/swap");
+        }
+
+        /// <summary>
+        /// The one failure-line builder for every Jupiter HTTP path. NEVER log
+        /// req.error alone — a DNS failure reduces to "Unknown Error" and names
+        /// nothing (WO-1901). Includes the transport error, the HTTP status code,
+        /// the HOST (not the query string, which carries amounts), and the first
+        /// 200 chars of the response body, which is where Jupiter puts its own
+        /// errorCode (e.g. NOT_SUPPORTED / TOKEN_NOT_TRADABLE).
+        /// </summary>
+        private static string HttpFailureDetail(UnityWebRequest req, string url)
+        {
+            string body = req != null && req.downloadHandler != null ? (req.downloadHandler.text ?? string.Empty) : string.Empty;
+            if (body.Length > 200) body = body.Substring(0, 200);
+            body = body.Replace("\n", " ").Replace("\r", " ");
+            return "error='" + (req != null ? (req.error ?? "<null>") : "<null-req>") + "'"
+                 + " responseCode=" + (req != null ? req.responseCode : -1)
+                 + " host=" + HostOf(url)
+                 + " body[0..200]='" + body + "'";
+        }
 
         // ── Token mints ──────────────────────────────────────────────────────
         // USDC + SOL mints are sourced from the existing single-source-of-truth
@@ -194,10 +238,20 @@ namespace DeNelle.Web3
             sb.Append("&outputMint=").Append(UnityWebRequest.EscapeURL(skrMint));
             sb.Append("&amount=").Append(amountUnits.ToString(CultureInfo.InvariantCulture));
             sb.Append("&slippageBps=").Append(slippageBps.ToString(CultureInfo.InvariantCulture));
-            sb.Append("&platformFeeBps=").Append(platformFeeBps.ToString(CultureInfo.InvariantCulture));
+            // ⛔ platformFeeBps ONLY when a fee account is configured. Probed live
+            // 2026-09-20: a quote carrying platformFee posted to /swap/v1/swap with
+            // no feeAccount returns HTTP 400 {"errorCode":"NOT_SUPPORTED",
+            // "error":"feeAccount is required for swap with platformFee"} — i.e.
+            // asking for the fee unconditionally BREAKS the swap for an unconfigured
+            // build. feeAccount is accepted (and ignored) on /quote; the swap body
+            // is where it is actually consumed.
             if (!string.IsNullOrEmpty(feeAccount))
+            {
+                sb.Append("&platformFeeBps=").Append(platformFeeBps.ToString(CultureInfo.InvariantCulture));
                 sb.Append("&feeAccount=").Append(UnityWebRequest.EscapeURL(feeAccount));
+            }
 
+            TraceEndpointOnce();
             using var req = UnityWebRequest.Get(sb.ToString());
             req.SetRequestHeader("Accept", "application/json");
 
@@ -206,8 +260,9 @@ namespace DeNelle.Web3
 
             if (req.result != UnityWebRequest.Result.Success)
             {
-                FlowTrace.Warn("Swap", $"Quote request FAILED: {req.error} (mainnet Jupiter vs devnet wallet — flag_12)");
-                Debug.LogWarning($"[JupiterSwapService] Quote request failed: {req.error}");
+                string detail = HttpFailureDetail(req, QuoteUrl);
+                FlowTrace.Warn("Swap", "Quote request FAILED: " + detail);
+                Debug.LogWarning("[JupiterSwapService] Quote request failed: " + detail);
                 return null;
             }
 
@@ -282,6 +337,21 @@ namespace DeNelle.Web3
         {
             public string userPublicKey;
             public bool wrapAndUnwrapSol;
+            // Jupiter /swap/v1/swap: let the API size the compute-unit limit rather
+            // than shipping the 1.4M default, which overpays priority fees.
+            public bool dynamicComputeUnitLimit;
+        }
+
+        // The fee-bearing variant. JsonUtility emits every field of a struct, so a
+        // single DTO would always send "feeAccount":"" and Jupiter treats that as a
+        // supplied-but-invalid account. Two DTOs keep the key ABSENT when unset.
+        [Serializable]
+        private struct SwapRequestTailWithFee
+        {
+            public string userPublicKey;
+            public bool wrapAndUnwrapSol;
+            public bool dynamicComputeUnitLimit;
+            public string feeAccount;
         }
 
         [Serializable]
@@ -301,11 +371,25 @@ namespace DeNelle.Web3
             // so userPublicKey is PROPERLY ESCAPED (security audit B-JSONINJ — no string-concat
             // JSON injection). We splice the serialized tail (minus its opening brace) after the
             // raw quoteResponse.
-            var tail = new SwapRequestTail { userPublicKey = userPublicKey, wrapAndUnwrapSol = true };
-            string tailJson = JsonUtility.ToJson(tail);                  // {"userPublicKey":"...","wrapAndUnwrapSol":true}
+            string feeAccount = _feeConfig != null ? _feeConfig.FeeWalletAddress : string.Empty;
+            string tailJson = string.IsNullOrEmpty(feeAccount)
+                ? JsonUtility.ToJson(new SwapRequestTail
+                  {
+                      userPublicKey = userPublicKey,
+                      wrapAndUnwrapSol = true,
+                      dynamicComputeUnitLimit = true
+                  })
+                : JsonUtility.ToJson(new SwapRequestTailWithFee
+                  {
+                      userPublicKey = userPublicKey,
+                      wrapAndUnwrapSol = true,
+                      dynamicComputeUnitLimit = true,
+                      feeAccount = feeAccount
+                  });
             string tailInner = tailJson.Substring(1, tailJson.Length - 2); // strip the wrapping braces
             string body = "{\"quoteResponse\":" + quote.RoutePlan + "," + tailInner + "}";
 
+            TraceEndpointOnce();
             using var req = new UnityWebRequest(SwapUrl, "POST");
             req.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(body));
             req.downloadHandler = new DownloadHandlerBuffer();
@@ -316,8 +400,9 @@ namespace DeNelle.Web3
 
             if (req.result != UnityWebRequest.Result.Success)
             {
-                FlowTrace.Warn("Swap", $"/swap request FAILED: {req.error} — no transaction to sign");
-                Debug.LogWarning($"[JupiterSwapService] Swap request failed: {req.error}");
+                string detail = HttpFailureDetail(req, SwapUrl);
+                FlowTrace.Warn("Swap", "/swap request FAILED: " + detail + " — no transaction to sign");
+                Debug.LogWarning("[JupiterSwapService] Swap request failed: " + detail);
                 return false;
             }
 
@@ -403,6 +488,7 @@ namespace DeNelle.Web3
 
             int slippageBps = _feeConfig != null ? _feeConfig.SlippageBps : 50;
             int platformFeeBps = _feeConfig != null ? _feeConfig.PlatformFeeBps : 20;
+            string feeAccount = _feeConfig != null ? _feeConfig.FeeWalletAddress : string.Empty;
             string usdc = WalletEndpoints.UsdcMint(net);
 
             var sb = new StringBuilder(QuoteUrl);
@@ -411,15 +497,23 @@ namespace DeNelle.Web3
             sb.Append("&amount=").Append(outUnits.ToString(CultureInfo.InvariantCulture));
             sb.Append("&swapMode=ExactOut");
             sb.Append("&slippageBps=").Append(slippageBps.ToString(CultureInfo.InvariantCulture));
-            sb.Append("&platformFeeBps=").Append(platformFeeBps.ToString(CultureInfo.InvariantCulture));
+            // Same rule as GetQuoteAsync: no fee account configured => no platform
+            // fee on the quote, or the paired /swap POST hard-fails with 400
+            // NOT_SUPPORTED and the top-up dies one step later than it used to.
+            if (!string.IsNullOrEmpty(feeAccount))
+            {
+                sb.Append("&platformFeeBps=").Append(platformFeeBps.ToString(CultureInfo.InvariantCulture));
+                sb.Append("&feeAccount=").Append(UnityWebRequest.EscapeURL(feeAccount));
+            }
 
+            TraceEndpointOnce();
             using var req = UnityWebRequest.Get(sb.ToString());
             req.SetRequestHeader("Accept", "application/json");
             var op = req.SendWebRequest();
             while (!op.isDone) await Task.Yield();
             if (req.result != UnityWebRequest.Result.Success)
             {
-                FlowTrace.Warn("Swap", "ExactOut quote FAILED: " + req.error);
+                FlowTrace.Warn("Swap", "ExactOut quote FAILED: " + HttpFailureDetail(req, QuoteUrl));
                 return null;
             }
             decimal inAmountGuess = skrNeeded; // ParseQuote uses this as the input display divisor
