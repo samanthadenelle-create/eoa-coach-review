@@ -239,43 +239,71 @@ function normalizeTier(raw) {
  * The EFFECT magnitudes (+5% build speed and so on) are the work order's own table,
  * carried as a separate `effect` field so a balance retune never has to edit prose.
  */
+/**
+ * ⭐ `treeMotifId` — WO-1921 lane 3, owner ruling 2 (2026-09-21), VERBATIM:
+ * "Server returns a stable `treeMotifId` (a.k.a. `visualMotifId`) with the unlocked-perk
+ * payload, NOT the gameplay perkId: gameplay identity and visual identity decoupled;
+ * several perks may share a motif; art can change without migrating perk ids."
+ *
+ * It is authored HERE, as a field on the perk record, and nowhere else — a second
+ * hand-maintained perkId->motifId table beside this one would be duplicated state and
+ * would rot exactly the way CLAUDE.md §2/§5/§16 each describe. `PERK_MOTIFS` below is
+ * DERIVED from these records, never typed twice. The three build-speed tiers share ONE
+ * motif on purpose; ruling 2 explicitly permits several perks per motif.
+ *
+ * The motifs are described by FORM, never by hue — the owner is colourblind and no
+ * colour name is asked of her (memory `owner-colorblind-delegate-visual-creative`). The
+ * client binds each motif to one rune-mask channel; an unmapped or unknown perk resolves
+ * to DEFAULT_TREE_MOTIF_ID ('motif_dormant'), never to null, so an unknown perk can never
+ * blank the tree.
+ */
 const PERK_OPTIONS = {
     1: [
         { optionId: 'build_speed_1', perkId: 'clan_build_speed_1',
           title: 'Steady Hands', effect: '+5% build speed',
+          treeMotifId: 'motif_hands',
           description: 'The ancestors steady every hammer in the town.' },
         { optionId: 'harvest_yield_1', perkId: 'clan_harvest_yield_1',
           title: 'Full Baskets', effect: '+3% harvest yield',
+          treeMotifId: 'motif_harvest',
           description: 'The ancestors bless the fields your people work.' },
     ],
     2: [
         { optionId: 'build_speed_2', perkId: 'clan_build_speed_2',
           title: 'Sure Hands', effect: '+10% build speed',
+          treeMotifId: 'motif_hands',
           description: 'Scaffolds rise without a wasted motion.' },
         { optionId: 'harvest_yield_2', perkId: 'clan_harvest_yield_2',
           title: 'Heavy Baskets', effect: '+6% harvest yield',
+          treeMotifId: 'motif_harvest',
           description: 'What the fields give, they give generously.' },
         { optionId: 'wall_hp_1', perkId: 'clan_wall_hp_1',
           title: 'Old Stone', effect: '+5% wall HP',
+          treeMotifId: 'motif_stone',
           description: 'The stones remember standing, and stand a little longer.' },
     ],
     3: [
         { optionId: 'build_speed_3', perkId: 'clan_build_speed_3',
           title: 'Tireless Hands', effect: '+15% build speed',
+          treeMotifId: 'motif_hands',
           description: 'The work goes on while the town sleeps.' },
         { optionId: 'harvest_yield_3', perkId: 'clan_harvest_yield_3',
           title: 'Overflowing Baskets', effect: '+10% harvest yield',
+          treeMotifId: 'motif_harvest',
           description: 'The fields answer the vigil that was kept over them.' },
         { optionId: 'wall_hp_2', perkId: 'clan_wall_hp_2',
           title: 'Deep Stone', effect: '+10% wall HP',
+          treeMotifId: 'motif_stone',
           description: 'What the ancestors laid down does not give way easily.' },
     ],
     4: [
         { optionId: 'new_building', perkId: 'clan_new_building',
           title: 'A Shape Remembered', effect: 'Unlocks a new building type',
+          treeMotifId: 'motif_shape',
           description: 'A structure your people had forgotten how to raise.' },
         { optionId: 'turret_variant', perkId: 'clan_turret_variant',
           title: 'The Watchful Tower', effect: 'Unlocks a defensive turret variant',
+          treeMotifId: 'motif_watch',
           description: 'A tower built the way the old defenders built them.' },
     ],
     5: [
@@ -286,9 +314,45 @@ const PERK_OPTIONS = {
         // to clear the participation threshold to pass. Flagged for the owner.
         { optionId: 'ancestor_troop', perkId: 'clan_ancestor_troop',
           title: 'The Ancestors Stir', effect: 'Unlocks an ancestor-summoned troop',
+          treeMotifId: 'motif_ancestor',
           description: 'The ancestors stir. A new shape is possible.' },
     ],
 };
+
+/**
+ * The motif an unknown, retired or unmapped perk resolves to. NEVER null and never
+ * absent: the client reads this field to pick a rune channel, and a null would blank
+ * the Heart tree instead of leaving it dormant (WO-1921 §6b item 4).
+ */
+const DEFAULT_TREE_MOTIF_ID = 'motif_dormant';
+
+/**
+ * perkId -> treeMotifId, DERIVED from PERK_OPTIONS above. Exported so a test (and any
+ * future consumer) can assert coverage without re-reading the nested catalogue — but it
+ * is never authored by hand, so it cannot disagree with the perk records.
+ */
+const PERK_MOTIFS = Object.freeze(
+    Object.keys(PERK_OPTIONS).reduce((acc, tier) => {
+        for (const o of PERK_OPTIONS[tier]) {
+            if (o.perkId) acc[o.perkId] = o.treeMotifId || DEFAULT_TREE_MOTIF_ID;
+        }
+        return acc;
+    }, {}),
+);
+
+/**
+ * The motif for a perk id. Total: every input — null, '', a retired id, an id whose
+ * record forgot the field — answers with a real motif id.
+ *
+ * ⛔ The fallback lives HERE and not in describePerk(), which must keep returning null
+ * for an unknown perk: toWire and ceremonyWire both key their copy off that null
+ * ("Never invents copy"), and making it return a stub row would put invented titles on
+ * the wire.
+ */
+function motifFor(perkId) {
+    const rec = describePerk(perkId);
+    return (rec && rec.treeMotifId) || DEFAULT_TREE_MOTIF_ID;
+}
 
 /** The headline copy, verbatim from the work order's copy rules. */
 const BALLOT_HEADLINE =
@@ -887,6 +951,10 @@ function toWire(state) {
             return {
                 tier: p.tier,
                 perk_id: p.perkId,
+                // WO-1921 ruling 2: the VISUAL key, beside the gameplay one. The C#
+                // PerkDto still refuses to bind perk_id (OrderWire.cs:335-347) and that
+                // is exactly why the visual identity needs its own stable field.
+                tree_motif_id: motifFor(p.perkId),
                 activated_at: p.activatedAt,
                 expires_at: p.expiresAt,
                 title: desc && desc.title ? desc.title : '',
@@ -994,6 +1062,9 @@ function ceremonyWire(s, ballot, decision, epoch) {
         circle_name: s.circleName ? String(s.circleName) : '',
         perk_title: perk && perk.title ? String(perk.title) : '',
         perk_description: perk && perk.description ? String(perk.description) : '',
+        // WO-1921 state 4 fires off the CEREMONY, so the motif has to arrive on the same
+        // object as perk_title. No perk (or an unknown one) reads as dormant, never null.
+        tree_motif_id: (perk && perk.treeMotifId) || DEFAULT_TREE_MOTIF_ID,
         passed: passed,
         next_ends_at: epoch && epoch.endsAt != null ? epoch.endsAt : null,
     };
@@ -1031,6 +1102,8 @@ module.exports = {
     MIN_TIER,
     MAX_TIER,
     PERK_OPTIONS,
+    PERK_MOTIFS,
+    DEFAULT_TREE_MOTIF_ID,
     PARTICIPATION_BANDS,
     BALLOT_HEADLINE,
     REASON_PASSED,
@@ -1044,6 +1117,7 @@ module.exports = {
     tierOptions,
     describeOption,
     describePerk,
+    motifFor,
     perkIdFor,
     settledEpochIndex,
     participationBand,
