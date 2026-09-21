@@ -194,15 +194,59 @@
 
       loadingBar.style.display = "block";
 
+      // WO-1926 (2026-09-21): this template has no piTraceEmit, so the beacon is self-contained.
+      // Endpoint + payload shape are copied from Assets/WebGLTemplates/Pi/index.html:182-236 so both
+      // templates land in the SAME trace sink and ?view=traces needs no second reader.
+      var EOA_TRACE_ENDPOINT = 'https://defenders-of-the-realm-v2.vercel.app/api/trace';
+      var eoaTraceSession = 'wt-xnft' + Math.random().toString(16).slice(2, 12);
+      var eoaBootAt = Date.now();
+      var eoaLastPct = 0;
+      function eoaTraceEmit(message) {
+        try {
+          var payload = JSON.stringify({
+            sessionId: eoaTraceSession,
+            buildId: '{{{ PRODUCT_VERSION }}}',
+            entries: [{ utcMs: Date.now(), kind: 'log', tag: 'PiLifecycle',
+                        message: '' + message, scene: 'xNFTTemplate' }]
+          });
+          // Teardown-adjacent: sendBeacon is queued and delivered after the document is gone, so it
+          // is the only transport that lands when the tab is being killed. keepalive fetch is the
+          // fallback for a browser without it.
+          if (navigator.sendBeacon) {
+            var blob = new Blob([payload], { type: 'text/plain;charset=UTF-8' });
+            if (navigator.sendBeacon(EOA_TRACE_ENDPOINT, blob)) return;
+          }
+          fetch(EOA_TRACE_ENDPOINT, {
+            method: 'POST', body: payload,
+            headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+            keepalive: true, mode: 'cors', credentials: 'omit'
+          })['catch'](function (e) {
+            console.info('[PiLifecycle] crumb POST failed (fire-and-forget, dropped): ' + e);
+          });
+        } catch (e) {
+          console.info('[PiLifecycle] crumb skipped: ' + e);   // telemetry never blocks a boot
+        }
+      }
+
       var script = document.createElement("script");
       script.src = loaderUrl;
       script.onload = () => {
         createUnityInstance(canvas, config, (progress) => {
           progressBarFull.style.width = 100 * progress + "%";
+          try { eoaLastPct = Math.round(progress * 100); } catch (e) { /* never fatal */ }
         }).then((unityInstance) => {
           loadingBar.style.display = "none";
+          eoaTraceEmit('[PiLifecycle] unity-running session=' + eoaTraceSession +
+            ' upMs=' + (Date.now() - eoaBootAt));
         }).catch((message) => {
-          alert(message);
+          // Was a raw alert(), which the Pi template forbids (WO-678) and which tells the server
+          // nothing. A rejection HERE is the boot dying inside the loader - the window in which 11
+          // iPhones died at progress=90% on 2026-09-21 (WO-1925) with nothing recorded anywhere.
+          console.error('[Loader] ' + message);
+          if (loadingBar) loadingBar.textContent = 'Load error: ' + message;
+          eoaTraceEmit('[PiLifecycle] loader-failed pct=' + eoaLastPct +
+            ' session=' + eoaTraceSession + ' upMs=' + (Date.now() - eoaBootAt) +
+            ' err=' + ('' + message));   // '' + message: the rejection may be an Error
         });
       };
       document.body.appendChild(script);

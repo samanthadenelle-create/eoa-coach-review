@@ -25,6 +25,18 @@
       "headers": [{ "key": "Content-Encoding", "value": "br" }]
     },
     {
+      "source": "/Build/:file(.*\\.data\\.unityweb)",
+      "headers": [{ "key": "Content-Type", "value": "application/octet-stream" }]
+    },
+    {
+      "source": "/Build/:file(.*\\.wasm\\.unityweb)",
+      "headers": [{ "key": "Content-Type", "value": "application/wasm" }]
+    },
+    {
+      "source": "/Build/:file(.*\\.js\\.unityweb)",
+      "headers": [{ "key": "Content-Type", "value": "application/javascript" }]
+    },
+    {
       "source": "/",
       "headers": [{ "key": "Cache-Control", "value": "no-store, must-revalidate" }]
     },

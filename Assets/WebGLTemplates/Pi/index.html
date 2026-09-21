@@ -330,9 +330,28 @@
           window.unityInstance = unityInstance; // SendMessage targets this
           piBootCrumb('unity-running');
           console.info('[PiLifecycle] unity-running boot=' + bootId);
+          // WO-1925 (2026-09-21): this line was localStorage + console ONLY, so it never reached
+          // the trace sink and NO iPhone could ever prove a successful boot in ?view=traces - the
+          // one acceptance the P0 hangs on. Emit it, same as every other lifecycle crumb.
+          try {
+            piTraceEmit('[PiLifecycle] unity-running boot=' + bootId +
+              ' upMs=' + (Date.now() - piBootAt), false);
+          } catch (e) { /* telemetry never blocks a boot */ }
           if (loadingBar) loadingBar.style.display = "none";
         }).catch(function (message) {
           if (loadingBar) loadingBar.textContent = "Load error: " + message;
+          // WO-1926 (2026-09-21): THE ONLY UN-INSTRUMENTED FAILURE PATH IN THE BOOT.
+          // Everything else here beacons (boot, host, worker, heartbeat, context-loss, progress)
+          // but a rejection from createUnityInstance only ever reached this loading-bar element,
+          // so a boot that died INSIDE the loader left nothing on the server - the exact window in
+          // which 11 iPhones died at progress=90% on 2026-09-21 (WO-1925).
+          // useBeacon=true on purpose: this failure is teardown-adjacent, and :774 already records
+          // that a plain fetch does not survive teardown.
+          try {
+            piTraceEmit('[PiLifecycle] loader-failed pct=' + (window.__piLastPct || 0) +
+              ' boot=' + bootId + ' upMs=' + (Date.now() - piBootAt) +
+              ' err=' + ('' + message), true);   // '' + message: the rejection may be an Error
+          } catch (e) { /* telemetry never blocks a boot */ }
         });
       };
       var piBrowser = /PiBrowser/i.test(navigator.userAgent || '');
