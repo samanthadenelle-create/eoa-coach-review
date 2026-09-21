@@ -15,11 +15,6 @@
 // query over these rows, and it is the only thing that can date an outage.
 //
 // SCHEDULE: */15 * * * * in vercel.json. Worst-case detection latency 15 min.
-// ⭐ WO-2195: the CHECK runs every tick; the Neon ROW does not. A row lands on
-// the first run of an instance, on an ok flip, and as a 6 h heartbeat
-// (api/_lib/probe-persist.js) - the Neon free-plan compute ran out on
-// 2026-09-30 and a write every 15 min kept it awake. Every tick still logs its
-// full reading to the Vercel function log.
 // ⚠ UNVERIFIED FROM THIS SEAT: Vercel's HOBBY plan caps cron frequency at once
 // per day and REJECTS a deployment whose schedule is finer. Every pre-existing
 // cron in this repo is daily, which is suggestive but is NOT proof of the plan.
@@ -84,25 +79,12 @@ module.exports = async (req, res) => {
     // still returned in the response body where a Vercel log read finds it.
     const probe = await probeJupiterQuote({});
 
-    // WO-1969: page Discord on OK->DOWN (and recover). Never throws; missing
-    // DISCORD_WEBHOOK_URL = log/no-op. Must not change this route's HTTP 200 contract.
-    try {
-        const { emitProbeTransition } = require('../_lib/jupiter-fail-alert.js');
-        await emitProbeTransition(probe, {});
-    } catch (_) { /* alert must never break the probe response */ }
-
     try { console.log('[cron/swap-quote-probe] ' + summarize(probe) + ' ' + JSON.stringify(probe)); }
     catch (_) { /* a log must never break the request */ }
 
-    // WO-2195: a row only on first-run / ok-transition / 6 h heartbeat. The
-    // steady state makes NO database call - see api/_lib/probe-persist.js. The
-    // Discord transition above is untouched and still runs on every tick.
-    const persist = require('../_lib/probe-persist.js');
-    const decision = persist.decide(EVENT_NAME, probe);
-
     let persisted = false;
     let persistError = null;
-    if (decision.write) try { // intentional: the whole try/catch is this if's single statement - it runs only when a row is due
+    try {
         // Required INSIDE the handler, not at module top level, so the probe
         // module and its tests never drag the DB driver onto the require path.
         const { neon } = require('@neondatabase/serverless');
@@ -115,7 +97,7 @@ module.exports = async (req, res) => {
         // machine row can never be counted as a player. A bespoke sentinel id
         // would need an ANALYTICS_EXCLUDED_PLAYER_IDS entry to be safe, and an
         // env var somebody has to remember is not a guarantee.
-        await logApiEvent(sql, 'anonymous', EVENT_NAME, persist.stamp(probe, decision));
+        await logApiEvent(sql, 'anonymous', EVENT_NAME, probe);
         // ⚠ NOT A PROOF THE ROW LANDED. _lib/audit.logApiEvent:126-128 SWALLOWS
         // an insert failure with a console.warn, so this flag only says the
         // write was attempted against a live handle. That is why the full probe
@@ -126,9 +108,6 @@ module.exports = async (req, res) => {
         persistError = String((err && err.message) || err);
         try { console.error('[cron/swap-quote-probe] persist failed:', err); } catch (_) { /* noop */ }
     }
-    persist.commit(EVENT_NAME, decision, persisted);
-    try { console.log('[cron/swap-quote-probe] persist ' + (decision.write ? 'WRITE' : 'SKIP') + ' reason=' + decision.reason); }
-    catch (_) { /* noop */ }
 
     // 200 = THE CHECK RAN. See the header: this status is never Jupiter's health.
     return res.status(200).json({
@@ -137,7 +116,6 @@ module.exports = async (req, res) => {
         summary: summarize(probe),
         probe: probe,
         persist_attempted: persisted,
-        persist_reason: decision.reason,
         persist_error: persistError,
     });
 };
