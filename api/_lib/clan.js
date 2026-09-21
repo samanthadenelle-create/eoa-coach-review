@@ -968,7 +968,7 @@ function normalizeMessageId(raw) {
  * Record a report against one Cherry message.
  *
  * WO-1873 room kinds:
- *   - `global` (Commons): any authenticated wallet; clan_id is NULL; no membership check.
+ *   - `global`: any authenticated wallet; clan_id is NULL; no membership check.
  *   - `order` (Order room, wire alias `circle`): membership-gated INSERT, same as WO-1847.
  *
  * For Order, ONE STATEMENT is the membership CHECK as well as the write (property 3
