@@ -78,21 +78,119 @@
         companyName: {{{ JSON.stringify(COMPANY_NAME) }}},
         productName: {{{ JSON.stringify(PRODUCT_NAME) }}},
         productVersion: {{{ JSON.stringify(PRODUCT_VERSION) }}},
+        // WO-1906: cap the backing-store scale. Proven at source from the built framework
+        // (Builds/WebGL/Build/<hash>.framework.js.unityweb): _JS_SystemInfo_GetPreferredDevicePixelRatio
+        // returns `Module.devicePixelRatio || window.devicePixelRatio || 1`, so leaving this key unset
+        // lets a DPR-3 phone allocate 9x the fragments of the CSS box. Same cap as the Pi template.
+        devicePixelRatio: Math.min(window.devicePixelRatio || 1, 2),
         showBanner: unityShowBanner,
       };
-      
-      // Mobile device style: fill the whole browser client area with the game canvas:
+
+      // Mobile device style: fill the whole browser client area with the game canvas.
+      // WO-1906: `viewport-fit=cover` added so the layout viewport reaches under the notch, and the
+      // fit block below then subtracts the real safe-area insets. `height=device-height` is GONE -
+      // it is not a valid viewport descriptor on iOS and never did anything here; the JS fit is what
+      // actually tracks the visible height.
       var meta = document.createElement('meta');
       meta.name = 'viewport';
-      meta.content = 'width=device-width, height=device-height, initial-scale=1.0, user-scalable=no, shrink-to-fit=yes';
+      meta.content = 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover';
       document.getElementsByTagName('head')[0].appendChild(meta);
+      // The safe-area probe: env() is CSS-only, so the four insets are parked on a zero-size
+      // element's padding and read back with getComputedStyle.
+      var eoaProbe = document.createElement('div');
+      eoaProbe.id = 'eoa-safe-probe';
+      eoaProbe.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;visibility:hidden;' +
+        'pointer-events:none;padding-left:env(safe-area-inset-left,0px);' +
+        'padding-right:env(safe-area-inset-right,0px);padding-top:env(safe-area-inset-top,0px);' +
+        'padding-bottom:env(safe-area-inset-bottom,0px);';
+      document.body.appendChild(eoaProbe);
 
       var canvas = document.querySelector("#unity-canvas");
       canvas.style.width = "100%";
       canvas.style.height = "100%";
       canvas.style.position = "fixed";
+      // Load-bearing on mobile web: without touch-action:none the browser claims pan/pinch before
+      // Unity's canvas ever sees the gesture (RCA 2026-07-16, same line the Pi template carries).
+      canvas.style.touchAction = "none";
+      canvas.style.display = "block";
+      document.documentElement.style.overflow = "hidden";
+      document.body.style.overflow = "hidden";
+      document.body.style.margin = "0";
 
       document.body.style.textAlign = "left";
+
+      // ===================================================================================
+      // WO-1906: FIT THE CANVAS TO THE VISUAL VIEWPORT. Every host, no UA gate.
+      // ===================================================================================
+      // Same rule and the same reasoning as Assets/WebGLTemplates/Pi/index.html (read the long
+      // derivation there): `100%` resolves against the LAYOUT viewport, which on iOS Safari and
+      // inside a parent-sized iframe can be bigger than what the player can actually see - so the
+      // HUD edges end up off-screen with nothing to scroll to. We size the canvas in px from
+      // window.visualViewport (fallback innerWidth/innerHeight) and re-assert on every event.
+      // No letterbox: the canvas FILLS the visible box (owner ruling WO-1906:31).
+      var EOA_FIT_MIN_PX = 64;
+      var eoaFitLastStamp = '';
+      function eoaSafeInsets() {
+        try {
+          var cs = window.getComputedStyle(eoaProbe);
+          var n = function (v) { var f = parseFloat(v); return (isFinite(f) && f > 0) ? f : 0; };
+          return { l: n(cs.paddingLeft), r: n(cs.paddingRight), t: n(cs.paddingTop), b: n(cs.paddingBottom) };
+        } catch (e) {
+          console.info('[EoaFit] safe-area probe unreadable (treating insets as 0): ' + e);
+          return { l: 0, r: 0, t: 0, b: 0 };
+        }
+      }
+      function eoaVisualViewport() {
+        var vv = window.visualViewport;
+        if (vv && vv.width > 0 && vv.height > 0) {
+          return { w: vv.width, h: vv.height, ox: vv.offsetLeft || 0, oy: vv.offsetTop || 0, src: 'vv' };
+        }
+        return { w: window.innerWidth, h: window.innerHeight, ox: 0, oy: 0, src: 'inner' };
+      }
+      function eoaApplyFit(reason) {
+        try {
+          var v = eoaVisualViewport();
+          var ins = eoaSafeInsets();
+          var w = Math.round(v.w - ins.l - ins.r);
+          var h = Math.round(v.h - ins.t - ins.b);
+          if (w < EOA_FIT_MIN_PX || h < EOA_FIT_MIN_PX) {
+            console.info('[EoaFit] safe-area insets rejected (would leave ' + w + 'x' + h + ') - using raw viewport');
+            w = Math.round(v.w); h = Math.round(v.h); ins = { l: 0, r: 0, t: 0, b: 0 };
+          }
+          w = Math.max(EOA_FIT_MIN_PX, w); h = Math.max(EOA_FIT_MIN_PX, h);
+          canvas.style.position = 'fixed';
+          canvas.style.left = Math.round(v.ox + ins.l) + 'px';
+          canvas.style.top = Math.round(v.oy + ins.t) + 'px';
+          canvas.style.width = w + 'px';
+          canvas.style.height = h + 'px';
+          var dpr = Math.min(window.devicePixelRatio || 1, 2);
+          // The deterministic seam tools/web-canvas-fit.mjs waits on - readable long before the
+          // runtime has booted.
+          var stamp = w + 'x' + h + '@' + dpr + ':' + v.src;
+          canvas.setAttribute('data-eoa-fit', stamp);
+          if (stamp !== eoaFitLastStamp) {
+            eoaFitLastStamp = stamp;
+            console.info('[EoaFit] fit ' + stamp + ' reason=' + reason +
+              ' inner=' + window.innerWidth + 'x' + window.innerHeight +
+              ' safe=' + ins.l + ',' + ins.t + ',' + ins.r + ',' + ins.b);
+          }
+        } catch (e) {
+          console.info('[EoaFit] fit skipped: ' + e);   // reported, never silent, never fatal
+        }
+      }
+      window.addEventListener('resize', function () { eoaApplyFit('resize'); });
+      window.addEventListener('orientationchange', function () {
+        eoaApplyFit('orientationchange');
+        window.setTimeout(function () { eoaApplyFit('orientationchange-settle'); }, 300);
+      });
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', function () { eoaApplyFit('vv-resize'); });
+        window.visualViewport.addEventListener('scroll', function () { eoaApplyFit('vv-scroll'); });
+      }
+      document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'visible') eoaApplyFit('visible');
+      });
+      eoaApplyFit('boot');   // synchronous, before the loader script is appended below
 
       loadingBar.style.display = "block";
 

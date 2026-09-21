@@ -2,7 +2,12 @@
 <html lang="en-us">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+    <!-- WO-1906: `viewport-fit=cover` ADDED (never swapped for the existing guards - maximum-scale
+         and user-scalable=no are what stop iOS double-tap/pinch zooming the page out from under the
+         game). cover lets the layout viewport reach under the notch/home indicator; the JS fit block
+         at the bottom of this file then subtracts the real safe-area insets, so the HUD edges stay
+         reachable instead of being hidden behind system chrome. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
     <title>{{{ PRODUCT_NAME }}}</title>
 
     <!-- Pi Network SDK. Provides window.Pi (only resolves inside Pi Browser).
@@ -36,7 +41,20 @@
            camera drag/pinch is dead on mobile web while it works in the native APK (RCA 2026-07-16). */
         touch-action: none; overscroll-behavior: none; overflow: hidden;
         -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
-      #unity-container { position: absolute; width: 100%; height: 100%; }
+      /* WO-1906: `fixed`, not `absolute`. An absolutely-positioned 100%/100% box is sized off the
+         LAYOUT viewport, which on iOS Safari and inside an itch iframe can be larger than the
+         VISUAL viewport (the part the player can actually see). The JS fit block below overrides
+         width/height in px from visualViewport on every resize; these values are the pre-JS
+         fallback, and `left/top:0` is what the px offsets are applied against. */
+      #unity-container { position: fixed; left: 0; top: 0; width: 100%; height: 100%;
+        overflow: hidden; }
+      /* The safe-area probe. env() is only readable from CSS, so we park the four insets on a
+         zero-size element's padding and read them back with getComputedStyle - there is no JS API
+         for them. It never paints. */
+      #eoa-safe-probe { position: fixed; left: 0; top: 0; width: 0; height: 0; visibility: hidden;
+        pointer-events: none;
+        padding-left: env(safe-area-inset-left, 0px); padding-right: env(safe-area-inset-right, 0px);
+        padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
       /* WO-1312: Pi Browser is a portrait-locked WebView that REFUSES orientation.lock, so we
          render the game rotated instead of asking the player to rotate. The wrapper is sized in
          px from JS (width = innerHeight, height = innerWidth) before this class is applied.
@@ -64,6 +82,7 @@
     </style>
   </head>
   <body>
+    <div id="eoa-safe-probe"></div>
     <div id="unity-container">
       <canvas id="unity-canvas" width="1920" height="1080" tabindex="-1"></canvas>
       <div id="unity-loading-bar">Loading {{{ PRODUCT_NAME }}}...</div>
@@ -261,6 +280,16 @@
         companyName: "{{{ COMPANY_NAME }}}",
         productName: "{{{ PRODUCT_NAME }}}",
         productVersion: "{{{ PRODUCT_VERSION }}}",
+        // WO-1906: CAP THE BACKING-STORE SCALE. Read at source, not from docs (CLAUDE.md 11B):
+        // Builds/WebGL/Build/<hash>.framework.js.unityweb contains
+        //   function _JS_SystemInfo_GetPreferredDevicePixelRatio(){ return
+        //     Module.matchWebGLToCanvasSize==false ? 1 : Module.devicePixelRatio||window.devicePixelRatio||1 }
+        // so an unset config key means the runtime takes the RAW window.devicePixelRatio - 3 on an
+        // iPhone, 2+ on an iPad - and allocates a backing store that many times the CSS box in each
+        // axis (9x the fragments at DPR 3). Capping at 2 is a mobile-GPU budget decision, applied on
+        // every host rather than behind a UA sniff (a UA test is the thing that goes stale).
+        // Desktop DPR is <=2 on virtually every display, so the cap is a no-op there.
+        devicePixelRatio: Math.min(window.devicePixelRatio || 1, 2),
         // WO-678: own the loader's message surface - never a raw alert()/default banner.
         // Genuine loader ERRORS go to console.error + the loading-bar element; warnings and
         // the benign Pi timeout class route to console only.
@@ -329,7 +358,21 @@
           ' referrer=' + (document.referrer || '') +
           ' framed=' + (window.top !== window.self) +
           ' href=' + location.href +
-          ' windowPi=' + (typeof window.Pi);
+          ' windowPi=' + (typeof window.Pi) +
+          // WO-1906 instrumentation gap: until today the ONLY host fact any session ever recorded
+          // was the UA string, so "was the game bigger than the screen?" could only be GUESSED from
+          // model tokens - and the owner's iPad report could not be answered from the data at all
+          // (WO-1906 RCA item 4). These six fields are the measurement.
+          ' inner=' + window.innerWidth + 'x' + window.innerHeight +
+          ' screen=' + ((window.screen && window.screen.width) || '?') + 'x' +
+                       ((window.screen && window.screen.height) || '?') +
+          ' dpr=' + (window.devicePixelRatio || '?') +
+          ' vv=' + (window.visualViewport
+                      ? (Math.round(window.visualViewport.width) + 'x' +
+                         Math.round(window.visualViewport.height) + '@' +
+                         (window.visualViewport.scale || 1))
+                      : 'none') +
+          ' orient=' + ((screen.orientation && screen.orientation.type) || 'unknown');
         console.info(piHostLine);
         piTraceEmit(piHostLine, false);
       } catch (e) { console.info('[PiLifecycle] host fingerprint unavailable: ' + e); }
@@ -642,6 +685,13 @@
         piRotH = window.innerHeight;
         piContainer.style.width = piRotH + 'px';
         piContainer.style.height = piRotW + 'px';
+        // WO-1906: the rotated surface OWNS the whole box, origin included. eoaApplyFit() runs once
+        // before this (synchronously at boot) and writes inline left/top in px; with
+        // viewport-fit=cover a cutout inset would make those non-zero, and the input shim's
+        // u=clientY / v=piRotW-clientX maths assumes the surface origin is exactly (0,0). Reset
+        // them here so a wrong tap can never come from a stale fit offset.
+        piContainer.style.left = '0px';
+        piContainer.style.top = '0px';
         if (piRotationActive) return;
         piRotationActive = true;
         piContainer.classList.add('pi-rotated');
@@ -746,6 +796,132 @@
         piTraceEmit(line, document.visibilityState === 'hidden');
         if (document.visibilityState === 'visible') recheckLandscape();
       });
+      // ===================================================================================
+      // WO-1906: FIT THE CANVAS TO THE VISUAL VIEWPORT. Every host, no UA gate.
+      // ===================================================================================
+      // Owner ruling (WO-1906:31, verbatim): "the game must display on all devices, not at a locked
+      // percentage, if user goes to itch from a ipad should play in browser, if itch from phone
+      // should fit browser, if PC chrome, should play in browser".
+      //
+      // WHY 100%/100% CSS IS NOT ENOUGH, even though it is not a "locked percentage":
+      //   * `100%` resolves against the LAYOUT viewport. iOS Safari's layout viewport does not
+      //     shrink when the address/tab bars are showing, and it does not track a pinch-zoomed
+      //     visual viewport at all - so the box can legitimately be taller/wider than the pixels
+      //     the player can see, and the HUD edges sit off-screen with nothing to scroll to.
+      //   * Inside an iframe (itch serves the game from html-classic.itch.zone inside a frame the
+      //     PARENT page sizes - measured at a fixed 1940x1100 for this project, WO-1906 "itch embed
+      //     measured"), `100%` faithfully fills a frame that is itself wider than the phone. The
+      //     frame size is set outside this document and CANNOT be fixed from in here; this block is
+      //     the belt-and-suspenders half, the itch project-page embed setting is the other half.
+      // So we size the container in PX from window.visualViewport (fallback window.innerWidth/
+      // innerHeight), on every resize/scroll/orientation event, and re-assert it.
+      //
+      // NO LETTERBOX, DELIBERATELY. There is no aspect handling in this template to preserve (the
+      // canvas has always been 100%/100%; aspect is the Unity runtime's business), and pillarboxing
+      // to 16:9 on a portrait tablet would produce a thin strip - the same unreachable-HUD failure
+      // the owner reported, arrived at from the other direction. The canvas FILLS the visible box.
+      //
+      // SAFE AREA: subtracted, not ignored. With viewport-fit=cover the visual viewport extends
+      // under the notch and the home indicator, so a canvas that filled it exactly would hide HUD
+      // under system chrome. env() is CSS-only, so #eoa-safe-probe parks the four insets on a
+      // zero-size element's padding and we read them back.
+      //
+      // ROTATION: gated on STATE, never on the UA. piActivateRotation() owns the container box on
+      // the Pi Browser rotated surface (it sets width/height in px itself, and the input shim's
+      // coordinate maths is derived from exactly those numbers); a second writer there would break
+      // input invisibly. `piRotationActive` is that state.
+      var EOA_FIT_MIN_PX = 64;          // never hand the runtime a degenerate box
+      var eoaFitLastStamp = '';
+      var eoaFitLogged = 0;
+      function eoaSafeInsets() {
+        try {
+          var probe = document.querySelector('#eoa-safe-probe');
+          if (!probe) return { l: 0, r: 0, t: 0, b: 0 };
+          var cs = window.getComputedStyle(probe);
+          var n = function (v) { var f = parseFloat(v); return (isFinite(f) && f > 0) ? f : 0; };
+          return { l: n(cs.paddingLeft), r: n(cs.paddingRight), t: n(cs.paddingTop), b: n(cs.paddingBottom) };
+        } catch (e) {
+          console.info('[EoaFit] safe-area probe unreadable (treating insets as 0): ' + e);
+          return { l: 0, r: 0, t: 0, b: 0 };
+        }
+      }
+      function eoaVisualViewport() {
+        var vv = window.visualViewport;
+        if (vv && vv.width > 0 && vv.height > 0) {
+          return { w: vv.width, h: vv.height, ox: vv.offsetLeft || 0, oy: vv.offsetTop || 0, src: 'vv' };
+        }
+        // Fallback for any host without the API (older WebViews). innerWidth/innerHeight are the
+        // closest equivalent and are never 0 on a live document.
+        return { w: window.innerWidth, h: window.innerHeight, ox: 0, oy: 0, src: 'inner' };
+      }
+      function eoaApplyFit(reason) {
+        try {
+          if (typeof piRotationActive !== 'undefined' && piRotationActive) return;  // rotated surface owns the box
+          var container = document.querySelector('#unity-container');
+          var canvas = document.querySelector('#unity-canvas');
+          if (!container || !canvas) return;
+          var v = eoaVisualViewport();
+          var ins = eoaSafeInsets();
+          var w = Math.round(v.w - ins.l - ins.r);
+          var h = Math.round(v.h - ins.t - ins.b);
+          // A pathological inset (or a mid-rotation measurement) must never shrink the game to
+          // nothing - fall back to the raw viewport and say so rather than ship a sliver.
+          if (w < EOA_FIT_MIN_PX || h < EOA_FIT_MIN_PX) {
+            console.info('[EoaFit] safe-area insets rejected (would leave ' + w + 'x' + h + ') - using raw viewport');
+            w = Math.round(v.w); h = Math.round(v.h); ins = { l: 0, r: 0, t: 0, b: 0 };
+          }
+          w = Math.max(EOA_FIT_MIN_PX, w); h = Math.max(EOA_FIT_MIN_PX, h);
+          container.style.position = 'fixed';
+          container.style.left = Math.round(v.ox + ins.l) + 'px';
+          container.style.top = Math.round(v.oy + ins.t) + 'px';
+          container.style.width = w + 'px';
+          container.style.height = h + 'px';
+          canvas.style.width = '100%';
+          canvas.style.height = '100%';
+          // The page itself must never scroll: a scrollable page is how the game ends up partly
+          // off-screen with the HUD parked in an area the player has to find by dragging.
+          document.documentElement.style.overflow = 'hidden';
+          document.body.style.overflow = 'hidden';
+          var dpr = Math.min(window.devicePixelRatio || 1, 2);
+          // The DETERMINISTIC SEAM the proof tool waits on (tools/web-canvas-fit.mjs). It is a data
+          // attribute, not a log line, because the tool must be able to read the applied result
+          // without the 165MB runtime having booted.
+          var stamp = w + 'x' + h + '@' + dpr + ':' + v.src;
+          canvas.setAttribute('data-eoa-fit', stamp);
+          if (stamp !== eoaFitLastStamp) {
+            eoaFitLastStamp = stamp;
+            var line = '[EoaFit] fit ' + stamp + ' reason=' + reason +
+              ' inner=' + window.innerWidth + 'x' + window.innerHeight +
+              ' safe=' + ins.l + ',' + ins.t + ',' + ins.r + ',' + ins.b;
+            console.info(line);
+            // Throttled: the first four distinct sizes are the boot + first rotation, which is all
+            // a reader needs. An unthrottled resize firehose would evict the boot window from the
+            // trace (CLAUDE.md 12).
+            if (eoaFitLogged < 4) { eoaFitLogged++; piTraceEmit('[PiLifecycle] ' + line, false); }
+          }
+        } catch (e) {
+          // Reported, never silent (CLAUDE.md 12) - and never fatal: a fit failure must not stop a boot.
+          console.info('[EoaFit] fit skipped: ' + e);
+        }
+      }
+      window.addEventListener('resize', function () { eoaApplyFit('resize'); });
+      window.addEventListener('orientationchange', function () {
+        eoaApplyFit('orientationchange');
+        // iOS reports the OLD viewport inside the orientationchange handler; re-measure after the
+        // browser has settled the new one.
+        window.setTimeout(function () { eoaApplyFit('orientationchange-settle'); }, 300);
+      });
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', function () { eoaApplyFit('vv-resize'); });
+        window.visualViewport.addEventListener('scroll', function () { eoaApplyFit('vv-scroll'); });
+      }
+      document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'visible') eoaApplyFit('visible');
+      });
+      // SYNCHRONOUS, BEFORE piApplyOrientation() appends the loader: the runtime reads the canvas
+      // client size during startup, so the box has to be right before that first read, not after.
+      eoaApplyFit('boot');
+
       piApplyOrientation();
     </script>
   </body>
