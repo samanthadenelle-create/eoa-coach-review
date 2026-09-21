@@ -79,6 +79,42 @@
       #pi-landscape-continue { display: none; min-height: 52px; margin-top: 4px;
         color: #f4e5b5; background: transparent; border: 2px solid #6b5a2e;
         font: 600 16px sans-serif; }
+
+      /* ---------------------------------------------------------------------------------
+         WO-1927: the PRE-RUNTIME bug door. Reachable while the loader runs, i.e. BEFORE the
+         Unity runtime (which owns the real feedback UI) exists at all.
+         POSITION: a sibling of #unity-container, never a child. The container takes
+         `transform: rotate(90deg)` on the Pi rotated surface (WO-1312) and a rotated
+         textarea is unusable - so the door lives outside it and is never rotated.
+         z-index clears #pi-landscape-gate (99999) so it stays tappable over the gate.
+         TOUCH/SELECT OVERRIDES: `body` sets touch-action:none + user-select:none for the
+         game canvas. A text field inherits both and iOS then refuses to type into it or
+         scroll it, so the field re-enables exactly those two, for itself only.
+         Anchored bottom-centre within the safe area so it is reachable on a phone-width
+         viewport with no scrolling (acceptance 2). --------------------------------------- */
+      #eoa-preruntime-door { position: fixed; z-index: 100000;
+        left: 50%; transform: translateX(-50%);
+        bottom: calc(env(safe-area-inset-bottom, 0px) + 12px);
+        width: min(92vw, 420px); box-sizing: border-box; text-align: center;
+        font-family: sans-serif; }
+      #eoa-preruntime-open { min-height: 48px; padding: 10px 20px; width: 100%;
+        color: #d7c9f0; background: rgba(13, 10, 20, 0.82); border: 1px solid #4b3c6b;
+        border-radius: 8px; font: 600 16px sans-serif; }
+      /* Promotion is by WEIGHT, SIZE and BORDER, never by colour alone - the owner is
+         red/green colourblind (CLAUDE.md house rule / memory owner-colorblind-...). */
+      #eoa-preruntime-open.eoa-promoted { min-height: 56px; color: #17100a;
+        background: #d9ad38; border: 2px solid #f4d16b; font: 700 18px sans-serif; }
+      #eoa-preruntime-form { display: none; margin-top: 8px; padding: 10px;
+        background: rgba(13, 10, 20, 0.94); border: 1px solid #4b3c6b; border-radius: 8px; }
+      #eoa-preruntime-note { display: block; width: 100%; box-sizing: border-box;
+        min-height: 72px; padding: 8px; color: #f4e5b5; background: #1a1424;
+        border: 1px solid #6b5a2e; border-radius: 6px; font: 400 16px/1.35 sans-serif;
+        touch-action: auto; -webkit-user-select: text; user-select: text; }
+      #eoa-preruntime-send { margin-top: 8px; min-height: 56px; width: 100%;
+        color: #17100a; background: #d9ad38; border: 2px solid #f4d16b; border-radius: 8px;
+        font: 700 17px sans-serif; }
+      #eoa-preruntime-status { margin-top: 6px; min-height: 18px;
+        color: #d7c9f0; font: 600 14px/1.3 sans-serif; }
     </style>
   </head>
   <body>
@@ -93,6 +129,29 @@
       <button id="pi-landscape-button" type="button">ENTER LANDSCAPE</button>
       <small id="pi-landscape-status">If rotation is locked, enable Auto-rotate in device settings.</small>
       <button id="pi-landscape-continue" type="button">CONTINUE ANYWAY (SKIP ROTATION)</button>
+    </div>
+    <!-- WO-1927: the pre-runtime bug door. Every player-facing string below is the CANONICAL
+         en value from Assets/Resources/Data/Canonical/en.json, with its key named in a comment
+         so a future locale pass has the seam.
+         ⚠ RECORDED GAP (CLAUDE.md §11B / memory localization_law_...): THIS TEMPLATE HAS NO
+         LOCALE SEAM AT ALL - every string in it (the loading bar, the landscape gate) is a
+         hardcoded en literal, because the page runs before the Unity locale tables are loaded
+         and there is no page-side locale loader. So these are en literals too, deliberately
+         sourced from en.json rather than invented. Wiring a page-side locale fetch is a
+         separate ticket; it is NOT smuggled into this one.
+         `hud.bug_report.log_notice` is deliberately NOT used: it promises "your player id",
+         which does not exist before the runtime boots. -->
+    <div id="eoa-preruntime-door">
+      <!-- en.json hud.bug_report.title -->
+      <button id="eoa-preruntime-open" type="button" aria-expanded="false">REPORT A BUG</button>
+      <div id="eoa-preruntime-form">
+        <!-- en.json hud.bug_report.note_placeholder -->
+        <textarea id="eoa-preruntime-note" rows="3" maxlength="4000"
+                  placeholder="What went wrong?" aria-label="What went wrong?"></textarea>
+        <!-- en.json hud.bug_report.send -->
+        <button id="eoa-preruntime-send" type="button">Send report</button>
+        <div id="eoa-preruntime-status" role="status" aria-live="polite"></div>
+      </div>
     </div>
     <script>
       // --- WO-678: own the global JS error surface --------------------------------------
@@ -270,6 +329,144 @@
         }
       }
 
+      // ===================================================================================
+      // WO-1927: A PRE-RUNTIME BUG DOOR. The in-game feedback UI lives INSIDE the Unity
+      // runtime, so on a device where the runtime never starts the player has no channel at
+      // all - which is exactly the iPhone case behind WO-1925 (11 sessions, every one a
+      // web_trace row, not one session_start, and NO bug_reports row from iOS ever).
+      // ===================================================================================
+      // It POSTs to the EXISTING /api/bug-report (api/bug-report.js), in the shape that file
+      // already normalizes at :67-99 - no second endpoint, no second table (PROD-017's lesson).
+      //   note      -> description        sceneName -> route        version -> app_version
+      //   sessionId + platform + traceTail -> the context jsonb
+      // THE JOIN KEY IS `sessionId = piTraceSession`. api/trace.js writes every template crumb
+      // to analytics_events with player_id = that same session id (trace.js:129-135), so a
+      // report and its trace rows join on one exact string. bootId rides in traceTail as well,
+      // because it is what the [PiLifecycle] message text carries.
+      // Content-Type is text/plain for the same reason the crumbs are (CORS-safelisted, no
+      // preflight); api/bug-report.js:58 JSON.parses a string body, so no API change is needed.
+      var PI_BUG_REPORT_ENDPOINT = 'https://defenders-of-the-realm-v2.vercel.app/api/bug-report';
+      // The loader legitimately pauses on a ~150MB data ramp, so a stall is not a failure and
+      // the door is ALREADY VISIBLE either way - promotion is emphasis, not a new door. 20s with
+      // no progress callback at all is well past any normal decompression pause.
+      var PI_DOOR_STALL_MS = 20000;
+      var piDoorEl     = document.querySelector('#eoa-preruntime-door');
+      var piDoorOpen   = document.querySelector('#eoa-preruntime-open');
+      var piDoorForm   = document.querySelector('#eoa-preruntime-form');
+      var piDoorNote   = document.querySelector('#eoa-preruntime-note');
+      var piDoorSend   = document.querySelector('#eoa-preruntime-send');
+      var piDoorStatus = document.querySelector('#eoa-preruntime-status');
+      var piDoorStallTimer = null;
+      var piDoorSent = false;
+
+      function piDoorPromote(reason) {
+        try {
+          if (!piDoorOpen || !piDoorEl) return;
+          if (piDoorOpen.className.indexOf('eoa-promoted') >= 0) return;
+          piDoorOpen.className = 'eoa-promoted';
+          console.info('[PiLifecycle] bug-door promoted reason=' + reason);
+        } catch (e) { console.info('[PiLifecycle] bug-door promote skipped: ' + e); }
+      }
+      function piDoorHide() {
+        // The runtime is up and owns its own feedback UI - a stray HTML form parked over the
+        // canvas would be the wrong outcome (WO-1927 §4: this is an ADDITIONAL door).
+        try {
+          if (piDoorStallTimer !== null) { window.clearTimeout(piDoorStallTimer); piDoorStallTimer = null; }
+          if (piDoorEl) piDoorEl.style.display = 'none';
+        } catch (e) { console.info('[PiLifecycle] bug-door hide skipped: ' + e); }
+      }
+      function piDoorNoteProgress() {
+        // Re-armed on EVERY progress callback: the timer measures "no progress for N ms",
+        // never "N ms since boot" (a slow-but-healthy download must not be called a stall).
+        try {
+          if (piDoorStallTimer !== null) window.clearTimeout(piDoorStallTimer);
+          piDoorStallTimer = window.setTimeout(function () {
+            piDoorPromote('stall pct=' + (window.__piLastPct || 0));
+          }, PI_DOOR_STALL_MS);
+        } catch (e) { console.info('[PiLifecycle] bug-door stall timer skipped: ' + e); }
+      }
+
+      function piDoorSubmit() {
+        // EVERY failure here is logged and swallowed. A broken feedback door must never break a
+        // boot that might still succeed (WO-1927 §2, and CLAUDE.md §12: logged, never silent).
+        try {
+          if (piDoorSent) return;
+          var note = (piDoorNote && piDoorNote.value) ? String(piDoorNote.value) : '';
+          var pm = null;
+          try { pm = (performance && performance.memory) ? performance.memory : null; } catch (e) { pm = null; }
+          // traceTail is the diagnostic context, one fact per line, and it is ALSO what keeps a
+          // note-less report out of api/bug-report.js:97's "Empty report" 400 - the capture is
+          // the value even when the player types nothing.
+          var tail = [
+            'boot=' + bootId,
+            'session=' + piTraceSession,
+            'pct=' + (window.__piLastPct || 0),
+            'upMs=' + (Date.now() - piBootAt),
+            'navigation=' + piNavType,
+            'ua=' + (navigator.userAgent || ''),
+            'deviceMemoryGB=' + (navigator.deviceMemory || '?'),
+            'jsHeapLimitMB=' + (pm ? Math.round(pm.jsHeapSizeLimit / 1048576) : '?'),
+            'inner=' + window.innerWidth + 'x' + window.innerHeight,
+            'dpr=' + (window.devicePixelRatio || '?'),
+            'unityStarted=' + (!!window.unityInstance)
+          ];
+          var payload = JSON.stringify({
+            note: note,
+            sceneName: PI_TRACE_SCENE,       // 'PiTemplate' - there is no Unity scene yet
+            version: piTraceBuild,           // identical to the web_trace rows' buildId
+            platform: 'webgl-preruntime',
+            sessionId: piTraceSession,       // THE JOIN KEY (analytics_events.player_id)
+            traceTail: tail
+          });
+          piDoorSent = true;
+          if (piDoorSend) piDoorSend.disabled = true;
+          // en.json feedback.sending
+          if (piDoorStatus) piDoorStatus.textContent = 'Sending...';
+          fetch(PI_BUG_REPORT_ENDPOINT, {
+            method: 'POST',
+            body: payload,
+            headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+            keepalive: true,
+            mode: 'cors',
+            credentials: 'omit'
+          }).then(function (r) {
+            if (r && r.ok) {
+              // en.json hud.bug_report.sent_toast
+              if (piDoorStatus) piDoorStatus.textContent = 'Report sent - thank you, defender.';
+              piTraceEmit('[PiLifecycle] bug-door sent boot=' + bootId +
+                ' pct=' + (window.__piLastPct || 0) + ' noteChars=' + note.length, false);
+            } else {
+              piDoorSent = false;
+              if (piDoorSend) piDoorSend.disabled = false;
+              // en.json hud.bug_report.failed_toast
+              if (piDoorStatus) piDoorStatus.textContent = "Couldn't send - check your connection and retry.";
+              console.info('[PiLifecycle] bug-door POST refused status=' + (r && r.status));
+            }
+          })['catch'](function (e) {
+            piDoorSent = false;
+            if (piDoorSend) piDoorSend.disabled = false;
+            // en.json hud.bug_report.failed_toast
+            if (piDoorStatus) piDoorStatus.textContent = "Couldn't send - check your connection and retry.";
+            console.info('[PiLifecycle] bug-door POST failed: ' + e);
+          });
+        } catch (e) {
+          piDoorSent = false;
+          console.info('[PiLifecycle] bug-door submit skipped: ' + e);
+        }
+      }
+
+      try {
+        if (piDoorOpen) piDoorOpen.addEventListener('click', function () {
+          var showing = piDoorForm && piDoorForm.style.display === 'block';
+          if (piDoorForm) piDoorForm.style.display = showing ? 'none' : 'block';
+          piDoorOpen.setAttribute('aria-expanded', showing ? 'false' : 'true');
+          if (!showing && piDoorNote) { try { piDoorNote.focus(); } catch (e) { } }
+        });
+        if (piDoorSend) piDoorSend.addEventListener('click', piDoorSubmit);
+      } catch (e) {
+        console.info('[PiLifecycle] bug-door not wired: ' + e);
+      }
+
       var buildUrl = "Build";
       var loaderUrl = buildUrl + "/{{{ LOADER_FILENAME }}}";
       var config = {
@@ -313,6 +510,7 @@
       script.onload = function () {
         createUnityInstance(document.querySelector("#unity-canvas"), config, function (progress) {
           if (loadingBar) loadingBar.textContent = "Loading... " + Math.round(progress * 100) + "%";
+          piDoorNoteProgress();   // WO-1927: re-arm the stall timer; progress means not stalled
           // Loader progress + memory crumb every 10% (2026-09-10, owner: the phone dies at 65% every
           // time, and the page never reaches pagehide - so the last crumb that lands IS the evidence).
           try {
@@ -338,6 +536,7 @@
               ' upMs=' + (Date.now() - piBootAt), false);
           } catch (e) { /* telemetry never blocks a boot */ }
           if (loadingBar) loadingBar.style.display = "none";
+          piDoorHide();   // WO-1927: the runtime owns the feedback door from here
         }).catch(function (message) {
           if (loadingBar) loadingBar.textContent = "Load error: " + message;
           // WO-1926 (2026-09-21): THE ONLY UN-INSTRUMENTED FAILURE PATH IN THE BOOT.
@@ -352,6 +551,9 @@
               ' boot=' + bootId + ' upMs=' + (Date.now() - piBootAt) +
               ' err=' + ('' + message), true);   // '' + message: the rejection may be an Error
           } catch (e) { /* telemetry never blocks a boot */ }
+          // WO-1927: the ONE line this ticket adds inside WO-1926's catch. The loader has
+          // failed, so the runtime's own feedback UI will never exist - promote the page door.
+          piDoorPromote('loader-failed');
         });
       };
       var piBrowser = /PiBrowser/i.test(navigator.userAgent || '');
@@ -530,6 +732,9 @@
         disarmLandscapeEscape();
         document.querySelector('#pi-landscape-gate').style.display = 'none';
         piBootCrumb('unity-loading');
+        // WO-1927: arm the stall watch HERE, not on the first progress callback - a loader that
+        // 404s its dataUrl may never call progress at all, and that is the loudest stall there is.
+        piDoorNoteProgress();
         document.body.appendChild(script);
       }
       function isLandscape() { return window.innerWidth >= window.innerHeight; }
@@ -637,6 +842,11 @@
         if (!piRotationActive) return;
         if (e.piShim) return;                                            // our own re-dispatch
         if (piGateEl && e.target && piGateEl.contains(e.target)) return; // never eat the gate's UI
+        // WO-1927: same exclusion for the pre-runtime bug door. This shim re-dispatches every
+        // touch/mouse/pointer event at the CANVAS with rotated coordinates; without this line a
+        // tap on the door (or on its text field) would be eaten and the door would be dead on
+        // exactly the rotated Pi surface where a boot failure is most likely.
+        if (piDoorEl && e.target && piDoorEl.contains(e.target)) return;
         var synth = null;
         try {
           if (e.touches) {
