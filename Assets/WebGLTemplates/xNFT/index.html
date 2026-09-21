@@ -5,6 +5,17 @@
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
     <title>Unity XNFT | {{{ PRODUCT_NAME }}}<</title>
     <link rel="icon" type="image/x-icon" href="favicon.ico">
+    <!-- WO-1910. A real browser build of npm buffer 6.0.3, generated from node_modules by
+         tools/build-page-buffer.mjs. Provides the page global the Solana wallet SIGN path
+         reads. FIRST, and before the loader below - the wallet-adapter CDN bundle prefers
+         the page's copy, so it must be the complete one, not a shim. -->
+    <script src="page-buffer.js"></script>
+
+    <!-- WO-1908 (amended WO-1910: owns `unityWebView` only - gree WebGL plugin; the
+         wallet-adapter page global moved to page-buffer.js above).
+         MUST load before the Unity loader below - a bare-identifier ReferenceError
+         inside a jslib aborts the whole runtime. See page-globals.js. -->
+    <script src="page-globals.js"></script>
   </head>
   <body style="text-align: center; padding: 0; border: 0; margin: 0;">
     <script src="Build/{{{ LOADER_FILENAME }}}"></script>

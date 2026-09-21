@@ -12,6 +12,22 @@
     <!-- AppLixir rewarded video (itch / Vercel WebGL). Pi Browser uses PiAdProvider instead. -->
     <script src="https://cdn.applixir.com/applixir.app.v6.1.0.js"></script>
 
+    <!-- WO-1910. A real browser build of npm buffer 6.0.3, generated from node_modules by
+         tools/build-page-buffer.mjs (nothing downloaded). It provides the page global the
+         Solana wallet SIGN path reads inside SolanaWalletAdapterWebGL.jslib. FIRST, because
+         the wallet-adapter CDN bundle prefers the page's copy when one exists, so the page
+         copy has to be the complete one. Replaces the minimal shim WO-1908 installed. -->
+    <script src="page-buffer.js"></script>
+
+    <!-- WO-1908 (amended WO-1910: it now owns `unityWebView` only - gree's WebGL plugin;
+         the wallet-adapter page global moved to page-buffer.js above).
+         A page global our jslibs read but nothing else on this page defines.
+         LOCAL and SYNCHRONOUS, and ahead of the
+         loader that this template appends from JS - a bare-identifier ReferenceError
+         raised inside a jslib is not a managed exception, it aborts the runtime
+         (WO-1897). See page-globals.js for the full derivation. -->
+    <script src="page-globals.js"></script>
+
     <link rel="shortcut icon" href="TemplateData/favicon.ico" />
     <link rel="stylesheet" href="TemplateData/style.css" />
     <style>
