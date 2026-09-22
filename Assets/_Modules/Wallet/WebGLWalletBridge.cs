@@ -37,6 +37,9 @@ namespace DeNelle.Wallet
         [DllImport("__Internal")] private static extern int EoaWalletBridgeSignBegin(string txBase64);
         [DllImport("__Internal")] private static extern int EoaWalletBridgeSignPoll(int handle);
         [DllImport("__Internal")] private static extern string EoaWalletBridgeSignResult(int handle);
+        [DllImport("__Internal")] private static extern string EoaWalletHandoffCapability();
+        [DllImport("__Internal")] private static extern int EoaWalletHandoffOpen(string walletId);
+        [DllImport("__Internal")] private static extern string EoaWalletHandoffReturn();
         [DllImport("__Internal")] private static extern void EoaWalletBridgeSignRelease(int handle);
 
         // A wallet sheet is a HUMAN action. The deadline exists so a page the player
@@ -66,6 +69,130 @@ namespace DeNelle.Wallet
                 FlowTrace.Fail("WebPay", "wallet bridge install threw " + ex.GetType().Name + ": " + ex.Message);
                 _installed = false;
             }
+        }
+
+        // ====================================================================
+        // WO-1957 — the mobile-browser handoff seam.
+        //
+        // ⛔ READ THIS BEFORE CHANGING THE CONNECT PATH. The wallet-adapter CDN
+        // bundle already carries the Solflare universal link and already fires it
+        // on an iPhone (its gate is `ua.includes("iphone") && ua.includes("safari")`,
+        // true on iOS Chrome). The arm is `return void(...)`, so the bundle returns
+        // undefined, SolanaWalletAdapterWebGL.jslib throws, and
+        // OnWalletConnected(null) raises `Login cancelled`
+        // (SolanaWalletAdapterWebGL.cs:198). MEASURED — the owner's iPhone session,
+        // web_trace wt-a73bdc1d3350, 2026-09-22 12:12:26Z:
+        //     [Flow:Wallet] Connect FAILED: Exception: Login cancelled
+        // A redirect and a cancel are INDISTINGUISHABLE to that code, so the player
+        // being handed to Solflare reads the same words as the player who closed the
+        // sheet. This seam lets Connect ask the page BEFORE it opens a picker that
+        // can only offer extensions which are not installed.
+        //
+        // ⛔ AND MWA CANNOT RESCUE AN iPHONE: the bundle gates
+        // SolanaMobileWalletAdapter on a literal `/android/i` userAgent test.
+        // ====================================================================
+
+        /// <summary>
+        /// What the page can tell us about this browser. Every field defaults to the
+        /// CONSERVATIVE value, so a missing page module or a thrown lookup lands on
+        /// "no opinion" and the ordinary desktop picker path runs unchanged.
+        /// </summary>
+        internal struct HandoffCapability
+        {
+            public bool Mobile;
+            public bool Injected;
+            public string InjectedName;
+            public bool Framed;
+            public string ReturnedFrom;
+
+            /// <summary>
+            /// The one question Connect actually asks: a phone browser with no wallet
+            /// injected is the ONLY shape where the SDK picker cannot help.
+            /// </summary>
+            public bool NeedsHandoff => Mobile && !Injected;
+
+            public override string ToString() =>
+                "mobile=" + Mobile + " injected=" + (string.IsNullOrEmpty(InjectedName) ? "none" : InjectedName) +
+                " framed=" + Framed + " returned=" + (string.IsNullOrEmpty(ReturnedFrom) ? "none" : ReturnedFrom);
+        }
+
+        [Serializable]
+        private class HandoffCapabilityDto
+        {
+            public bool mobile;
+            public bool injected;
+            public string injectedName;
+            public bool framed;
+            public string returned;
+        }
+
+        /// <summary>The Solflare browse target. Read at source in the CDN bundle and
+        /// confirmed against docs.solflare.com — it needs no session and no key.</summary>
+        internal const string HandoffSolflare = "solflare";
+
+        /// <summary>The Phantom browse target — same shape, same bundle.</summary>
+        internal const string HandoffPhantom = "phantom";
+
+        /// <summary>
+        /// Reads the page's capability. NEVER throws: a refusal is a value, because a
+        /// throw here would unwind the connect path and tell the player the outcome is
+        /// unknown when nothing has happened at all.
+        /// </summary>
+        internal static HandoffCapability Capability()
+        {
+            var cap = default(HandoffCapability);
+            cap.InjectedName = string.Empty;
+            cap.ReturnedFrom = string.Empty;
+            try
+            {
+                string json = EoaWalletHandoffCapability();
+                if (string.IsNullOrEmpty(json)) return cap;
+                var dto = UnityEngine.JsonUtility.FromJson<HandoffCapabilityDto>(json);
+                if (dto == null) return cap;
+                cap.Mobile = dto.mobile;
+                cap.Injected = dto.injected;
+                cap.InjectedName = dto.injectedName ?? string.Empty;
+                cap.Framed = dto.framed;
+                cap.ReturnedFrom = dto.returned ?? string.Empty;
+            }
+            catch (Exception ex)
+            {
+                // A missing jslib symbol is a BUILD problem and must be loud here
+                // rather than silent at the moment a player taps Connect.
+                FlowTrace.Fail("Wallet", "handoff capability threw " + ex.GetType().Name + ": " + ex.Message);
+            }
+            return cap;
+        }
+
+        /// <summary>
+        /// Starts the cross-app handoff. True only when a navigation was actually
+        /// STARTED — the page returns false when it has no deeplink for that target,
+        /// and Jupiter deliberately has none (it ships a React hook with no UMD build
+        /// and its docs describe QR scanning, never a same-device deeplink).
+        /// </summary>
+        internal static bool OpenHandoff(string walletId)
+        {
+            if (string.IsNullOrEmpty(walletId)) return false;
+            try
+            {
+                bool started = EoaWalletHandoffOpen(walletId) == 1;
+                if (started) FlowTrace.Step("Wallet", "handoff started -> " + walletId);
+                else FlowTrace.Warn("Wallet", "handoff could NOT start for '" + walletId +
+                                              "' - no navigation happened, nothing was opened.");
+                return started;
+            }
+            catch (Exception ex)
+            {
+                FlowTrace.Fail("Wallet", "handoff open threw " + ex.GetType().Name + ": " + ex.Message);
+                return false;
+            }
+        }
+
+        /// <summary>The wallet id this page came back from, or an empty string.</summary>
+        internal static string HandoffReturn()
+        {
+            try { return EoaWalletHandoffReturn() ?? string.Empty; }
+            catch (Exception) { return string.Empty; }
         }
 
         /// <summary>The captured browser wallet name, or an empty string.</summary>

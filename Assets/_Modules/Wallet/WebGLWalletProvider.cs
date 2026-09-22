@@ -24,8 +24,97 @@ namespace DeNelle.Wallet
         public WalletAccount Account => _account;
         public bool CanSignMessages => _connected && _adapter != null;
 
+        /// <summary>
+        /// WO-1957. The last sentence this provider owes the player about a connect that did not
+        /// produce an account — resolved through the locale, never an English literal. Empty when
+        /// there is nothing to say. Read by whatever surface asked for the connect; it is a NOTICE,
+        /// not an error channel, because a handoff is a normal outcome and not a failure.
+        /// </summary>
+        public static string LastConnectNotice { get; private set; } = string.Empty;
+
+        /// <summary>
+        /// WO-1957. The wallet the page came back from, or an empty string — `?eoaWallet=`,
+        /// written by wallet-handoff.js before the redirect and read off location.search at load.
+        /// Exposed so the funnel can carry <c>source=mobile-handoff-return</c> on the EXISTING
+        /// <c>store_wallet_connect_tapped</c> event. ⛔ Do NOT add a second call site for that
+        /// event name — StoreFirstScreenRegression fails the build when the count is not 1.
+        /// </summary>
+        public static string HandoffReturnedFrom { get; private set; } = string.Empty;
+
         public async UniTask<WalletAccount> Connect(WalletNetwork network)
         {
+            LastConnectNotice = string.Empty;
+
+            // ================================================================
+            // WO-1957 — ASK THE PAGE BEFORE OPENING A PICKER THAT CANNOT HELP.
+            //
+            // ⛔ THE MEASURED DEFECT, so nobody re-derives it. The CDN bundle
+            // (@magicblock-labs/unity-wallet-adapter@1.2.1, read at source
+            // 2026-09-22) registers `new SolflareWalletAdapter()` in EVERY browser,
+            // its readyState is `Loadable` everywhere, and its connect() already does
+            //     window.location.href = `https://solflare.com/ul/v1/browse/${href}?ref=${origin}`
+            // when `isIosAndRedirectable()` — a gate that is TRUE on iPhone Chrome,
+            // because it tests `ua.includes("iphone") && ua.includes("safari")` and
+            // iOS Chrome's UA ends `Safari/604.1`. That arm is `return void(...)`, so
+            // the bundle returns undefined, SolanaWalletAdapterWebGL.jslib throws
+            // "Unable to connect to: …", and OnWalletConnected(null) raises
+            // `Login cancelled` (SolanaWalletAdapterWebGL.cs:198).
+            //
+            // MEASURED, not inferred — the owner's iPhone session, web_trace
+            // `wt-a73bdc1d3350`, 2026-09-22 12:12:26Z:
+            //     [Flow:Wallet] Connect FAILED: Exception: Login cancelled — staying disconnected.
+            // A REDIRECT AND A CANCEL ARE INDISTINGUISHABLE TO THAT CODE, which is
+            // why the owner reads it as "the game can only find extension wallets".
+            //
+            // ⛔ AND MWA IS NOT AN ESCAPE: the bundle gates SolanaMobileWalletAdapter
+            // on a literal `/android/i` test and logs "MobileWalletAdapter: Not
+            // mobile" on every iPhone. No configuration reaches it from iOS.
+            //
+            // DESKTOP IS UNTOUCHED. `NeedsHandoff` is false whenever the browser is
+            // not a phone OR a wallet is already injected (including inside a wallet's
+            // own in-app browser, which is exactly where the ordinary path works), so
+            // the block below is skipped and `_adapter.Login()` runs as it always has.
+            // ================================================================
+            WebGLWalletBridge.EnsureInstalled();
+            var handoff = WebGLWalletBridge.Capability();
+            HandoffReturnedFrom = handoff.ReturnedFrom ?? string.Empty;
+            FlowTrace.Step("Wallet", "WebGLWalletProvider.Connect handoff capability " + handoff);
+
+            if (!string.IsNullOrEmpty(handoff.ReturnedFrom) && !handoff.Injected)
+            {
+                // The interesting failure, and it gets its own line: the player DID come
+                // back from the wallet app and the wallet still is not here. Guessing a
+                // cause would be inference — this records the fact so the next session
+                // reads it instead of re-theorising.
+                FlowTrace.Warn("Wallet",
+                    "WebGLWalletProvider.Connect — returned from '" + handoff.ReturnedFrom +
+                    "' but NO wallet is injected on this page. The handoff round-tripped without " +
+                    "landing inside the wallet's in-app browser.");
+            }
+
+            if (handoff.NeedsHandoff)
+            {
+                // Solflare is the ONE target with a browse deeplink proven at source
+                // (the CDN bundle, and docs.solflare.com .../other-methods/browse) that
+                // also injects a provider into its in-app browser, which is what makes
+                // the return leg complete. Jupiter is deliberately NOT tried: its
+                // adapter is a React hook with no UMD build and its docs describe QR
+                // scanning, never a same-device deeplink (WO-1957 §1g).
+                bool started = WebGLWalletBridge.OpenHandoff(WebGLWalletBridge.HandoffSolflare);
+                LastConnectNotice = started
+                    ? StoreStrings.Get(StoreStrings.KeyCommerceOpeningWallet)
+                    : StoreStrings.Get(StoreStrings.KeyBalanceNoWallet);
+                FlowTrace.Warn("Wallet",
+                    "WebGLWalletProvider.Connect — phone browser with no injected wallet. " +
+                    (started
+                        ? "Handed off to Solflare; this page is navigating away and NO account is returned here."
+                        : "The handoff could not start; nothing was opened and nothing was connected."));
+                _connected = false;
+                _account = default;
+                return default;
+            }
+            // ================================================================
+
             // ⛔ BEFORE THE ADAPTER EXISTS, NOT AFTER. The browser wallet's NAME is
             // observable exactly once - as it passes through the page lib's own
             // connectWallet call - and the lib exposes no accessor for the connected

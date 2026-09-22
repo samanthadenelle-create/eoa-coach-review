@@ -16,6 +16,14 @@
          MUST load before the Unity loader below - a bare-identifier ReferenceError
          inside a jslib aborts the whole runtime. See page-globals.js. -->
     <script src="page-globals.js"></script>
+
+    <!-- WO-1957. The mobile-browser wallet handoff door. LOCAL, SYNCHRONOUS, before the loader:
+         EoaWalletBridge.jslib reads `window.eoaWalletHandoff`, and a bare-identifier miss inside
+         a jslib aborts the runtime. It also reads the `?eoaWallet=` return marker off
+         location.search before anything can rewrite the URL. NO navigation on load - C# asks.
+         Inside an xNFT host `window.xnft.solana` is already injected, so capability() reports
+         injected and this door correctly stays out of the way. -->
+    <script src="wallet-handoff.js"></script>
   </head>
   <body style="text-align: center; padding: 0; border: 0; margin: 0;">
     <script src="Build/{{{ LOADER_FILENAME }}}"></script>

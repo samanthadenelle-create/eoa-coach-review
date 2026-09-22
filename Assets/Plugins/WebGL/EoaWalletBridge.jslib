@@ -176,4 +176,71 @@ mergeInto(LibraryManager.library, {
     var S = EoaWalletBridgeState;
     delete S.slots[handle];
   },
+
+  // ===========================================================================
+  // WO-1957 — the mobile-browser wallet handoff.
+  //
+  // ⛔ WHY THIS IS A SEPARATE DOOR AND NOT A FIX TO THE SDK'S PICKER. The CDN
+  // bundle ALREADY holds the Solflare universal link and already fires it on the
+  // owner's browser (its gate is `ua.includes("iphone") && ua.includes("safari")`,
+  // and iOS Chrome's UA ends `Safari/604.1`). But that connect() arm is
+  // `return void(...)`, so the bundle returns undefined, so
+  // SolanaWalletAdapterWebGL.jslib throws and OnWalletConnected(null) raises
+  // `Login cancelled` (SolanaWalletAdapterWebGL.cs:198) — MEASURED in the owner's
+  // iPhone session, web_trace wt-a73bdc1d3350, 2026-09-22 12:12:26Z. A REDIRECT AND
+  // A CANCEL ARE INDISTINGUISHABLE TO THAT CODE. So C# asks the page FIRST, and only
+  // opens the picker when a picker can actually help.
+  //
+  // Every entry point degrades to a refusal when wallet-handoff.js is absent: a
+  // cached older template must never abort a newer runtime.
+  // ===========================================================================
+
+  // JSON: {mobile, injected, injectedName, framed, returned, targets}. '{}' when the
+  // page module is missing, which the C# side reads as "no opinion — use the picker".
+  EoaWalletHandoffCapability: function () {
+    var json = '{}';
+    try {
+      if (window.eoaWalletHandoff && window.eoaWalletHandoff.capabilityJson) {
+        json = String(window.eoaWalletHandoff.capabilityJson() || '{}');
+      }
+    } catch (err) {
+      console.error('[EoaWalletHandoff] capability failed: ' + (err && err.message));
+    }
+    var size = lengthBytesUTF8(json) + 1;
+    var ptr = _malloc(size);
+    stringToUTF8(json, ptr, size);
+    return ptr;
+  },
+
+  // 1 when a navigation was STARTED. Never 1 on a guess: the module returns false
+  // when it has no deeplink for that target, and Jupiter deliberately has none.
+  EoaWalletHandoffOpen: function (idPtr) {
+    try {
+      var id = UTF8ToString(idPtr);
+      if (!window.eoaWalletHandoff || !window.eoaWalletHandoff.open) {
+        console.error('[EoaWalletHandoff] open refused: wallet-handoff.js is not loaded');
+        return 0;
+      }
+      return window.eoaWalletHandoff.open(id) ? 1 : 0;
+    } catch (err) {
+      console.error('[EoaWalletHandoff] open failed: ' + (err && err.message));
+      return 0;
+    }
+  },
+
+  // The wallet id we came back FROM, or ''. Read off `?eoaWallet=` at page load,
+  // because the wallet's in-app browser is a different browsing context and
+  // sessionStorage does not travel.
+  EoaWalletHandoffReturn: function () {
+    var id = '';
+    try {
+      if (window.eoaWalletHandoff && window.eoaWalletHandoff.returned) {
+        id = String(window.eoaWalletHandoff.returned() || '');
+      }
+    } catch (err) { id = ''; }
+    var size = lengthBytesUTF8(id) + 1;
+    var ptr = _malloc(size);
+    stringToUTF8(id, ptr, size);
+    return ptr;
+  },
 });

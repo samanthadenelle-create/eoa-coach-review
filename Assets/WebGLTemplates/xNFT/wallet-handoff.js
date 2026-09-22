@@ -43,16 +43,10 @@
 
   // The two targets whose browse deeplink was READ AT SOURCE in the CDN bundle
   // (and, for Solflare, confirmed against docs.solflare.com .../other-methods/browse).
-  // ⛔ JUPITER IS DELIBERATELY ABSENT, AND WO-1958 DID NOT CHANGE THAT — it changed
-  // the REASON, which is worth keeping straight. Jupiter has NO browse deeplink of
-  // this `/ul/v1/browse/` shape, so a `jupiter` row here would still be an invented
-  // URL. What WO-1958 proved is that it has a DIFFERENT one: the WalletConnect
-  // explorer registers `mobile.native = "jupiter://"` and Reown AppKit navigates to
-  // `jupiter://wc?uri=<encoded wc uri>` — a same-device deeplink, reached through
-  // `window.eoaWalletConnect` (wallet-connect.bundle.js), not through this table.
-  // The older note here said the docs "never claim a same-device deeplink"; that is
-  // still true OF THE DOCS and false of the registry. See eoaJupiterMobileAdapter
-  // below and WO-1958 section 0.
+  // ⛔ JUPITER IS DELIBERATELY ABSENT. @jup-ag/jup-mobile-adapter is a REACT HOOK
+  // (`useWrappedReownAdapter`) with no UMD/CDN build, its docs describe QR scanning,
+  // and NOTHING in them claims a same-device mobile-browser deeplink. Adding a
+  // `jupiter` row here would be inventing a URL. See eoaJupiterMobileAdapter below.
   var TARGETS = {
     solflare: 'https://solflare.com/ul/v1/browse/',
     phantom: 'https://phantom.app/ul/browse/'
@@ -169,21 +163,8 @@
       return false;
     }
     trace('[EoaWalletHandoff] opening ' + id + ' framed=' + framed() + ' url=' + url);
-    // WO-2037 Part B: this is a DELIBERATE departure, so tell the iOS safety net before the
-    // navigation starts - otherwise a load still in flight here reads as a WebKit kill on the next
-    // boot. index.html owns the marker; this only calls its hook when the page provides one (the
-    // xNFT template carries no net, so there it is a no-op), the same guard as piTraceEmit above.
-    try {
-      if (typeof global.piIosNetLeave === 'function') global.piIosNetLeave('handoff:' + id);
-    } catch (e) { trace('[EoaWalletHandoff] ios-net leave threw: ' + (e && e.message)); }
     var how = navigate(url);
     trace('[EoaWalletHandoff] navigation via=' + (how || 'NONE') + ' target=' + id);
-    if (!how) {
-      // Nothing navigated: the page is still here, so put the net back the way it was.
-      try {
-        if (typeof global.piIosNetRearm === 'function') global.piIosNetRearm('handoff-failed');
-      } catch (e) { trace('[EoaWalletHandoff] ios-net rearm threw: ' + (e && e.message)); }
-    }
     return how !== '';
   }
 
@@ -234,23 +215,13 @@
   // ---------------------------------------------------------------------------
   // The Jupiter Mobile Adapter stub — a placeholder that TELLS THE TRUTH.
   //
-  // ⚠ SUPERSEDED IN PART BY WO-1958, AND THE CORRECTION IS RECORDED HERE RATHER
-  // THAN THE SENTENCE QUIETLY REWRITTEN. This stub used to say "this Unity WebGL
-  // template has no bundler step", full stop. That is no longer true: WO-1958 added
-  // `npm run web:bundle` (tools/build-wallet-connect.mjs, esbuild), and THE REAL
-  // JUPITER DOOR NOW LIVES AT `window.eoaWalletConnect`, published by the committed
-  // `wallet-connect.bundle.js` which EoaWalletBridge.jslib injects on the connect
-  // tap. WO-1958 also reversed 1957's other finding: the WalletConnect explorer
-  // registers Jupiter with `mobile.native = "jupiter://"`, and AppKit navigates to
-  // `jupiter://wc?uri=<encoded>` — a same-device deeplink after all.
-  //
-  // ⛔ THIS STUB IS THEREFORE THE PRE-BUNDLE REFUSAL, NOT THE VERDICT ON JUPITER.
-  // It still answers when the bundle is absent, and a REOWN projectId is still
-  // NECESSARY AND NOT SUFFICIENT — without the built artifact there is nothing to
-  // load. The two reason codes are unchanged so nothing that reads them breaks.
-  // ⛔ AND JUPITER STAYS OUT OF `TARGETS` ABOVE: it has NO browse deeplink of the
-  // Solflare/Phantom `/ul/v1/browse/` shape. Its route is WalletConnect, which is a
-  // different mechanism and a different door.
+  // ⛔ A REOWN projectId IS NECESSARY AND NOT SUFFICIENT. @jup-ag/jup-mobile-adapter
+  // exports the React hook `useWrappedReownAdapter` and requires React 18+ /
+  // Next.js 13+ / Reown AppKit 1.6.0+; no UMD or CDN build is published. This page is
+  // a hand-written Unity WebGL template with NO bundler step — tools/build-page-buffer.mjs
+  // exists because even npm `buffer` had to be hand-built into a browser global. So a
+  // projectId alone unlocks nothing here, and the two refusals below say so in
+  // different words on purpose.
   // ---------------------------------------------------------------------------
   global.eoaJupiterMobileAdapter = {
     init: function (opts) {
@@ -260,11 +231,10 @@
               'Create one at https://dashboard.reown.com/ and pass it as projectId.');
         return { ok: false, reason: 'no-project-id' };
       }
-      trace('[EoaJupiterMobileAdapter] REFUSED: a projectId is present, but the Jupiter ' +
-            'door is window.eoaWalletConnect (WO-1958) and its bundle is not on this page. ' +
-            'Run `npm install` then `npm run web:bundle` and COMMIT ' +
-            'Assets/WebGLTemplates/*/wallet-connect.bundle.js. The projectId is necessary, ' +
-            'not sufficient.');
+      trace('[EoaJupiterMobileAdapter] REFUSED: a projectId is present but this page ' +
+            'cannot load @jup-ag/jup-mobile-adapter - it is a React hook with no UMD/CDN ' +
+            'build, and this Unity WebGL template has no bundler step. The projectId is ' +
+            'necessary, not sufficient. See WO-1957 section 1g.');
       return { ok: false, reason: 'no-bundler' };
     }
   };

@@ -33,6 +33,14 @@
          (WO-1897). See page-globals.js for the full derivation. -->
     <script src="page-globals.js"></script>
 
+    <!-- WO-1957. The mobile-browser wallet handoff door. LOCAL, SYNCHRONOUS, and BEFORE the
+         loader: EoaWalletBridge.jslib reads `window.eoaWalletHandoff` from inside a jslib, and a
+         bare-identifier miss there aborts the runtime rather than raising a managed exception
+         (the WO-1897 rule page-globals.js was written under). It also has to read the
+         `?eoaWallet=` return marker off location.search BEFORE anything can rewrite the URL.
+         It performs NO navigation on load - C# asks. See the file header for the measured RCA. -->
+    <script src="wallet-handoff.js"></script>
+
     <link rel="shortcut icon" href="TemplateData/favicon.ico" />
     <link rel="stylesheet" href="TemplateData/style.css" />
     <style>
@@ -593,7 +601,17 @@
                          Math.round(window.visualViewport.height) + '@' +
                          (window.visualViewport.scale || 1))
                       : 'none') +
-          ' orient=' + ((screen.orientation && screen.orientation.type) || 'unknown');
+          ' orient=' + ((screen.orientation && screen.orientation.type) || 'unknown') +
+          // WO-1957 instrumentation gap, closed. Until today NOTHING recorded whether a wallet
+          // was injected into this page, so "did the player come back inside Solflare's in-app
+          // browser?" was UNANSWERABLE from the data - and the CDN bundle's own
+          // console.error('Unable to connect to: …') reaches no log at all, because this template
+          // hooks no console.*. These four fields are the only witness the return leg has.
+          ' walletMobile=' + (window.eoaWalletHandoff ? window.eoaWalletHandoff.isMobileBrowser() : '?') +
+          ' walletInjected=' + (window.eoaWalletHandoff ? (window.eoaWalletHandoff.injectedName() || 'none') : '?') +
+          ' walletHandoffReturn=' + (window.eoaWalletHandoff ? (window.eoaWalletHandoff.returned() || 'none') : '?') +
+          ' windowSolflare=' + (!!(window.solflare && window.solflare.isSolflare)) +
+          ' windowPhantom=' + (!!(window.phantom && window.phantom.solana));
         console.info(piHostLine);
         piTraceEmit(piHostLine, false);
       } catch (e) { console.info('[PiLifecycle] host fingerprint unavailable: ' + e); }
