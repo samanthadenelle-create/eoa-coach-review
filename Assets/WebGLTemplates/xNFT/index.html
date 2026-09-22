@@ -4,7 +4,10 @@
     <meta charset="utf-8">
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
     <title>Unity XNFT | {{{ PRODUCT_NAME }}}<</title>
-    <link rel="icon" type="image/x-icon" href="favicon.ico">
+    <!-- WO-1962 — removed <link rel="icon" href="favicon.ico">: this template ships no
+         favicon.ico, so the reference 404'd on every load. Same class as the two dead
+         TemplateData/ links removed from the Pi template; pinned by the
+         WEB_TEMPLATE_REFERENCES contract row in tools/web-build-contracts.ps1. -->
     <!-- WO-1910. A real browser build of npm buffer 6.0.3, generated from node_modules by
          tools/build-page-buffer.mjs. Provides the page global the Solana wallet SIGN path
          reads. FIRST, and before the loader below - the wallet-adapter CDN bundle prefers
