@@ -101,8 +101,10 @@ namespace DeNelle.Wallet
     // cannot sign a Jupiter swap" by a wallet that can. Nothing about this class changes; it
     // now ANSWERS THE QUESTION instead of being recognised by name.
     // ⚠ The base list is guarded because the IMPLEMENTATION is: SignAndSendSwapTransaction
-    // lives inside the `#if SOLANA_SDK` region at :944-1200. Declaring the capability
-    // unconditionally would not compile with the define off.
+    // lives inside this file's `#if SOLANA_SDK` SDK-helpers region, so declaring the capability
+    // unconditionally would not compile with the define off. (The region is named, not cited by
+    // line - this comment carried a line range for about an hour and the WO-1948 merge moved it,
+    // which is the same duplicated-state rot CLAUDE.md sec.2/sec.5/sec.8 each describe.)
 #if SOLANA_SDK
     public sealed class SolanaWalletProvider : IWalletProvider, ISwapSigningWallet
 #else
