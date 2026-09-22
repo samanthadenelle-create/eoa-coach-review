@@ -21,6 +21,7 @@ using System;
 using System.Threading.Tasks;
 using Cysharp.Threading.Tasks;
 using DeNelle.Core;
+using DeNelle.Core.Analytics;   // WO-1948 review add-on: wallet_connect_attempted / wallet_connect_result on the ONE EventTracker rail
 using DeNelle.Core.Backend;
 using DeNelle.Core.Diagnostics;
 using DeNelle.Core.Platform;
@@ -99,6 +100,15 @@ namespace DeNelle.Wallet
         public double Usdc;
         /// <summary>SKR balance (in whole SKR).</summary>
         public double Skr;
+
+        /// <summary>
+        /// WO-1948 review add-on (2026-09-22): TRUE when the read did NOT happen - no wallet
+        /// connected, or the provider threw - so the zeros above are an ABSENCE of data, not a
+        /// balance. A caller that treats an Unknown balance as "holds nothing" refuses a swap
+        /// it might have afforded; one that treats it as "known" Pays against an unread wallet.
+        /// Both are wrong: check this flag and stop, with the not-charged copy.
+        /// </summary>
+        public bool Unknown;
 
         /// <summary>Returns the balance for one rail.</summary>
         public double For(CurrencyKind currency)
@@ -490,6 +500,13 @@ namespace DeNelle.Wallet
 
             SetStatus(WalletStatus.Connecting);
             LastConnectError = string.Empty;
+            Guard.Try("Wallet", "analytics wallet_connect_attempted", () => EventTracker.Track("wallet_connect_attempted", new
+            {
+                provider = ProviderName,
+                network = Network.ToString(),
+                platform = EventTracker.Platform,
+                channel = EventTracker.Channel
+            }));
 
             // WO-1420: the ONLY way to tell "our deadline expired" from "the provider threw a
             // TimeoutException as its refusal shape" is to measure. Unscaled real time, because the
@@ -535,11 +552,13 @@ namespace DeNelle.Wallet
                     // point BOTH connect paths pass through - the corner button
                     // (WalletSkinBootstrap) and the login surface (LoginWalletBridge).
                     CurrencySkinResolver.PublishWalletConnected(account.Address);
+                    TrackConnectResult("ok", null, null, Time.realtimeSinceStartup - connectStartedAt);
                 }
                 else
                 {
                     LastConnectError = "Connect was cancelled or refused by the wallet.";
                     FlowTrace.Warn("Wallet", "Connect resolved an INVALID account — cancelled or refused; staying disconnected.");
+                    TrackConnectResult("refused", "invalid-account", null, Time.realtimeSinceStartup - connectStartedAt);
                 }
 
                 return account;
@@ -586,6 +605,7 @@ namespace DeNelle.Wallet
                         $"provider, not our {ConnectTimeoutSeconds}s deadline): {ex.Message} — staying disconnected." +
                         closeNote);
                 }
+                TrackConnectResult(ourDeadline ? "timeout" : "refused", ex.GetType().Name, ex.Message, elapsed);
 
                 SetStatus(WalletStatus.Disconnected);
                 return default;
@@ -594,9 +614,43 @@ namespace DeNelle.Wallet
             {
                 LastConnectError = "Wallet connect failed (" + ex.GetType().Name + ").";
                 FlowTrace.Fail("Wallet", $"Connect FAILED: {ex.GetType().Name}: {ex.Message} — staying disconnected.");
+                TrackConnectResult("error", ex.GetType().Name, ex.Message, Time.realtimeSinceStartup - connectStartedAt);
                 SetStatus(WalletStatus.Disconnected);
                 return default;
             }
+        }
+
+        /// <summary>
+        /// wallet_connect_result on the one EventTracker rail (WO-1948 review add-on): outcome
+        /// ok | refused | timeout | error, the exception type as <c>code</c>, the MWA code when
+        /// the message carries one ("... (-1)"), elapsed ms. Never throws (Guard).
+        /// </summary>
+        private void TrackConnectResult(string outcome, string code, string message, float elapsedSeconds)
+        {
+            int? mwaCode = null;
+            if (!string.IsNullOrEmpty(message))
+            {
+                int open = message.IndexOf('(');
+                int close = open >= 0 ? message.IndexOf(')', open) : -1;
+                if (open >= 0 && close > open &&
+                    int.TryParse(message.Substring(open + 1, close - open - 1).Trim(),
+                        System.Globalization.NumberStyles.AllowLeadingSign,
+                        System.Globalization.CultureInfo.InvariantCulture, out int parsed))
+                    mwaCode = parsed;
+            }
+            long elapsedMs = (long)(elapsedSeconds * 1000f);
+            Guard.Try("Wallet", "analytics wallet_connect_result", () => EventTracker.Track("wallet_connect_result", new
+            {
+                outcome,
+                code = code ?? string.Empty,
+                mwaCode,
+                elapsedMs,
+                error = message ?? string.Empty,
+                provider = ProviderName,
+                network = Network.ToString(),
+                platform = EventTracker.Platform,
+                channel = EventTracker.Channel
+            }));
         }
 
         /// <summary>Disconnects the current wallet (React parity: <c>useGameWallet.disconnect</c>).</summary>
@@ -632,10 +686,15 @@ namespace DeNelle.Wallet
         /// </summary>
         public async UniTask<WalletBalance> GetBalance()
         {
+            // WO-1948 review add-on (2026-09-22): a failed read is NOT a zero balance. The old
+            // `return default` handed callers three zeros indistinguishable from a genuinely empty
+            // wallet, so the store could Pay (or refuse) against a wallet it had never read.
+            // Both exits below mark the result Unknown and Warn; the swap rail refuses on it.
             if (!IsConnected)
             {
+                FlowTrace.Warn("Wallet", "GetBalance called with no wallet connected — balance UNKNOWN (not zero); callers must not Pay against it.");
                 Debug.LogWarning("[WalletService] GetBalance called with no wallet connected.");
-                return default;
+                return new WalletBalance { Unknown = true };
             }
 
             try
@@ -645,7 +704,8 @@ namespace DeNelle.Wallet
             catch (Exception ex)
             {
                 FlowTrace.Fail("Wallet", $"GetBalance FAILED: {ex.GetType().Name}: {ex.Message} — returning zero balance.");
-                return default;
+                FlowTrace.Warn("Wallet", "GetBalance result is UNKNOWN (the read threw) — not a zero balance; the swap rail refuses rather than quote against it.");
+                return new WalletBalance { Unknown = true };
             }
         }
 

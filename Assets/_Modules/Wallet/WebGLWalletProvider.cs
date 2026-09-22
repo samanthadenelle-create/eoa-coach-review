@@ -89,7 +89,9 @@ namespace DeNelle.Wallet
         public async UniTask<WalletBalance> GetBalance(WalletNetwork network)
         {
             var balance = default(WalletBalance);
-            if (!_connected || !_account.IsValid) return balance;
+            // WO-1948 review add-on 3: every exit that did not READ the wallet is Unknown, never
+            // a known zero - the swap rail refuses on Unknown instead of claiming "have 0".
+            if (!_connected || !_account.IsValid) { balance.Unknown = true; return balance; }
 
             // Browser CORS cannot hit public Solana RPC reliably. Our API
             // proxies getTokenAccountsByOwner (itch 2026-09-20: chip said
@@ -102,13 +104,15 @@ namespace DeNelle.Wallet
             if (req.result != UnityWebRequest.Result.Success)
             {
                 FlowTrace.Warn("Wallet",
-                    "WebGL GetBalance HTTP " + req.responseCode + " " + req.error);
+                    "WebGL GetBalance HTTP " + req.responseCode + " " + req.error + " - balance UNKNOWN (not zero).");
+                balance.Unknown = true;
                 return balance;
             }
             var dto = JsonUtility.FromJson<SkrBalanceDto>(req.downloadHandler.text);
             if (dto == null || !dto.ok)
             {
-                FlowTrace.Warn("Wallet", "WebGL GetBalance body not ok");
+                FlowTrace.Warn("Wallet", "WebGL GetBalance body not ok - balance UNKNOWN (not zero).");
+                balance.Unknown = true;
                 return balance;
             }
             balance.Skr = dto.skr;

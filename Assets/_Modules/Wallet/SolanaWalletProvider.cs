@@ -530,7 +530,7 @@ namespace DeNelle.Wallet
             if (!_connected || !_account.IsValid)
             {
                 Debug.LogWarning("[SolanaWalletProvider] GetBalance with no wallet connected.");
-                return default;
+                return new WalletBalance { Unknown = true };
             }
 
             var balance = new WalletBalance();
@@ -557,7 +557,13 @@ namespace DeNelle.Wallet
             }
             catch (Exception ex)
             {
+                // WO-1948 review add-on 3 (2026-09-22): an RPC failure here (airplane mode, rate
+                // limit, DNS) used to come back as three KNOWN zeros, so the store told the player
+                // "have 0" about a wallet nobody read. Unknown = the caller refuses, never guesses.
                 Debug.LogError($"[SolanaWalletProvider] GetBalance failed: {ex.Message}");
+                FlowTrace.Warn("Wallet", "SolanaWalletProvider.GetBalance THREW " + ex.GetType().Name +
+                                         " - balance UNKNOWN (not zero); the swap rail refuses rather than quote against it.");
+                balance.Unknown = true;
             }
             return balance;
 #else
@@ -1084,6 +1090,38 @@ namespace DeNelle.Wallet
                 FlowTrace.Fail("Swap", "Jupiter swap sign TIMED OUT before submit: " + ex.Message);
                 return (false, null, TargetedLocalAssociationScenario.SignTimeoutMessage);
             }
+            // ⛔ EVERY OTHER SIGN FAILURE IS A REFUSAL, AND IT MUST BE RETURNED, NOT THROWN
+            // (WO-1943, owner's Seeker swap on build 2026.09.21.379625). The wallet answered
+            // sign_transactions with MWA ERROR_AUTHORIZATION_FAILED (-1) - the SDK rethrows that
+            // as the bare message "authorization request failed" - and because only
+            // TimeoutException was caught here, the generic Exception unwound through
+            // JupiterSwapService.ExecuteSwapAsync -> TopUpSkrAsync -> JupiterSwapDoor and landed
+            // in PackStore.Purchase's outer catch, which tells the player the outcome is
+            // INDETERMINATE and "if a charge settled the entitlement may be lost". That sentence
+            // is FALSE on this path: the stack dies BEFORE TryReadPrimarySignature and before
+            // SubmitSignedTransaction, so nothing was signed and nothing was submitted. Returning
+            // (false, null, hint) routes it to the store's provider-refused arm, whose line is
+            // "Jupiter swap did not complete. The pack was not charged." - which is the truth.
+            // The hint goes through ExplainConnectFailure, written for exactly this MWA string
+            // (see :1209-1248); it returns null when it has nothing better, so we fall back to
+            // the typed exception rather than ever handing up a null error.
+            catch (Exception ex)
+            {
+                // WO-1948 review (2026-09-22): on the SIGN path the session is ALREADY authorized,
+                // so the connect-path dapp-identity explanation is the wrong diagnosis here - the
+                // 09-21 refusal was a well-formed swap the wallet could not PAY (0 USDC held).
+                // ExplainSignRefusal answers first with a neutral "wallet declined"; the connect
+                // explainer remains the fallback for any other MWA string.
+                string explained = ExplainSignRefusal(ex) ?? ExplainConnectFailure(ex);
+                string hint = string.IsNullOrEmpty(explained)
+                    ? "Wallet could not sign the swap (" + ex.GetType().Name + ": " + ex.Message +
+                      "). Nothing was signed and nothing was submitted."
+                    : explained + " (raised on the SWAP SIGNING request, not the connect request; " +
+                      "nothing was signed and nothing was submitted.)";
+                FlowTrace.Fail("Swap", "Jupiter swap sign REFUSED by the wallet: " +
+                                       ex.GetType().Name + ": " + ex.Message + " -> " + hint);
+                return (false, null, hint);
+            }
             if (signedWire == null || signedWire.Length == 0)
                 return (false, null, "Wallet returned no signed swap (cancelled or refused).");
 
@@ -1244,6 +1282,32 @@ namespace DeNelle.Wallet
                        "solana-wallet scheme actually reached the packaged AndroidManifest.";
             }
 
+            return null;
+        }
+
+        /// <summary>
+        /// The SIGN-path counterpart of <see cref="ExplainConnectFailure"/> (WO-1948 review,
+        /// 2026-09-22). MWA ERROR_AUTHORIZATION_FAILED (-1) on <c>sign_transactions</c> arrives
+        /// with the same bare "authorization request failed" text as on connect, but the cause
+        /// class is different: the session WAS authorized (that is how we reached signing), so a
+        /// dapp-identity / assetlinks explanation mis-steers the triage. On 2026-09-21 the owner's
+        /// Seeker refusal was a well-formed swap the wallet could not PAY (it held 0 USDC while a
+        /// USDC spend was requested). Neutral wording, ASCII only; the caller appends the funding
+        /// context (per-token need/have) it computed before the request. Returns null when the
+        /// message is not the authorization-failed one.
+        /// </summary>
+        internal static string ExplainSignRefusal(Exception ex)
+        {
+            var msg = ex == null ? null : ex.Message;
+            if (string.IsNullOrEmpty(msg)) return null;
+            if (msg.IndexOf("authorization request failed", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                msg.IndexOf("ERROR_AUTHORIZATION_FAILED", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "MWA ERROR_AUTHORIZATION_FAILED (-1) - the wallet DECLINED the swap sign request. " +
+                       "The session was already authorized, so this is NOT a dapp-identity failure; the " +
+                       "usual cause is a spend the wallet cannot pay (balance below the quoted input plus " +
+                       "fees) or the player cancelling the sheet.";
+            }
             return null;
         }
 
