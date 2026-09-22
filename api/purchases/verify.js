@@ -245,7 +245,9 @@ function observeLanding(tx, keys, wallet, contract) {
     const post = tokenBalanceRows(meta.postTokenBalances, keys);
     const credits = [];
     for (const after of post) {
-        if (after.owner !== treasury || after.amount == null) continue;
+        // An out-of-range accountIndex yields account '' — never let a blank
+        // destination reach the ledger's observed_recipient column.
+        if (after.owner !== treasury || after.amount == null || !after.account) continue;
         const before = pre.find(p => p.account === after.account && p.mint === after.mint);
         const beforeAmount = before && before.amount != null ? before.amount : 0n;
         if (after.amount > beforeAmount)
