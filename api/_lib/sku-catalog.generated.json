@@ -15,7 +15,7 @@
     "impulsePacks": "Packs 14-25 (tiers 14-25) are the WO-1037 SINGLE-RESOURCE IMPULSE PACKS, authored 2026-08-17 under the owner ruling of 2026-08-16 (option (b), verbatim: \"we should have small instant packs\" / \"small wood only\") and legalised by the WO-947 s12 amendment (the PURCHASE boundary is not the COST boundary). ONE family per harvestable resource (wood, iron, stone, crystals) x small/medium/large. THE LOAD-BEARING RULE: each of these SKUs carries EXACTLY ONE economy key and an EMPTY cosmetics + convenience list. A multi-resource impulse bundle would re-mix the WO-947 cost baskets through the back door and is FORBIDDEN (WO-947 s12c guardrail 1) - asserted headlessly by DeNelle.Editor.Regression.ImpulsePackRegression [impulse-pack], which also pins the $5 PRICE CEILING (owner standing ruling, memory solana-store-early-access-pack-pricing) and the no-structures/no-levels/no-queue-completions rule. AMOUNTS ARE PENDING OWNER RATIFICATION - they were sized against the REAL demand curve read out of building-tiers.json (tier costWood 500..16000, costFood 300..13000, costCrystal 100..4800) and structures-catalog.json (repo.upgradeCost iron 20..1440): small closes the cheapest tier upgrade (the Lumber Mill T1 900-wood shortfall in the screenshot that prompted this WO), medium closes a mid-ladder step, large closes a late step but deliberately NOT the Barracks T6 16000-wood ceiling, so the top pack does not trivialise the game. The optional impulse/impulseResource/impulseSize fields are the machine-readable family tag ShortfallPackOffer resolves on; older packs omit them (absent = false/null, no migration break).",
     "cosmeticGrant": "Every cosmetics SKU is recorded in OwnedItemIds and CosmeticOwnershipService.",
     "shelf": "storeVisible is the SINGLE shelf flag (PackStore.Render line ~327 filters on it). WO-1118 proposed a separate `shelf: live|hidden|legacy` string; that was NOT added, because a second flag over the same decision is duplicated state and the two would drift (see CLAUDE.md S2/S5). storeVisible:false HIDES the row from browse/Buy but KEEPS it loadable, so an existing owner's entitlement still resolves via PackCatalog.Find. Every hidden row carries _hiddenReason.",
-    "skrFlat": "WO-1815 (owner 2026-09-16, verbatim: \"change the store to SKR only and set to flat amounts\" + \"only do straight SKR for SKR build 100 200 300 500 9999\"). skrFlat is the FLAT, market-independent SKR amount for this pack, mapped by USD ANCHOR rung: $1.99 -> 100, $2.99 -> 200, $4.99 -> 300, $9.99 -> 500, $19.99 -> 1000 (this rung is NOT in the owner ladder - her five rungs do not cover the shelf's six USD bands; it is a proposal she can re-rule), $49.99 -> 9999. Packs sharing a usd anchor share an skrFlat, because test/purchases.quote.test.js judges domination AT A SHARED ANCHOR. THE SERVER IS STILL THE PRICE AUTHORITY: this field reaches api/_lib/sku-catalog.generated.json through the verbatim tools/gen-sku-catalog.mjs copy and the server prices from it; the CLIENT never renders it as a price (that is the WO-1158 paid-but-not-granted defect), only as the STRUCK anchor on a sale card and as the regression/capture oracle. pricing.skr is LEFT ALONE - correcting a dead field would create a second opinion about one number. pricing.usd also stays: PurchaseGate.RequiresWallet derives the wallet rule from it and the Google Play + Pi rails price themselves off it.",
+    "skrFlat": "WO-1815 (owner 2026-09-16, verbatim: \"change the store to SKR only and set to flat amounts\" + \"only do straight SKR for SKR build 100 200 300 500 9999\"). skrFlat is the FLAT, market-independent SKR amount for this pack, mapped by USD ANCHOR rung: $1.99 -> 100, $2.99 -> 200, $4.99 -> 300, $9.99 -> 500, $19.99 -> 1000 (this rung is NOT in the owner ladder - her five rungs do not cover the shelf's six USD bands; it is a proposal she can re-rule), $49.99 -> 9999. THAT SIX-RUNG MAPPING IS RETIRED 2026-09-22 - read the RE-PEG clause at the end of this note, not this sentence. Packs sharing a usd anchor share an skrFlat, because test/purchases.quote.test.js judges domination AT A SHARED ANCHOR. THE SERVER IS STILL THE PRICE AUTHORITY: this field reaches api/_lib/sku-catalog.generated.json through the verbatim tools/gen-sku-catalog.mjs copy and the server prices from it; the CLIENT never renders it as a price (that is the WO-1158 paid-but-not-granted defect), only as the STRUCK anchor on a sale card and as the regression/capture oracle. pricing.skr is LEFT ALONE - correcting a dead field would create a second opinion about one number. pricing.usd also stays: PurchaseGate.RequiresWallet derives the wallet rule from it and the Google Play + Pi rails price themselves off it. RE-PEG 2026-09-22 (owner ruling 03:12, verbatim: re-peg every pack's SKR price to its USD ladder at today's rate, ROUNDING UP to clean numbers): rule=ceil(usd/rate/q)*q with q=25 when usd/rate is below 500 and q=100 at 500 and above (quantumLow=25 quantumHigh=100 quantumThreshold=500) rate=0.02092629 USD/SKR source=CoinGecko-simple-price id=seeker last_updated_at=1790064450 (2026-09-22T08:07:30Z); the id 'seeker' is the same one this repo's own probe reads (api/_lib/dep-probes/coingecko.js:30). New rungs: $1.99->100, $2.99->150, $4.99->250, $9.99->500, $19.99->1000, $49.99->2400. RE-RULED the same day: the owner set $19.99 = 1000 SKR. It is expressed as the COARSER QUANTUM ABOVE 500 SKR, never as a per-row override - a per-row exception is a second opinion about one price, and the tiered rule reproduces every other rung unchanged. The old flat ladder (100/200/300/500/1000/9999) is RETIRED: 9999 was never a peg and read as a ~$209 pack on a $49.99 shelf. StoreSkrFlatLadderRegression parses rate= out of THIS sentence and derives every expected rung from it, so the suite and the data cannot drift - change the rate here and the oracle moves with it.",
     "skrPeg": "ONE peg, no second SKR table: skrPerUsd ~= 12.5. $1.99 -> 25 SKR, $2.99 -> 36 SKR, $4.99 -> 60 SKR, $9.99 -> 120 SKR, $19.99 -> 240 SKR, $49.99 -> 600 SKR (authored figures; 2.99*12.5=37.4 is authored down to 36 to keep the rung spacing even). ⚠ THE '$4.99 CEILING' SENTENCE THAT USED TO END THIS NOTE IS RETIRED (WO-1121, owner 2026-08-21): it was an EARLY-ACCESS constraint that WO-1118 applied as though permanent. The ceiling is $49.99 - the full monetization-v2-spec §4 ladder. What did NOT change: the covenant (convenience and beauty, never combat power) and the $5 ceiling on the IMPULSE family specifically, which ImpulsePackRegression still pins.",
     "convenienceRedeemers": "LEGAL != REDEEMABLE. PackCatalog.ConvenienceAllowList says a kind is covenant-legal; PackCatalog.IsRedeemableConvenience says something in THIS build actually spends it. Live redeemers: lantern-oil-2x/3x-expedition (Lantern.cs); permanent-builder (WO-1253, BuildTimerService.SlotCount reads SKU ownership in OwnedItemIds - NOT a GearInventory count, so re-settle is idempotent); instant-build / instant-repair / harvest-auto-collect / xp-weekend (WO-1246, Village/Monetization/ConvenienceRedeemer.cs). Still vapor as PACK TOKENS: harvest_boost (HarvestBoostService is crystal/ad, not GearInventory), instant_fill_storage, workforce_slot, storage_tier_jump, offline_window_extension. A storeVisible pack may not advertise a kind that is not on the redeemable list.",
     "shelfCurated": "Impulse SKUs are shortfall-only by default (WO-947 s12c.4). shelfCurated:true opts ONE row per resource onto the browsable shelf - owner ruling 2026-08-21, 'Middle - one impulse tier per resource'. Exactly three carry it today: impulse-{wood,iron,stone}-medium. The flag lives here rather than as a SKU list in PackStore.cs so the merchandising choice is re-ruled by editing data. Promoting a fourth row is an OWNER decision, not a code cleanup.",
@@ -39,7 +39,7 @@
         "usdc": 4.99,
         "sol": 0.018,
         "skr": 25,
-        "skrFlat": 300
+        "skrFlat": 250
       },
       "contents": {
         "cosmetics": [],
@@ -68,7 +68,7 @@
         "usdc": 4.99,
         "sol": 0.045,
         "skr": 60,
-        "skrFlat": 300
+        "skrFlat": 250
       },
       "contents": {
         "cosmetics": [],
@@ -172,7 +172,7 @@
         "usdc": 49.99,
         "sol": 0.45,
         "skr": 600,
-        "skrFlat": 9999
+        "skrFlat": 2400
       },
       "contents": {
         "cosmetics": [],
@@ -286,7 +286,7 @@
         "usdc": 4.99,
         "sol": 0.045,
         "skr": 60,
-        "skrFlat": 300
+        "skrFlat": 250
       },
       "contents": {
         "cosmetics": [
@@ -319,6 +319,7 @@
       "tier": 9,
       "storeSection": "featured",
       "storeBadge": "BEST START",
+      "artHasBanner": true,
       "name": "Starter's Hand",
       "tagline": "A steady hand for a new tender - everything you need to get the Heart growing.",
       "theme": "Onboarding value pack: economy-heavy headstart + early instant-build/repair + one welcome cosmetic. The 'best first buy'.",
@@ -328,7 +329,7 @@
         "usdc": 4.99,
         "sol": 0.045,
         "skr": 60,
-        "skrFlat": 300
+        "skrFlat": 250
       },
       "contents": {
         "cosmetics": [],
@@ -599,7 +600,7 @@
         "usdc": 2.99,
         "sol": 0.027,
         "skr": 36,
-        "skrFlat": 200
+        "skrFlat": 150
       },
       "contents": {
         "cosmetics": [],
@@ -628,7 +629,7 @@
         "usdc": 4.99,
         "sol": 0.045,
         "skr": 60,
-        "skrFlat": 300
+        "skrFlat": 250
       },
       "contents": {
         "cosmetics": [],
@@ -681,7 +682,7 @@
         "usdc": 2.99,
         "sol": 0.027,
         "skr": 36,
-        "skrFlat": 200
+        "skrFlat": 150
       },
       "contents": {
         "cosmetics": [],
@@ -710,7 +711,7 @@
         "usdc": 4.99,
         "sol": 0.045,
         "skr": 60,
-        "skrFlat": 300
+        "skrFlat": 250
       },
       "contents": {
         "cosmetics": [],
@@ -769,7 +770,7 @@
         "usdc": 2.99,
         "sol": 0.027,
         "skr": 36,
-        "skrFlat": 200
+        "skrFlat": 150
       },
       "contents": {
         "cosmetics": [],
@@ -801,7 +802,7 @@
         "usdc": 4.99,
         "sol": 0.045,
         "skr": 60,
-        "skrFlat": 300
+        "skrFlat": 250
       },
       "contents": {
         "cosmetics": [],
@@ -851,7 +852,7 @@
         "usdc": 2.99,
         "sol": 0.027,
         "skr": 36,
-        "skrFlat": 200
+        "skrFlat": 150
       },
       "contents": {
         "cosmetics": [],
@@ -876,7 +877,7 @@
         "usdc": 4.99,
         "sol": 0.045,
         "skr": 60,
-        "skrFlat": 300
+        "skrFlat": 250
       },
       "contents": {
         "cosmetics": [],
