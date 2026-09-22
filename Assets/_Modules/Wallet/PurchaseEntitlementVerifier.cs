@@ -228,37 +228,17 @@ namespace DeNelle.Wallet
         }
 
         /// <summary>Restores a durable entitlement by authenticated wallet + SKU after local loss.</summary>
-        public static UniTask<EntitlementVerificationResult> ReconcileAsync(
-            PackDef pack, WalletService wallet) =>
-            ReconcileAsync(pack, wallet, pack != null ? pack.Sku : null);
-
-        /// <summary>
-        /// The same lookup, but asking about an EXPLICIT <paramref name="sku"/> rather than the
-        /// pack's current one.
-        ///
-        /// <para>⛔ WHY THIS OVERLOAD EXISTS (WO-1952). A SKU is a LIVE SAVE KEY, so a renamed pack
-        /// keeps its retired ids in <c>PackDef.LegacySkus</c> and ownership is tested against ALL of
-        /// them (<c>PackCatalog.OwnershipKeysFor</c>, which exists because a bare
-        /// <c>Contains(pack.Sku)</c> would re-offer a paid pack and double-charge). The server row,
-        /// however, was written under WHATEVER id was current on the day of the purchase — so asking
-        /// only about <c>pack.Sku</c> gets an honest "no row" for an entitlement that genuinely
-        /// exists under the old string. Four paid packs carry aliases today
-        /// (<c>Assets/Resources/Data/Canonical/packs.json</c>, read 2026-09-22: keepers-satchel,
-        /// impulse-stone-small/medium/large). The reconcile sweep therefore asks per OWNERSHIP KEY,
-        /// and this overload is what lets it. The response is still bound to the sku that was ASKED
-        /// FOR, never loosened.</para>
-        /// </summary>
         public static async UniTask<EntitlementVerificationResult> ReconcileAsync(
-            PackDef pack, WalletService wallet, string sku)
+            PackDef pack, WalletService wallet)
         {
-            if (pack == null || wallet == null || !wallet.IsRealSigningWallet || string.IsNullOrEmpty(sku))
+            if (pack == null || wallet == null || !wallet.IsRealSigningWallet)
                 return new EntitlementVerificationResult(EntitlementVerificationState.Unavailable, null);
 
             string playerId = wallet.Account.Address;
             byte[] body = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(new
             {
                 playerId,
-                sku,
+                sku = pack.Sku,
                 network = WireNetwork(wallet.Network),
             }));
             using var req = new UnityWebRequest(ReconcileUrl, "POST")
@@ -291,10 +271,7 @@ namespace DeNelle.Wallet
             if (response != null && response.Success &&
                 (response.State == "verified" || response.State == "fulfilled") &&
                 !string.IsNullOrEmpty(response.TxSignature) &&
-                // Bound to the sku that was ASKED FOR - which for the WO-1952 sweep may be a retired
-                // alias of pack.Sku. Loosening this to "any sku" would accept a row for a different
-                // pack entirely.
-                string.Equals(response.Sku, sku, StringComparison.Ordinal) &&
+                string.Equals(response.Sku, pack.Sku, StringComparison.Ordinal) &&
                 string.Equals(response.Network, expectedNetwork, StringComparison.Ordinal))
                 return new EntitlementVerificationResult(response.State == "fulfilled"
                         ? EntitlementVerificationState.Fulfilled : EntitlementVerificationState.Verified,
