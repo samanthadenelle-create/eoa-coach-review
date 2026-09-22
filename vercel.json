@@ -10,7 +10,8 @@
     { "path": "/api/cron/swap-quote-probe", "schedule": "*/15 * * * *" },
     { "path": "/api/cron/api-health-probe", "schedule": "*/15 * * * *" },
     { "path": "/api/cron/applixir-read-probe", "schedule": "20 * * * *" },
-    { "path": "/api/cron/r2-public-read-probe", "schedule": "40 6 * * *" }
+    { "path": "/api/cron/r2-public-read-probe", "schedule": "40 6 * * *" },
+    { "path": "/api/cron/stale-entitlement-check", "schedule": "15 7 * * *" }
   ],
   "rewrites": [
     { "source": "/admin", "destination": "/api/admin/console" },
