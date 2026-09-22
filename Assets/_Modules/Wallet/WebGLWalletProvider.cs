@@ -11,7 +11,7 @@ using DeNelle.Core.Diagnostics;
 
 namespace DeNelle.Wallet
 {
-    public sealed class WebGLWalletProvider : IWalletProvider
+    public sealed class WebGLWalletProvider : IWalletProvider, ISwapSigningWallet
     {
         public const string JupiterInstallUrl = "https://jup.ag";
 
@@ -26,6 +26,16 @@ namespace DeNelle.Wallet
 
         public async UniTask<WalletAccount> Connect(WalletNetwork network)
         {
+            // ⛔ BEFORE THE ADAPTER EXISTS, NOT AFTER. The browser wallet's NAME is
+            // observable exactly once - as it passes through the page lib's own
+            // connectWallet call - and the lib exposes no accessor for the connected
+            // wallet (bundle read at source 2026-09-22) while the SDK keeps it in a
+            // private static. The bridge installs a property hook so the CDN's own
+            // `window.walletAdapterLib = ...` assignment lands in our setter. Installed
+            // late it captures nothing, and the swap arm then REFUSES with a sentence
+            // that says so rather than guessing which wallet to ask.
+            WebGLWalletBridge.EnsureInstalled();
+
             var webGl = new SolanaWalletAdapterWebGLOptions
             {
                 walletAdapterUIPrefab = Resources.Load<GameObject>("SolanaUnitySDK/WalletAdapterUI"),
@@ -123,12 +133,43 @@ namespace DeNelle.Wallet
             public double skr;
         }
 
+        /// <summary>
+        /// The one-sheet SKR pack purchase on web. Built, signed and submitted by
+        /// <see cref="WebGLPaymentBuilder"/> — the same transferChecked contract
+        /// api/purchases/verify.js matches on Android, with the blockhash / ATA read /
+        /// submission travelling through /api/wallet/rpc because a browser cannot call
+        /// a public Solana RPC.
+        /// </summary>
+        /// <remarks>
+        /// This method used to return a hardcoded <c>PaymentResult.Failure</c> saying the
+        /// WebGL purchase was a follow-up and this path was unwired (the exact sentence is
+        /// deliberately not reproduced — WebPayPathRegression's [wired] pin fails on that
+        /// string, so quoting it here would fail the suite over prose),
+        /// which is what made the web/itch build a ZERO-REVENUE surface: a player could
+        /// connect, read a balance and sign a login, then buy nothing at all.
+        /// </remarks>
         public UniTask<PaymentResult> SendPayment(
             string packSku, CurrencyKind currency, double amount, WalletNetwork network)
         {
-            return UniTask.FromResult(PaymentResult.Failure(
-                packSku, currency,
-                "WebGL pack purchase uses Jupiter swap (follow-up); SendPayment is not wired."));
+            if (!IsConnected)
+                return UniTask.FromResult(PaymentResult.Failure(
+                    packSku, currency, "No wallet is connected. Nothing was charged."));
+            return WebGLPaymentBuilder.SendPayment(_account.Address, packSku, currency, amount, network);
+        }
+
+        /// <summary>
+        /// The Jupiter swap arm. Jupiter returns a VERSIONED (v0) transaction, which the
+        /// SDK's WebGL wrapper cannot carry — it round-trips through the legacy
+        /// Transaction model (SolanaWalletAdapterWebGL.cs:154-158, :220). The page-side
+        /// lib handles both models (measured in the CDN bundle, 2026-09-22), so the bytes
+        /// go to the browser opaque and come back opaque.
+        /// </summary>
+        public UniTask<(bool ok, string signature, string error)> SignAndSendSwapTransaction(
+            string swapTransactionBase64, WalletNetwork network)
+        {
+            if (!IsConnected)
+                return UniTask.FromResult((false, (string)null, "no wallet connected"));
+            return WebGLPaymentBuilder.SignAndSendSwap(swapTransactionBase64, network);
         }
 
         public async UniTask<string> SignMessageBase58(string utf8Message)
