@@ -5,7 +5,8 @@
         "UniTask",
         "Unity.TextMeshPro",
         "Unity.Addressables",
-        "Unity.ResourceManager"
+        "Unity.ResourceManager",
+        "RTLTMPro"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
