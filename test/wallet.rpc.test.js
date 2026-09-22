@@ -40,7 +40,13 @@ const T = route._test;
 
 const RPC_URL = 'https://rpc.example.invalid/mainnet';
 const ADDRESS = 'So11111111111111111111111111111111111111112';
-const TREASURY_ATA = '6SVNy7VP7xSiniYD1RAh4DQN2YnCnpmtybC1SYKk3uL3';
+// A base58-shaped account id, DELIBERATELY NOT THE LIVE TREASURY ATA. The proxy is a
+// transport and validates SHAPE, not identity, so a real address buys this suite nothing
+// and costs it something: WO-1956 deleted the client-side treasury constant because the
+// address living in two places with no parity gate is what produces a paid-but-refused
+// transfer, and SwapAsPaymentRegression's [treasury] pin scans for exactly these literals.
+// A fixture carrying one is a copy waiting for that scan to widen.
+const TREASURY_ATA = 'AtaFixture1111111111111111111111111111111111';
 const SIGNATURE =
     '5Ug1NCZ8P2Vh4iC7kQ9mXxWpEoR3tYuD6aB2cF8gH1jKLmN4pQrS7tUvWxYz9AbCdEfGhJkLmNpQrStUvWxYz1Ab';
 
