@@ -13,9 +13,23 @@
     <!-- Pi Network SDK. Provides window.Pi (only resolves inside Pi Browser).
          Pi.init + Pi.authenticate are driven from C# via PiBridge.jslib /
          PiSignInController - we only LOAD the SDK here so window.Pi exists. -->
+    <!-- ⛔ WO-1963: pi-sdk.js DELIBERATELY HAS NO crossorigin ATTRIBUTE, AND MUST NEVER GET ONE.
+         Measured 2026-09-22 (CLAUDE.md 11B - read at source, not from docs):
+           curl -sI -H 'Origin: https://defenders-webgl.vercel.app' https://sdk.minepi.com/pi-sdk.js
+           -> HTTP/1.1 200 OK / Content-Type: text/javascript   and NO Access-Control-Allow-Origin.
+         crossorigin="anonymous" makes the fetch a CORS request; with no ACAO header the browser
+         REFUSES the response outright, `window.Pi` never exists, and the whole Pi sign-in /
+         payment path dies. The cost of leaving it off is that an exception thrown INSIDE this
+         script reaches window.onerror as the opaque "Script error." - which is why the
+         piReportPageError beacon below captures document.scripts instead. Re-check the header
+         before ever changing this; if minepi starts sending ACAO, add the attribute and say so. -->
     <script src="https://sdk.minepi.com/pi-sdk.js"></script>
-    <!-- AppLixir rewarded video (itch / Vercel WebGL). Pi Browser uses PiAdProvider instead. -->
-    <script src="https://cdn.applixir.com/applixir.app.v6.1.0.js"></script>
+    <!-- AppLixir rewarded video (itch / Vercel WebGL). Pi Browser uses PiAdProvider instead.
+         WO-1963: crossorigin="anonymous" is SAFE HERE and only here - measured the same hour,
+         cdn.applixir.com returns `Access-Control-Allow-Origin: *`, so the CORS fetch succeeds and
+         the browser stops masking this script's exceptions as "Script error." (window.onerror then
+         receives the real message/source/lineno and the beacon below can attribute them). -->
+    <script src="https://cdn.applixir.com/applixir.app.v6.1.0.js" crossorigin="anonymous"></script>
 
     <!-- WO-1910. A real browser build of npm buffer 6.0.3, generated from node_modules by
          tools/build-page-buffer.mjs (nothing downloaded). It provides the page global the
@@ -53,11 +67,23 @@
          the connect tap and not before. -->
     <script src="reown-config.js"></script>
 
+    <!-- ⛔ WO-1963: THE TWO `TemplateData/...` LINKS THAT USED TO SIT HERE ARE DELETED.
+         This template has NO TemplateData folder (`ls Assets/WebGLTemplates/Pi/` 2026-09-22:
+         index.html, page-buffer.js, page-globals.js, wallet-*.js, reown.config.example.json,
+         validation-key.txt - nothing else), so Unity never emitted one and
+         `Builds/WebGL/TemplateData/` does not exist on disk. They were two guaranteed 404s on
+         EVERY page load of every host, and the owner's console paste on 2026-09-22 carries both
+         (`style.css:1 Failed to load resource: 404`, `/TemplateData/favicon.ico:1 ... 404 (x2)`).
+         Two permanent red lines in the console are not cosmetic: they are the noise a real error
+         has to be picked out of, and this ticket exists because a real error was hard to see.
+         All of this page's styling is the inline <style> block below; there was never a stylesheet
+         to lose. Do NOT "restore" these by adding a TemplateData folder - add a real <link> only
+         if a real file ships with it. -->
     <!-- WO-1962 — THE TWO DEAD LINKS THAT WERE HERE ARE GONE, NOT REPLACED.
          This template carries NO TemplateData/ folder (Unity only copies one that the
          template itself ships), so
-             <link rel="shortcut icon" href="TemplateData/favicon.ico" />
-             <link rel="stylesheet"    href="TemplateData/style.css"   />
+             (a shortcut-icon link to the TemplateData favicon)
+             (a stylesheet link to the TemplateData style.css)
          were Unity's Default-template boilerplate pointing at files that have never
          existed in this tree. They 404'd on every single page load - both are in the
          owner's 2026-09-22 console alongside the localization bundle 404s.
@@ -214,6 +240,83 @@
           }
         } catch (e) { /* Unity not ready - the console.info at the call site is the record */ }
       }
+
+      // --- WO-1963: MAKE AN UNKNOWN PAGE ERROR ATTRIBUTABLE ------------------------------------
+      // THE GAP THIS CLOSES, measured 2026-09-22 and not inferred: the owner was shown
+      // "…The error was: Script error." over the paused menu, and the ONLY record of it anywhere
+      // was her own screenshot. Her Unity session wt-cd8eabd3a07e (build 2026.09.22.380749) and
+      // the template session wt-pif9db709a6c both carry hundreds of rows across that minute and
+      // NOT ONE names the throw - because the two handlers below did exactly what they were
+      // written to do: suppress the benign Pi class, and for everything else `return false` /
+      // fall through WITHOUT recording anything. A global error surface that owns the benign case
+      // and drops the unknown case is backwards; the unknown one is the one nobody can debug.
+      //
+      // "Script error." is the browser MASKING a throw that came from a cross-origin <script>
+      // loaded without CORS. When that happens, message/source/lineno/colno/stack are ALL blank by
+      // design, so there is nothing to report - except WHICH scripts the page had loaded. That
+      // list is the whole lead, so it is captured exactly when the masking is detected.
+      //
+      // Capped per boot: an error inside a rAF/interval repeats every frame, and a beacon per
+      // frame would flood the sink and evict the very rows a reader needs (the CLAUDE.md sec.12
+      // logcat-ring lesson, same shape). Deduped by message so one repeat never costs a slot.
+      var PI_PAGE_ERROR_MAX = 5;
+      var piPageErrorCount = 0;
+      var piPageErrorSeen = {};
+      function piScriptSnapshot() {
+        // Deduped, capped, and ORIGIN-ONLY for cross-origin entries: this is a lead about which
+        // third party threw, never a place to leak query strings.
+        try {
+          var out = [], seen = {};
+          var list = document.scripts || [];
+          for (var i = 0; i < list.length && out.length < 20; i++) {
+            var src = list[i].src;
+            if (!src) continue;
+            var key = src;
+            try {
+              var u = new URL(src, document.baseURI);
+              key = (u.origin === location.origin) ? u.pathname : (u.origin + u.pathname);
+            } catch (e) { /* exotic src - keep the raw string rather than dropping the lead */ }
+            if (seen[key]) continue;
+            seen[key] = 1;
+            out.push(key);
+          }
+          return out.join(',');
+        } catch (e) { return '<unreadable:' + e + '>'; }
+      }
+      function piReportPageError(kind, message, source, lineno, colno, stack) {
+        try {
+          var msg = '' + (message || '');
+          if (piPageErrorSeen[msg]) return;          // one row per distinct message
+          piPageErrorSeen[msg] = 1;
+          if (piPageErrorCount >= PI_PAGE_ERROR_MAX) return;
+          piPageErrorCount++;
+          // The browser's masking signature: no source, no line AND no stack. The stack matters in
+          // the test: an unhandledrejection legitimately has no source/lineno while still carrying
+          // a full stack, so testing only the first two would stamp masked=true on every rejection
+          // and attach a script snapshot to errors that are already fully attributed.
+          var masked = (!source && !lineno && !stack);
+          var line = '[PageError] kind=' + kind +
+            ' msg=' + JSON.stringify(msg) +
+            ' src=' + JSON.stringify('' + (source || '')) +
+            ' line=' + (lineno || 0) + ' col=' + (colno || 0) +
+            ' masked=' + masked +
+            ' boot=' + (typeof bootId === 'undefined' ? '?' : bootId) +
+            ' upMs=' + (Date.now() - piBootAt) +
+            ' vis=' + document.visibilityState +
+            ' stack=' + JSON.stringify(('' + (stack || '')).slice(0, 700));
+          if (masked) line += ' scripts=' + JSON.stringify(piScriptSnapshot());
+          console.error('[PageError] ' + line);
+          // useBeacon=true: an uncaught error is frequently teardown-adjacent, and :774 already
+          // records that a plain fetch does not survive teardown. It also has to be DISPATCHED
+          // before Unity's own listener can put a blocking alert() over the tab.
+          piTraceEmit(line, true);
+        } catch (e) {
+          // Never throw out of the error reporter - that is how one bug becomes a loop.
+          try { console.info('[PageError] report skipped: ' + e); } catch (e2) { }
+        }
+      }
+      // -----------------------------------------------------------------------------------------
+
       window.addEventListener('unhandledrejection', function (event) {
         var reason = event && event.reason;
         var msg = '' + ((reason && (reason.message || reason)) || '');
@@ -221,8 +324,10 @@
           event.preventDefault();
           console.info('[Pi] SDK host-channel timeout (expected outside Pi Browser) - suppressed: ' + msg);
           piForwardToUnity(msg);
+          return;
         }
-        // Anything else stays unhandled -> surfaces normally (never blanket-swallow).
+        // WO-1963: RECORD the unknown class, then let it surface normally (never blanket-swallow).
+        piReportPageError('unhandledrejection', msg, '', 0, 0, reason && reason.stack);
       });
       window.onerror = function (message, source, lineno, colno, error) {
         var msg = '' + (message || (error && error.message) || '');
@@ -231,7 +336,15 @@
           piForwardToUnity(msg);
           return true; // suppress ONLY the known-benign Pi class
         }
-        return false; // unknown errors surface normally
+        // WO-1963: RECORD the unknown class before returning. Ordering is load-bearing and is why
+        // the beacon lands at all: this assignment happens during PARSE, while Unity registers its
+        // own `window.addEventListener("error", ...)` later, from inside createUnityInstance - so
+        // this runs FIRST and the beacon is dispatched before Unity's blocking alert() can freeze
+        // the tab. (Proven at source in the shipped loader,
+        // Builds/WebGL/Build/ce7b295cfd2b8aed28c84194ca9eafa3.loader.js ~offset 2353:
+        // `window.addEventListener("error",r),window.addEventListener("unhandledrejection",r)`.)
+        piReportPageError('onerror', msg, source, lineno, colno, error && error.stack);
+        return false; // unknown errors still surface normally - recording is not swallowing
       };
       // -----------------------------------------------------------------------------------
 
@@ -393,6 +506,12 @@
         try {
           if (!piDoorOpen || !piDoorEl) return;
           if (piDoorOpen.className.indexOf('eoa-promoted') >= 0) return;
+          // WO-1963: RE-SHOW the door. piDoorHide() sets display:none once the runtime is up, so a
+          // promote AFTER boot (the new 'runtime-error' reason) would otherwise set a class on an
+          // invisible element and give the player nothing - a notice nobody can see is the same
+          // silent failure the alert was replacing. Harmless for the pre-runtime reasons, whose
+          // element is already visible.
+          piDoorEl.style.display = '';
           piDoorOpen.className = 'eoa-promoted';
           console.info('[PiLifecycle] bug-door promoted reason=' + reason);
         } catch (e) { console.info('[PiLifecycle] bug-door promote skipped: ' + e); }
@@ -517,9 +636,22 @@
         // every host rather than behind a UA sniff (a UA test is the thing that goes stale).
         // Desktop DPR is <=2 on virtually every display, so the cap is a no-op there.
         devicePixelRatio: Math.min(window.devicePixelRatio || 1, 2),
-        // WO-678: own the loader's message surface - never a raw alert()/default banner.
-        // Genuine loader ERRORS go to console.error + the loading-bar element; warnings and
-        // the benign Pi timeout class route to console only.
+        // ⛔ WO-1963: `showBanner` IS NOT THE ALERT PATH, AND NEVER WAS. The WO-678 comment that
+        // stood here claimed this key meant "never a raw alert()"; that claim was FALSE and it is
+        // why the owner was shown a blocking alert on 2026-09-22. Read at source in the shipped
+        // loader (Builds/WebGL/Build/ce7b295cfd2b8aed28c84194ca9eafa3.loader.js):
+        //   ~offset 0    `function c(e,t){ ... if(n.showBanner) return n.showBanner(e,t); ...}`
+        //                  -> showBanner is the LOADER BANNER surface only (mime/encoding notes).
+        //   ~offset 4733 `function E(e,t,n){ ... w.errorHandler&&w.errorHandler(e,t,n) ||
+        //                  ( ... alert("An error occurred running the Unity content on this
+        //                  page. ... The error was:\n"+e) ...) }`
+        //                  -> THE ALERT LIVES IN E(), WHICH NEVER CONSULTS showBanner.
+        // E() is reached from the loader's own `window.addEventListener("error"/"unhandledrejection")`
+        // pair (~offset 2353), which is a SEPARATE registration from our `window.onerror` above -
+        // so returning true there never suppressed anything here either.
+        // `errorHandler` below is the ONE key that does, because every config key is copied onto
+        // the Module at ~offset 2149 (`for(o in n)w[o]=n[o]`), making config.errorHandler ==
+        // w.errorHandler; a TRUTHY return short-circuits the `||` and the alert never runs.
         showBanner: function (msg, type) {
           var text = '' + msg;
           if (type === 'error' && !piIsBenign(text)) {
@@ -531,6 +663,39 @@
           } else {
             console.warn('[Loader] ' + text);
           }
+        },
+        // WO-1963: THE KEY THAT REPLACES window.alert. Returning truthy makes E() skip its alert
+        // entirely (see the derivation above). A blocking modal is the wrong surface for a
+        // runtime error on a game page: it freezes the tab until a human dismisses it, it tells
+        // the server nothing, and on a masked cross-origin throw its whole text is the useless
+        // word "Script error." - which is exactly what the owner was handed.
+        errorHandler: function (message, source, lineno) {
+          var text = '' + (message || '');
+          // ⛔ SPLIT THE MESSAGE BEFORE ANYTHING ELSE READS IT. Unity does not hand this function a
+          // bare message: its `r()` (loader.js ~offset 0) folds the stack in and calls
+          // `E(n += "\n" + stack.trim(), ...)`. So a masked event arrives here as
+          // "Script error.\n" - with the trailing newline - while window.onerror above recorded
+          // "Script error." with none. Keying the dedupe on the raw text would therefore MISS
+          // every time and bank two rows per error against a 5-per-boot cap, and the stack (the
+          // only copy of it that exists on this path) would be thrown away by passing ''.
+          var nl = text.indexOf('\n');
+          var head = nl >= 0 ? text.slice(0, nl) : text;
+          var tail = nl >= 0 ? text.slice(nl + 1) : '';
+          // The benign Pi class reaches HERE too, because Unity's listeners are registered
+          // separately from our window.onerror - suppressing it there never covered this path.
+          if (piIsBenign(head)) {
+            console.info('[Pi] SDK error (expected outside Pi Browser) - suppressed at errorHandler: ' + head);
+            piForwardToUnity(head);
+            return true;
+          }
+          console.error('[Loader] runtime error: ' + head + ' @ ' + (source || '<masked>') + ':' + (lineno || 0));
+          // Same recorder as window.onerror, keyed on the SAME head text, so an error that reaches
+          // both paths costs one row and not two - which the split above is what makes true.
+          piReportPageError('unity-errorHandler', head, source, lineno, 0, tail);
+          // The page's own non-blocking notice: the bug-report door the player can actually use,
+          // which carries the trace tail with it. Never a modal.
+          piDoorPromote('runtime-error');
+          return true;   // handled - do NOT let the loader alert()
         },
       };
 
