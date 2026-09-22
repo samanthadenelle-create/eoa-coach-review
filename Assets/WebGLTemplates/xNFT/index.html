@@ -111,11 +111,18 @@
         // crossorigin work here: nothing same-origin is ever masked as "Script error.".
         errorHandler: function (message, source, lineno) {
           var text = '' + (message || '');
-          console.error('[Loader] runtime error: ' + text + ' @ ' + (source || '<masked>') + ':' + (lineno || 0));
+          // Unity's r() folds the stack into the message ("<msg>\n<stack>") before calling this,
+          // so split it: the head is the message, the tail is the ONLY copy of the stack on this
+          // path. Same reasoning written out in full in the Pi template.
+          var nl = text.indexOf('\n');
+          var head = nl >= 0 ? text.slice(0, nl) : text;
+          var tail = nl >= 0 ? text.slice(nl + 1) : '';
+          console.error('[Loader] runtime error: ' + head + ' @ ' + (source || '<masked>') + ':' + (lineno || 0));
           try {
-            eoaTraceEmit('[PageError] kind=unity-errorHandler msg=' + JSON.stringify(text) +
+            eoaTraceEmit('[PageError] kind=unity-errorHandler msg=' + JSON.stringify(head) +
               ' src=' + JSON.stringify('' + (source || '')) + ' line=' + (lineno || 0) +
-              ' masked=' + (!source && !lineno) +
+              ' masked=' + (!source && !lineno && !tail) +
+              ' stack=' + JSON.stringify(tail.slice(0, 700)) +
               ' session=' + eoaTraceSession + ' upMs=' + (Date.now() - eoaBootAt));
           } catch (e) { /* telemetry never throws out of the error reporter */ }
           try { unityShowBanner('Something went wrong. You can keep playing; please report it.', 'error'); }

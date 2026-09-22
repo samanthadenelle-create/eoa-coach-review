@@ -278,9 +278,11 @@
           piPageErrorSeen[msg] = 1;
           if (piPageErrorCount >= PI_PAGE_ERROR_MAX) return;
           piPageErrorCount++;
-          // The browser's masking signature: no source and no line. Nothing else survives it, so
-          // the loaded-script list IS the evidence for the next occurrence.
-          var masked = (!source && !lineno);
+          // The browser's masking signature: no source, no line AND no stack. The stack matters in
+          // the test: an unhandledrejection legitimately has no source/lineno while still carrying
+          // a full stack, so testing only the first two would stamp masked=true on every rejection
+          // and attach a script snapshot to errors that are already fully attributed.
+          var masked = (!source && !lineno && !stack);
           var line = '[PageError] kind=' + kind +
             ' msg=' + JSON.stringify(msg) +
             ' src=' + JSON.stringify('' + (source || '')) +
@@ -657,17 +659,27 @@
         // word "Script error." - which is exactly what the owner was handed.
         errorHandler: function (message, source, lineno) {
           var text = '' + (message || '');
+          // ⛔ SPLIT THE MESSAGE BEFORE ANYTHING ELSE READS IT. Unity does not hand this function a
+          // bare message: its `r()` (loader.js ~offset 0) folds the stack in and calls
+          // `E(n += "\n" + stack.trim(), ...)`. So a masked event arrives here as
+          // "Script error.\n" - with the trailing newline - while window.onerror above recorded
+          // "Script error." with none. Keying the dedupe on the raw text would therefore MISS
+          // every time and bank two rows per error against a 5-per-boot cap, and the stack (the
+          // only copy of it that exists on this path) would be thrown away by passing ''.
+          var nl = text.indexOf('\n');
+          var head = nl >= 0 ? text.slice(0, nl) : text;
+          var tail = nl >= 0 ? text.slice(nl + 1) : '';
           // The benign Pi class reaches HERE too, because Unity's listeners are registered
           // separately from our window.onerror - suppressing it there never covered this path.
-          if (piIsBenign(text)) {
-            console.info('[Pi] SDK error (expected outside Pi Browser) - suppressed at errorHandler: ' + text);
-            piForwardToUnity(text);
+          if (piIsBenign(head)) {
+            console.info('[Pi] SDK error (expected outside Pi Browser) - suppressed at errorHandler: ' + head);
+            piForwardToUnity(head);
             return true;
           }
-          console.error('[Loader] runtime error: ' + text + ' @ ' + (source || '<masked>') + ':' + (lineno || 0));
-          // Same recorder as window.onerror, and deduped against it by message, so an error that
-          // reaches both paths costs one row, not two.
-          piReportPageError('unity-errorHandler', text, source, lineno, 0, '');
+          console.error('[Loader] runtime error: ' + head + ' @ ' + (source || '<masked>') + ':' + (lineno || 0));
+          // Same recorder as window.onerror, keyed on the SAME head text, so an error that reaches
+          // both paths costs one row and not two - which the split above is what makes true.
+          piReportPageError('unity-errorHandler', head, source, lineno, 0, tail);
           // The page's own non-blocking notice: the bug-report door the player can actually use,
           // which carries the trace tail with it. Never a modal.
           piDoorPromote('runtime-error');
