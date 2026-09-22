@@ -79,6 +79,18 @@
          All of this page's styling is the inline <style> block below; there was never a stylesheet
          to lose. Do NOT "restore" these by adding a TemplateData folder - add a real <link> only
          if a real file ships with it. -->
+    <!-- WO-1962 — THE TWO DEAD LINKS THAT WERE HERE ARE GONE, NOT REPLACED.
+         This template carries NO TemplateData/ folder (Unity only copies one that the
+         template itself ships), so
+             <link rel="shortcut icon" href="TemplateData/favicon.ico" />
+             <link rel="stylesheet"    href="TemplateData/style.css"   />
+         were Unity's Default-template boilerplate pointing at files that have never
+         existed in this tree. They 404'd on every single page load - both are in the
+         owner's 2026-09-22 console alongside the localization bundle 404s.
+         The page styles itself entirely from the inline <style> below, so shipping a
+         style.css to satisfy the link would be a file that does nothing. Pinned by the
+         WEB_TEMPLATE_REFERENCES row in tools/web-build-contracts.ps1, which walks every
+         same-origin href/src in the BUILT page and requires the file to exist. -->
     <style>
       html, body { margin: 0; padding: 0; height: 100%; background: #0d0a14;
         /* The browser must NOT claim pan/pinch/scroll gestures over the game - else build-mode
