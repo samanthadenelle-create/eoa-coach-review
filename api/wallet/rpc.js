@@ -19,7 +19,7 @@
 // commitment / skipPreflight is DISCARDED. A general proxy would hand any page on
 // the internet our paid RPC quota and let a caller set `skipPreflight:true`, which is
 // precisely the flag that makes "nothing was charged" stop being true
-// (SolanaWalletProvider.SubmitSignedTransaction keeps it false for that reason; this file keeps it
+// (SolanaWalletProvider.cs:1154 keeps it false for that reason; this file keeps it
 // false for the same one). There is deliberately no way to add a method from the
 // request.
 //
@@ -78,7 +78,7 @@ const BASE58_SIGNATURE_RE = /^[1-9A-HJ-NP-Za-km-z]{64,90}$/;
 const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
 
 // The commitment every read on this rail uses. 'confirmed' matches
-// SolanaWalletProvider.SubmitSignedTransaction's preflightCommitment and
+// SolanaWalletProvider.SubmitSignedTransaction's preflightCommitment (:1155) and
 // ConfirmTransaction's accepted statuses (:1221-1223), so the web path and the
 // Android path judge the chain by the same clock.
 const COMMITMENT = 'confirmed';
