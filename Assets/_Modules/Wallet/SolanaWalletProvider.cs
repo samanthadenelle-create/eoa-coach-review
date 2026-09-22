@@ -93,23 +93,7 @@ namespace DeNelle.Wallet
     /// deep-link on desktop), reads SOL / USDC / SKR balances, and builds + sends
     /// the pack-purchase transfer on devnet.
     /// </summary>
-    // ISwapSigningWallet is DECLARED here rather than inferred: SignAndSendSwapTransaction
-    // already existed with this exact signature, and WalletService used to reach it through
-    // `_provider is SolanaWalletProvider` - a test that asks which CLASS this is when the
-    // only question is whether this wallet can sign a swap. The two answers diverged the
-    // moment a second real provider existed (web), and the web player was told "this wallet
-    // cannot sign a Jupiter swap" by a wallet that can. Nothing about this class changes; it
-    // now ANSWERS THE QUESTION instead of being recognised by name.
-    // ⚠ The base list is guarded because the IMPLEMENTATION is: SignAndSendSwapTransaction
-    // lives inside this file's `#if SOLANA_SDK` SDK-helpers region, so declaring the capability
-    // unconditionally would not compile with the define off. (The region is named, not cited by
-    // line - this comment carried a line range for about an hour and the WO-1948 merge moved it,
-    // which is the same duplicated-state rot CLAUDE.md sec.2/sec.5/sec.8 each describe.)
-#if SOLANA_SDK
-    public sealed class SolanaWalletProvider : IWalletProvider, ISwapSigningWallet
-#else
     public sealed class SolanaWalletProvider : IWalletProvider
-#endif
     {
         /// <summary>
         /// True when the Solana Unity SDK is compiled in (the <c>SOLANA_SDK</c>
@@ -645,23 +629,25 @@ namespace DeNelle.Wallet
                 return PaymentResult.Failure(packSku, currency,
                     "No server price was issued for this pack, so nothing was charged. Try again in a moment.");
 
-            // The pack-purchase recipient. On mainnet this resolves to
-            // WalletRegistry.MainnetPurchaseRecipientAddress - the Squads treasury vault
-            // 9wbHbKuirtKai5e3ajvdpzdRYVpuxpAH4DUnERkVtBzj, verified OFF-CURVE on chain
-            // 2026-08-23 with its SKR ATA present and the official mint at 6 decimals.
-            // That vault's multisig threshold is 2-of-3, timeLock 0 - re-verified on chain
-            // 2026-08-24 by tools/treasury-verify.mjs --multisig. No open treasury item.
-            // ⚠ This comment claimed a 1-of-1 blocker until 2026-08-24 and was STALE. Raising
-            // the threshold changes no address and no code, which is exactly why nothing here
-            // needed editing when it happened - and exactly why the stale claim survived.
-            // On devnet transfers land in the documented dev/staging smoke-test wallet.
 #endif
-            var recipient = network == WalletNetwork.Mainnet
-                ? WalletRegistry.MainnetPurchaseRecipientAddress
-                : WalletRegistry.DevnetPurchaseRecipientAddress;
+            // ⛔ THE RECIPIENT COMES FROM THE SERVER-BOUND QUOTE, ON EVERY NETWORK (one-sheet lane,
+            // 2026-09-22, MONEY_HANDLING_AUDIT §8). Until this change the treasury address existed
+            // TWICE - here (a WalletRegistry getter fed by the canonical wallets.json) and on
+            // the server (SOLANA_*_PURCHASE_RECIPIENT[_ATA] env, purchase-catalog.js purchaseRail)
+            // - with no parity gate between them. /verify grants only when the transfer landed on
+            // the quote row's recipient_ata, so a client constant that drifted would have produced
+            // a paid-but-refused transfer. The client constant is DELETED, not gated: the quote the
+            // server issued for THIS sku carries `recipient` + `recipientAta` (buildQuoteBody
+            // hardcodes the env rail into every quote, pinned and quoted alike), and the binding
+            // quote is what RequestQuoteAsync cached under DisplayPrice(sku) one step before Pay.
+            // The devnet smoke-test sink in wallets.json is no longer read here either: the server
+            // rail is the single authority for where money goes. No quote => no transfer.
+            var boundQuote = PurchaseQuoteService.DisplayPrice(packSku);
+            var recipient = boundQuote != null ? boundQuote.Recipient : null;
+            var quotedAta = boundQuote != null ? boundQuote.RecipientAta : null;
             if (string.IsNullOrEmpty(recipient))
                 return PaymentResult.Failure(packSku, currency,
-                    $"No owner-approved {network} purchase recipient configured.");
+                    "No server price was issued for this pack, so nothing was charged. Try again in a moment.");
 
             // WO-766 SAFETY: this is the ONLY transfer-constructing code in the
             // wallet module, and it is UNREACHABLE in release builds -
@@ -722,6 +708,19 @@ namespace DeNelle.Wallet
                     // SDK-VERIFY: AssociatedTokenAccountProgram.DeriveAssociatedTokenAccount.
                     var fromAta = AssociatedTokenAccountProgram.DeriveAssociatedTokenAccount(from, mint);
                     var toAta = AssociatedTokenAccountProgram.DeriveAssociatedTokenAccount(to, mint);
+
+                    // The quote names the treasury token account explicitly (recipientAta). For the
+                    // SKR rail it MUST be the ATA derived from the quote's recipient + this mint - the
+                    // account /verify will look for. A disagreement means the client and the server
+                    // do not agree on where the money goes, and that is refused BEFORE the sheet.
+                    if (currency == CurrencyKind.Skr && !string.IsNullOrEmpty(quotedAta) &&
+                        !string.Equals(quotedAta, toAta.Key, StringComparison.Ordinal))
+                    {
+                        Debug.LogError("[SolanaWalletProvider] quote recipientAta " + quotedAta +
+                                       " != derived ATA " + toAta.Key + " for recipient " + recipient + " - refusing.");
+                        return PaymentResult.Failure(packSku, currency,
+                            "The server's treasury account does not match this pack's quote; no payment was submitted.");
+                    }
 
                     // Create the recipient ATA only when it does not exist. The SDK version in this
                     // build exposes the legacy create instruction, not create-idempotent; emitting

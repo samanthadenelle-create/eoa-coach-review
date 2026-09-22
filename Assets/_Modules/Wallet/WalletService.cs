@@ -890,23 +890,10 @@ namespace DeNelle.Wallet
                 return (false, null, "empty swapTransaction");
             if (_provider is StubWalletProvider)
                 return (false, null, "stub wallet cannot sign a Jupiter swap");
-
-            // ⛔ DISPATCH ON THE CAPABILITY, NEVER ON THE TYPE. This line used to read
-            // a pattern test against the concrete Android/MWA provider type, inside a
-            // `#if SOLANA_SDK`. (The literal text is deliberately not reproduced here:
-            // WebPayPathRegression's [capability] pin fails on exactly that string, and a
-            // comment quoting it would fail the suite over prose.)
-            // The Jupiter branch is compiled into the WEB build and IS
-            // reachable there (PackStore's swap door is gated `#if !GOOGLE_PLAY`, not on
-            // platform), so a web player who tapped Buy without enough SKR walked
-            // JupiterSwapService -> here, missed a test that asked which class this was,
-            // fell through to the line below, and was told "this wallet cannot sign a
-            // Jupiter swap" by a wallet that can sign one. A type test answers a question
-            // the caller never asked. The interface is declared outside every #if, so this
-            // needs no platform guard and gains no new one when a third provider lands.
-            if (_provider is ISwapSigningWallet swapper)
-                return await swapper.SignAndSendSwapTransaction(swapTransactionBase64, Network);
-
+#if SOLANA_SDK
+            if (_provider is SolanaWalletProvider sol)
+                return await sol.SignAndSendSwapTransaction(swapTransactionBase64, Network);
+#endif
             return (false, null, "this wallet cannot sign a Jupiter swap");
         }
 

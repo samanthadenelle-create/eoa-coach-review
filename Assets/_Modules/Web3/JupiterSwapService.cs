@@ -414,27 +414,11 @@ namespace DeNelle.Web3
         /// </summary>
         // User-supplied portion of the /swap body — serialized via JsonUtility so all
         // string fields are correctly escaped (B-JSONINJ). quoteResponse is spliced in raw.
-        [Serializable]
-        private struct SwapRequestTail
-        {
-            public string userPublicKey;
-            public bool wrapAndUnwrapSol;
-            // Jupiter /swap/v1/swap: let the API size the compute-unit limit rather
-            // than shipping the 1.4M default, which overpays priority fees.
-            public bool dynamicComputeUnitLimit;
-        }
-
-        // The fee-bearing variant. JsonUtility emits every field of a struct, so a
-        // single DTO would always send "feeAccount":"" and Jupiter treats that as a
-        // supplied-but-invalid account. Two DTOs keep the key ABSENT when unset.
-        [Serializable]
-        private struct SwapRequestTailWithFee
-        {
-            public string userPublicKey;
-            public bool wrapAndUnwrapSol;
-            public bool dynamicComputeUnitLimit;
-            public string feeAccount;
-        }
+        // ⛔ THE TAIL IS BUILT BY DeNelle.Wallet.SwapRequestTail (one-sheet option (b),
+        // 2026-09-22), not by private DTOs here: `feeAccount` and `destinationTokenAccount` are
+        // each emitted ONLY when non-empty (Jupiter treats "" as supplied-but-invalid), the four
+        // combinations live behind one door, and SwapAsPaymentRegression drives that door
+        // directly - the Editor regression assembly references Wallet, not Web3.
 
         [Serializable]
         private class SwapResponseDto
@@ -468,31 +452,44 @@ namespace DeNelle.Web3
         private async Task<bool> ExecuteSwapCoreAsync(SwapQuote quote, string userPublicKey, string selection,
                                                       string fundingContext = "")
         {
-            FlowTrace.Step("Swap", $"ExecuteSwapAsync user='{(string.IsNullOrEmpty(userPublicKey) ? "<empty>" : userPublicKey)}' hasQuote={quote != null}");
-            if (quote == null || string.IsNullOrEmpty(userPublicKey)) { FlowTrace.Warn("Swap", "ExecuteSwapAsync aborted: null quote or empty userPublicKey (no wallet connected?)"); return false; }
+            // The bool face every pre-09-22 caller (manual panel, TopUpSkrAsync) keeps. The
+            // detailed face below is the same code path with the signature handed back — the
+            // one-sheet purchase needs it because the swap's signature IS the purchase.
+            var outcome = await ExecuteSwapDetailedAsync(quote, userPublicKey, selection, fundingContext,
+                                                         destinationTokenAccount: null, fundingLabel: null);
+            return outcome.Ok;
+        }
+
+        /// <summary>
+        /// <paramref name="destinationTokenAccount"/> — one-sheet option (b): when non-empty, the
+        /// /swap body carries Jupiter's <c>destinationTokenAccount</c> so the ExactOut output lands
+        /// in THAT token account (the treasury SKR ATA from the server-bound quote) instead of the
+        /// payer's. <paramref name="fundingLabel"/> replaces the analytics <c>funding</c> value
+        /// ("swap-as-payment") on that path; the balance/shortfall context still rides in
+        /// <c>fundingContext</c> on both events.
+        /// </summary>
+        private async Task<SwapPaymentOutcome> ExecuteSwapDetailedAsync(SwapQuote quote, string userPublicKey, string selection,
+                                                                        string fundingContext, string destinationTokenAccount,
+                                                                        string fundingLabel)
+        {
+            string funding = string.IsNullOrEmpty(fundingLabel) ? (fundingContext ?? string.Empty) : fundingLabel;
+            string destinationMasked = string.IsNullOrEmpty(destinationTokenAccount) ? string.Empty : Mask(destinationTokenAccount);
+            FlowTrace.Step("Swap", $"ExecuteSwapAsync user='{(string.IsNullOrEmpty(userPublicKey) ? "<empty>" : userPublicKey)}' hasQuote={quote != null}" +
+                                   (string.IsNullOrEmpty(destinationTokenAccount) ? string.Empty : " destinationTokenAccount=" + destinationMasked + " (swap-as-payment)"));
+            if (quote == null || string.IsNullOrEmpty(userPublicKey))
+            {
+                FlowTrace.Warn("Swap", "ExecuteSwapAsync aborted: null quote or empty userPublicKey (no wallet connected?)");
+                return SwapPaymentOutcome.Refused("no quote or no connected wallet");
+            }
 
             // Build the /swap request body. quote.RoutePlan is the verbatim /quote
             // response JSON (exactly the quoteResponse object the /swap endpoint expects),
             // so it stays raw. The user-supplied fields go through a DTO + JsonUtility.ToJson
             // so userPublicKey is PROPERLY ESCAPED (security audit B-JSONINJ — no string-concat
             // JSON injection). We splice the serialized tail (minus its opening brace) after the
-            // raw quoteResponse.
+            // raw quoteResponse. SwapRequestTail (DeNelle.Wallet) owns which optional keys exist.
             string feeAccount = _feeConfig != null ? _feeConfig.FeeWalletAddress : string.Empty;
-            string tailJson = string.IsNullOrEmpty(feeAccount)
-                ? JsonUtility.ToJson(new SwapRequestTail
-                  {
-                      userPublicKey = userPublicKey,
-                      wrapAndUnwrapSol = true,
-                      dynamicComputeUnitLimit = true
-                  })
-                : JsonUtility.ToJson(new SwapRequestTailWithFee
-                  {
-                      userPublicKey = userPublicKey,
-                      wrapAndUnwrapSol = true,
-                      dynamicComputeUnitLimit = true,
-                      feeAccount = feeAccount
-                  });
-            string tailInner = tailJson.Substring(1, tailJson.Length - 2); // strip the wrapping braces
+            string tailInner = SwapRequestTail.BuildInner(userPublicKey, feeAccount, destinationTokenAccount);
             string body = "{\"quoteResponse\":" + quote.RoutePlan + "," + tailInner + "}";
 
             TraceEndpointOnce();
@@ -509,7 +506,7 @@ namespace DeNelle.Web3
                 string detail = HttpFailureDetail(req, SwapUrl);
                 FlowTrace.Warn("Swap", "/swap request FAILED: " + detail + " — no transaction to sign");
                 Debug.LogWarning("[JupiterSwapService] Swap request failed: " + detail);
-                return false;
+                return SwapPaymentOutcome.Refused("/swap request failed: " + detail);
             }
 
             string swapJson = req.downloadHandler.text;
@@ -517,7 +514,7 @@ namespace DeNelle.Web3
             if (dto == null || string.IsNullOrEmpty(dto.swapTransaction))
             {
                 FlowTrace.Fail("Swap", "/swap ok but swapTransaction missing — cannot sign.");
-                return false;
+                return SwapPaymentOutcome.Refused("/swap answered without a transaction");
             }
 
             // ── PRE-SIGN SIMULATION GATE (2026-09-22 live probe) ──────────────────────────
@@ -534,15 +531,15 @@ namespace DeNelle.Web3
                                        simulationError + slot +
                                        (string.IsNullOrEmpty(fundingContext) ? string.Empty : " | funding[" + fundingContext + "]"));
                 TrackSignResult("refused-presim", simulationError, 0L, quote.InputToken.ToString(),
-                                quote.InputMint ?? string.Empty, selection, null, fundingContext);
-                return false;
+                                quote.InputMint ?? string.Empty, selection, null, funding, fundingContext);
+                return SwapPaymentOutcome.Refused("simulation refused: " + simulationError);
             }
 
             var wallet = ResolveWallet();
             if (wallet == null)
             {
                 FlowTrace.Fail("Swap", "ExecuteSwapAsync: no WalletService — cannot sign.");
-                return false;
+                return SwapPaymentOutcome.Refused("no wallet service");
             }
 
             FlowTrace.Step("Swap", "/swap ok — opaque swapTransaction to wallet (no Transaction.Deserialize; Jupiter v0).");
@@ -576,6 +573,7 @@ namespace DeNelle.Web3
                                    " cost=" + quote.InAmount.ToString("0.######", CultureInfo.InvariantCulture) +
                                    " maxCost=" + quote.MaxInAmount.ToString("0.######", CultureInfo.InvariantCulture) +
                                    " selection=" + selection + " feePayerMatches=" + feePayerMatches +
+                                   (string.IsNullOrEmpty(destinationTokenAccount) ? string.Empty : " destination=" + destinationMasked + " funding=" + funding) +
                                    (string.IsNullOrEmpty(fundingContext) ? string.Empty : " funding[" + fundingContext + "]"));
             Guard.Try("Swap", "analytics swap_sign_requested", () => EventTracker.Track("swap_sign_requested", new
             {
@@ -589,7 +587,11 @@ namespace DeNelle.Web3
                 feePayerMatches,
                 feePayer = payerMasked,
                 authorizedAccount = authorizedMasked,
-                funding = fundingContext ?? string.Empty,
+                // One-sheet option (b): "swap-as-payment" when the output is routed to the treasury
+                // ATA; otherwise the balance/shortfall context exactly as WO-1948 shipped it.
+                funding,
+                fundingContext = fundingContext ?? string.Empty,
+                destination = destinationMasked,
                 platform = EventTracker.Platform,
                 channel = EventTracker.Channel
             }));
@@ -604,7 +606,7 @@ namespace DeNelle.Web3
             {
                 stopwatch.Stop();
                 TrackSignResult("error", ex.GetType().Name + ": " + ex.Message, stopwatch.ElapsedMilliseconds,
-                                inputToken, inputMint, selection, null, fundingContext);
+                                inputToken, inputMint, selection, null, funding, fundingContext);
                 throw;
             }
             stopwatch.Stop();
@@ -614,13 +616,14 @@ namespace DeNelle.Web3
                 // context computed BEFORE the request: what the wallet held, what each token needed.
                 FlowTrace.Fail("Swap", "wallet SignAndSendSwap FAILED: " + (sent.error ?? "unknown") +
                                        (string.IsNullOrEmpty(fundingContext) ? string.Empty : " | funding[" + fundingContext + "]"));
-                TrackSignResult("refused", sent.error, stopwatch.ElapsedMilliseconds, inputToken, inputMint, selection, null, fundingContext);
-                return false;
+                TrackSignResult("refused", sent.error, stopwatch.ElapsedMilliseconds, inputToken, inputMint, selection, null, funding, fundingContext);
+                return SwapPaymentOutcome.Refused(sent.error ?? "wallet refused the swap");
             }
-            FlowTrace.Step("Swap", "swap submitted sig=" + sent.signature);
-            TrackSignResult("ok", null, stopwatch.ElapsedMilliseconds, inputToken, inputMint, selection, sent.signature, fundingContext);
+            FlowTrace.Step("Swap", "swap submitted sig=" + sent.signature +
+                                   (string.IsNullOrEmpty(destinationTokenAccount) ? string.Empty : " (swap-as-payment; this signature IS the purchase)"));
+            TrackSignResult("ok", null, stopwatch.ElapsedMilliseconds, inputToken, inputMint, selection, sent.signature, funding, fundingContext);
             CloseSwapPanel();
-            return true;
+            return SwapPaymentOutcome.Sent(sent.signature);
         }
 
         /// <summary>First 4 + last 4 characters of a base58 key, or "&lt;empty&gt;" - never the full key in a log.</summary>
@@ -635,7 +638,7 @@ namespace DeNelle.Web3
         /// the funding context (balances + per-token need/have) computed before the request.</summary>
         private static void TrackSignResult(string outcome, string error, long elapsedMs,
                                             string inputToken, string inputMint, string selection, string signature,
-                                            string funding)
+                                            string funding, string fundingContext)
         {
             int? mwaCode = MwaCodeOf(error);
             Guard.Try("Swap", "analytics swap_sign_result", () => EventTracker.Track("swap_sign_result", new
@@ -649,6 +652,7 @@ namespace DeNelle.Web3
                 selection,
                 signature = signature ?? string.Empty,
                 funding = funding ?? string.Empty,
+                fundingContext = fundingContext ?? string.Empty,
                 platform = EventTracker.Platform,
                 channel = EventTracker.Channel
             }));
@@ -677,6 +681,43 @@ namespace DeNelle.Web3
         {
             FlowTrace.Step("Swap", "TopUpSkrAsync ExactOut minimumSkr=" + minimumSkr.ToString("0.##"));
             if (minimumSkr <= 0m) return true;
+            var outcome = await FundAndSwapAsync(minimumSkr, exactOutUnits: null, destinationTokenAccount: null, fundingLabel: null);
+            return outcome.Ok;
+        }
+
+        /// <summary>
+        /// ONE-SHEET PURCHASE, option (b) (2026-09-22) — the swap IS the payment. Same balance read,
+        /// same selector, same picker, same pre-sign simulation gate as <see cref="TopUpSkrAsync"/>
+        /// (one shared body, <see cref="FundAndSwapAsync"/>); the two differences are the ones the
+        /// design names: the ExactOut amount is the quote's INTEGER base units verbatim (never a
+        /// decimal re-derivation), and the /swap body carries <c>destinationTokenAccount</c> = the
+        /// treasury SKR ATA the server-bound quote handed the client. The outcome carries the
+        /// signature because /verify is called with it.
+        /// </summary>
+        public async Task<SwapPaymentOutcome> PayWithSwapAsync(long skrBaseUnits, int skrDecimals, string destinationTokenAccount)
+        {
+            if (skrBaseUnits <= 0) return SwapPaymentOutcome.Refused("no server amount to pay");
+            if (string.IsNullOrEmpty(destinationTokenAccount))
+            {
+                FlowTrace.Fail("Swap", "PayWithSwapAsync: no destinationTokenAccount - refusing before any quote (player NOT charged).");
+                return SwapPaymentOutcome.Refused("no treasury token account on the quote");
+            }
+            decimal skrForDisplay = skrDecimals >= 0 && skrDecimals <= 18
+                ? skrBaseUnits / (decimal)Math.Pow(10, skrDecimals) : skrBaseUnits;
+            FlowTrace.Step("Swap", "PayWithSwapAsync (swap-as-payment) ExactOut exactly " + skrBaseUnits.ToString(CultureInfo.InvariantCulture) +
+                                   " base units (" + SwapFundingSelector.F(skrForDisplay) + " SKR) -> destinationTokenAccount=" +
+                                   Mask(destinationTokenAccount) + " (the quote's recipientAta; the swap signature IS the purchase).");
+            return await FundAndSwapAsync(skrForDisplay, skrBaseUnits, destinationTokenAccount, "swap-as-payment");
+        }
+
+        /// <summary>
+        /// The WO-1948 funded-swap body, shared by the top-up (destination null) and the one-sheet
+        /// purchase (destination = treasury ATA). Order is load-bearing and lint-pinned: read the
+        /// wallet, decide funding, only then request a sign. A refusal here has charged nothing.
+        /// </summary>
+        private async Task<SwapPaymentOutcome> FundAndSwapAsync(decimal minimumSkr, long? exactOutUnits,
+                                                                string destinationTokenAccount, string fundingLabel)
+        {
             string walletKey = ConnectedWalletKey;
             if (string.IsNullOrEmpty(walletKey))
             {
@@ -688,7 +729,7 @@ namespace DeNelle.Web3
                     catch (Exception ex)
                     {
                         FlowTrace.Fail("Swap", "TopUpSkrAsync Connect threw " + ex.GetType().Name + ": " + ex.Message);
-                        return false;
+                        return SwapPaymentOutcome.Refused("wallet connect failed");
                     }
                     walletKey = ConnectedWalletKey;
                 }
@@ -696,7 +737,7 @@ namespace DeNelle.Web3
             if (string.IsNullOrEmpty(walletKey))
             {
                 FlowTrace.Warn("Swap", "TopUpSkrAsync: no connected wallet — blocked (player NOT charged).");
-                return false;
+                return SwapPaymentOutcome.Refused("no connected wallet");
             }
             FlowTrace.Step("Swap", "TopUpSkrAsync wallet=" + walletKey.Substring(0, Math.Min(8, walletKey.Length)) + "…");
 
@@ -716,11 +757,11 @@ namespace DeNelle.Web3
                 // sign, never report "holds nothing" - refuse through the not-charged path.
                 FlowTrace.Warn("Swap", "TopUpSkrAsync: wallet balance UNKNOWN (read failed or no wallet) - refusing before any quote or sign request (player NOT charged).");
                 TrackFundingDecision(minimumSkr, balances, null, "unknown-balance", null, null);
-                return false;
+                return SwapPaymentOutcome.Refused("wallet balance unknown");
             }
 
             // ── s3.2: quote EVERY candidate for the same ExactOut amount, then decide ───────
-            var decision = await DecideFundingAsync(minimumSkr, balances);
+            var decision = await DecideFundingAsync(minimumSkr, balances, exactOutUnits);
 
             SwapFundingCandidate chosen;
             string how;
@@ -741,7 +782,7 @@ namespace DeNelle.Web3
                     {
                         FlowTrace.Warn("Swap", "TopUpSkrAsync: picker dismissed without a choice - no sign request (player NOT charged).");
                         TrackFundingDecision(minimumSkr, balances, decision, "picker-dismissed", null, null);
-                        return false;
+                        return SwapPaymentOutcome.Refused("picker dismissed");
                     }
                     chosen = decision.Eligible[picked];
                     how = "picker";
@@ -753,7 +794,7 @@ namespace DeNelle.Web3
                                            SwapFundingSelector.ShortfallSummary(decision.Considered));
                     TrackFundingDecision(minimumSkr, balances, decision, "refused", null, null);
                     Guard.Try("Swap", "show swap funding refusal", () => SwapFundingPickerModal.ShowRefusal(decision.Considered));
-                    return false;
+                    return SwapPaymentOutcome.Refused("no token covers the amount");
             }
 
             FlowTrace.Step("Swap", "TopUpSkrAsync input mint selected: " + chosen.Symbol + " (" + how + ")" +
@@ -768,7 +809,11 @@ namespace DeNelle.Web3
             string fundingContext = "balances sol=" + SwapFundingSelector.F(balances.sol) + " usdc=" + SwapFundingSelector.F(balances.usdc) +
                                     " skr=" + SwapFundingSelector.F(balances.skr) + "; " +
                                     SwapFundingSelector.ShortfallSummary(decision.Considered);
-            return await ExecuteSwapCoreAsync(chosen.Quote, walletKey, how, fundingContext);
+            // One entry for both faces (ExecuteSwapCoreAsync is the bool wrapper over this): the
+            // destination and the funding label are null on the top-up path and the treasury ATA +
+            // "swap-as-payment" on the one-sheet purchase.
+            return await ExecuteSwapDetailedAsync(chosen.Quote, walletKey, how, fundingContext,
+                                                  destinationTokenAccount, fundingLabel);
         }
 
         /// <summary>The manual swap panel's balance read (SwapVM through ISwapBackend) - the SAME
@@ -867,15 +912,15 @@ namespace DeNelle.Web3
         /// seam for it exists.</para>
         /// </summary>
         private async Task<SwapFundingDecision> DecideFundingAsync(decimal skrNeeded,
-            (decimal sol, decimal usdc, decimal skr, bool known) balances)
+            (decimal sol, decimal usdc, decimal skr, bool known) balances, long? exactOutUnits = null)
         {
             var wallet = ResolveWallet();
             var net = wallet != null ? wallet.Network : WalletService.DefaultNetwork;
             var candidates = new List<SwapFundingCandidate>(2)
             {
                 await QuoteCandidateAsync(SwapInputToken.SOL, net, balances.sol,
-                                          WalletEndpoints.SolReserveForRentAndFees, skrNeeded),
-                await QuoteCandidateAsync(SwapInputToken.USDC, net, balances.usdc, 0m, skrNeeded)
+                                          WalletEndpoints.SolReserveForRentAndFees, skrNeeded, exactOutUnits),
+                await QuoteCandidateAsync(SwapInputToken.USDC, net, balances.usdc, 0m, skrNeeded, exactOutUnits)
             };
             var decision = SwapFundingSelector.Select(candidates);
             FlowTrace.Step("Swap", "TopUpSkrAsync funding decision: " + decision.Outcome + " - " + decision.Why);
@@ -883,7 +928,7 @@ namespace DeNelle.Web3
         }
 
         private async Task<SwapFundingCandidate> QuoteCandidateAsync(SwapInputToken token, WalletNetwork net,
-            decimal balance, decimal reserve, decimal skrNeeded)
+            decimal balance, decimal reserve, decimal skrNeeded, long? exactOutUnits = null)
         {
             var c = new SwapFundingCandidate
             {
@@ -893,7 +938,7 @@ namespace DeNelle.Web3
                 Balance = balance,
                 Reserve = reserve
             };
-            var quote = await GetQuoteExactOutAsync(skrNeeded, token);
+            var quote = await GetQuoteExactOutAsync(skrNeeded, token, exactOutUnits);
             if (quote == null)
             {
                 FlowTrace.Warn("Swap", "TopUpSkrAsync candidate quote " + c.Symbol + ": NO QUOTE (mint=" + c.Mint +
@@ -920,13 +965,17 @@ namespace DeNelle.Web3
         /// WO-1948: the input mint is a PARAMETER resolved through the one InputMintFor seam -
         /// this method no longer decides the token on its own.
         /// </summary>
-        private async Task<SwapQuote> GetQuoteExactOutAsync(decimal skrNeeded, SwapInputToken input)
+        private async Task<SwapQuote> GetQuoteExactOutAsync(decimal skrNeeded, SwapInputToken input, long? exactOutUnits = null)
         {
             string skrMint = ResolvedSkrMint();
             var wallet = ResolveWallet();
             var net = wallet != null ? wallet.Network : WalletService.DefaultNetwork;
             int skrDecimals = WalletEndpoints.SkrDecimals(net);
-            long outUnits = (long)(skrNeeded * (decimal)Math.Pow(10, skrDecimals));
+            // One-sheet option (b): the purchase quotes the server's INTEGER base units verbatim -
+            // /verify compares the treasury delta by exact equality, so the decimal->pow10 path
+            // (fine for a top-up, which only has to reach "at least") is never the amount here.
+            long outUnits = exactOutUnits.HasValue ? exactOutUnits.Value
+                                                    : (long)(skrNeeded * (decimal)Math.Pow(10, skrDecimals));
             if (outUnits <= 0)
             {
                 FlowTrace.Warn("Swap", "GetQuoteExactOutAsync aborted: outUnits<=0");
