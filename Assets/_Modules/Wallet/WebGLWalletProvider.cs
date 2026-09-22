@@ -15,6 +15,15 @@ namespace DeNelle.Wallet
     {
         public const string JupiterInstallUrl = "https://jup.ag";
 
+        /// <summary>
+        /// WO-1958. The wallet name recorded when the session came in through the Jupiter
+        /// Mobile (Reown / WalletConnect) door rather than the Wallet-Standard picker. It
+        /// is a DIFFERENT name on purpose: the signing route differs (the bundle's Reown
+        /// provider, not <c>window.walletAdapterLib</c>), so a trace that cannot tell them
+        /// apart cannot diagnose a signature failure.
+        /// </summary>
+        public const string JupiterMobileWalletName = "Jupiter Mobile (WalletConnect)";
+
         private SolanaWalletAdapter _adapter;
         private WalletAccount _account;
         private bool _connected;
@@ -22,6 +31,15 @@ namespace DeNelle.Wallet
         public string ProviderName => "Solana Wallet Adapter (WebGL)";
         public bool IsConnected => _connected && _account.IsValid;
         public WalletAccount Account => _account;
+        // ⚠ WO-1958, NAMED GAP RATHER THAN A HALF-WIRE. A session that came in through the
+        // Jupiter Mobile door has NO `_adapter` (Connect returns before the SDK adapter is
+        // built), so this reads FALSE and `SignMessageBase58` returns null — the
+        // wallet-nonce login signature is therefore unavailable on that path today.
+        // The capability EXISTS: SolanaWalletConnectProvider declares
+        // `signMessage(message: Uint8Array): Promise<Uint8Array>` (read at source in
+        // @reown/appkit-adapter-solana 1.8.24). Wiring it is a bridge entry point plus a
+        // base58 encode, and it is deliberately NOT done in this ticket rather than done
+        // untested. It is written up in WO-1958 section 7.
         public bool CanSignMessages => _connected && _adapter != null;
 
         /// <summary>
@@ -94,12 +112,87 @@ namespace DeNelle.Wallet
 
             if (handoff.NeedsHandoff)
             {
-                // Solflare is the ONE target with a browse deeplink proven at source
-                // (the CDN bundle, and docs.solflare.com .../other-methods/browse) that
-                // also injects a provider into its in-app browser, which is what makes
-                // the return leg complete. Jupiter is deliberately NOT tried: its
-                // adapter is a React hook with no UMD build and its docs describe QR
-                // scanning, never a same-device deeplink (WO-1957 §1g).
+                // ============================================================
+                // WO-1958 — JUPITER MOBILE IS TRIED FIRST, AND WO-1957 §1g IS
+                // CORRECTED, NOT SOFTENED.
+                //
+                // That WO said Jupiter "is deliberately NOT tried: its adapter is a
+                // React hook with no UMD build and its docs describe QR scanning,
+                // never a same-device deeplink". Two of those three are still true
+                // and the third is FALSE, which is the whole of this ticket:
+                //  - React hook: true, but @jup-ag/jup-mobile-adapter's own dist was
+                //    downloaded and read 2026-09-22 and its initReownAppKit is pure
+                //    vanilla (`new SolanaAdapter({wallets:[]})` + `createAppKit(...)`),
+                //    and its "Jupiter Mobile" connect is literally
+                //    `connectReown("jupiter")` — AppKit's wallet button, which has a
+                //    framework-agnostic core export `createAppKitWalletButton`.
+                //  - No UMD build: true, and WHY `npm run web:bundle` now exists.
+                //  - "Never a same-device deeplink": FALSE. The WalletConnect explorer
+                //    registers Jupiter with `mobile.native = "jupiter://"` (entry
+                //    0ef262ca…1037, queried 2026-09-22) and AppKit's own mobile path
+                //    builds `jupiter://wc?uri=<encoded>` and navigates to it. The DOCS
+                //    do not claim it; the REGISTRY and the CODE do. That is the
+                //    difference between "undocumented" and "not supported", and
+                //    WO-1957 recorded the first as if it were the second.
+                //
+                // WHY FIRST: the Reown path keeps the player ON THIS PAGE — the
+                // WalletConnect session survives the app switch, so the return leg is
+                // a relay message rather than a full page reload inside a wallet's
+                // in-app browser (which is a second, harder thing that may not even
+                // boot a payload this size). The browse handoff is the fallback.
+                //
+                // ⚠ AND THE HONEST LIMIT: Jupiter registers NO universal link, so this
+                // rides a custom scheme with no App Store fallback. An uninstalled app
+                // swallows the navigation silently — which is why the bridge's timeout
+                // is a reported refusal and not a hang.
+                // ============================================================
+                if (WebGLWalletBridge.JupiterConfigured())
+                {
+                    LastConnectNotice = StoreStrings.Get(StoreStrings.KeyCommerceAwaitingApproval);
+                    FlowTrace.Step("Wallet",
+                        "WebGLWalletProvider.Connect — phone browser, no injected wallet, Reown " +
+                        "projectId present: opening the Jupiter Mobile (WalletConnect) door.");
+                    var jup = await WebGLWalletBridge.ConnectJupiter();
+                    if (jup.Ok)
+                    {
+                        _account = new WalletAccount
+                        {
+                            Address = jup.Address,
+                            WalletName = JupiterMobileWalletName,
+                        };
+                        _connected = true;
+                        LastConnectNotice = StoreStrings.Get(StoreStrings.KeyCommerceReady);
+                        FlowTrace.Step("Wallet",
+                            "WebGLWalletProvider connected via Jupiter Mobile " + _account.ShortAddress);
+                        return _account;
+                    }
+
+                    // ⛔ THE REASON CODE DECIDES, NOT A BOOLEAN. A player who CLOSED the
+                    // sheet must not then be thrown at a second wallet — that is hostile,
+                    // and it is the mirror of the WO-1957 defect (one outcome wearing
+                    // another's words). Only "the door was never really available"
+                    // falls through to the browse handoff.
+                    bool doorWasUnavailable = jup.Reason == "no-project-id" || jup.Reason == "no-bundle";
+                    if (!doorWasUnavailable)
+                    {
+                        LastConnectNotice = StoreStrings.Get(StoreStrings.KeyBalanceNoWallet);
+                        FlowTrace.Warn("Wallet",
+                            "WebGLWalletProvider.Connect — Jupiter Mobile did not connect (" + jup +
+                            "). NOT falling through to a second wallet: this outcome was the " +
+                            "player's or the device's, not a missing door.");
+                        _connected = false;
+                        _account = default;
+                        return default;
+                    }
+                    FlowTrace.Warn("Wallet",
+                        "WebGLWalletProvider.Connect — the Jupiter door is not available on this " +
+                        "build (" + jup + "). Falling through to the Solflare browse handoff.");
+                }
+
+                // Solflare is the ONE browse-deeplink target proven at source (the CDN
+                // bundle, and docs.solflare.com .../other-methods/browse) that also
+                // injects a provider into its in-app browser, which is what makes the
+                // return leg complete.
                 bool started = WebGLWalletBridge.OpenHandoff(WebGLWalletBridge.HandoffSolflare);
                 LastConnectNotice = started
                     ? StoreStrings.Get(StoreStrings.KeyCommerceOpeningWallet)

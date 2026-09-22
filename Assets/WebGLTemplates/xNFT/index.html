@@ -24,6 +24,14 @@
          Inside an xNFT host `window.xnft.solana` is already injected, so capability() reports
          injected and this door correctly stays out of the way. -->
     <script src="wallet-handoff.js"></script>
+
+    <!-- WO-1958. The Reown projectId for the Jupiter Mobile door, and NOTHING ELSE. GENERATED
+         by `npm run web:bundle` from the gitignored reown.config.json, and gitignored itself.
+         A MISSING FILE IS A DELIBERATE, SURVIVABLE 404 — the global stays undefined and the
+         door refuses by name (reason=no-project-id). The multi-megabyte
+         wallet-connect.bundle.js is NOT loaded here; EoaWalletBridge.jslib injects it on the
+         connect tap. Inside an xNFT host the injected wallet wins before any of this runs. -->
+    <script src="reown-config.js"></script>
   </head>
   <body style="text-align: center; padding: 0; border: 0; margin: 0;">
     <script src="Build/{{{ LOADER_FILENAME }}}"></script>

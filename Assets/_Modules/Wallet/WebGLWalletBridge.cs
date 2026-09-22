@@ -41,6 +41,12 @@ namespace DeNelle.Wallet
         [DllImport("__Internal")] private static extern int EoaWalletHandoffOpen(string walletId);
         [DllImport("__Internal")] private static extern string EoaWalletHandoffReturn();
         [DllImport("__Internal")] private static extern void EoaWalletBridgeSignRelease(int handle);
+        [DllImport("__Internal")] private static extern int EoaJupiterAvailable();
+        [DllImport("__Internal")] private static extern int EoaJupiterConfigured();
+        [DllImport("__Internal")] private static extern int EoaJupiterConnectBegin(string walletId);
+        [DllImport("__Internal")] private static extern int EoaJupiterConnectPoll(int handle);
+        [DllImport("__Internal")] private static extern string EoaJupiterConnectResult(int handle);
+        [DllImport("__Internal")] private static extern void EoaJupiterConnectRelease(int handle);
 
         // A wallet sheet is a HUMAN action. The deadline exists so a page the player
         // abandoned reports a refusal instead of leaving the store spinning forever;
@@ -200,6 +206,181 @@ namespace DeNelle.Wallet
         {
             try { return EoaWalletBridgeWalletName() ?? string.Empty; }
             catch (Exception) { return string.Empty; }
+        }
+
+        // =====================================================================
+        // WO-1958 — the JUPITER MOBILE door (Reown / WalletConnect).
+        //
+        // ⭐ THIS CORRECTS WO-1957 §1g, AND THE CORRECTION IS THE TICKET.
+        // That WO recorded "whether Jupiter Mobile can be a SAME-DEVICE deeplink
+        // target at all" as UNPROVEN, with "the docs point the other way". The
+        // WalletConnect explorer API says otherwise, read 2026-09-22:
+        //     id      0ef262ca2a56b88d179c93a21383fee4e135bd7bc6680e5c2356ff8e38301037
+        //     name    "Jupiter"        chains ["solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"]
+        //     sdks    ["sign_v1","sign_v2"]
+        //     mobile  {"native":"jupiter://","universal":null}
+        // and Reown AppKit's own mobile path builds `jupiter://wc?uri=<encoded>`
+        // (CoreHelperUtil.formatNativeUrl) and navigates with
+        // `openHref(redirect, isIframe() ? '_top' : '_self')`
+        // (w3m-connecting-wc-mobile). That IS a same-device browser-to-app handoff,
+        // and it is the one Jupiter's own React adapter drives.
+        //
+        // ⚠ AND THE HONEST OTHER HALF. `universal` is NULL: Jupiter registers no
+        // iOS universal link, so this rides a CUSTOM SCHEME with no App Store
+        // fallback. An uninstalled app swallows the navigation silently. The page
+        // module's timeout is the only thing that converts that silence into a
+        // sentence, which is why it is not optional.
+        //
+        // ⛔ AND NEVER `Login cancelled`. Every non-connected outcome arrives here
+        // with its own reason code — no-project-id / no-bundle / cancelled /
+        // timeout / failed — because WO-1957 §0 is a day lost to a redirect and a
+        // cancel wearing the same words.
+        // =====================================================================
+
+        /// <summary>The WalletConnect-explorer slug AppKit's wallet button takes.</summary>
+        internal const string JupiterWalletId = "jupiter";
+
+        /// <summary>
+        /// The outcome of a Jupiter connect. <see cref="Reason"/> is ALWAYS set on a
+        /// failure and is never a generic word — the C# caller branches on it.
+        /// </summary>
+        internal struct JupiterConnectResult
+        {
+            public bool Ok;
+            public string Address;
+            public string Reason;
+            public string Detail;
+
+            public override string ToString() =>
+                "ok=" + Ok + " reason=" + (string.IsNullOrEmpty(Reason) ? "none" : Reason) +
+                " address=" + (string.IsNullOrEmpty(Address) ? "none" : Address) +
+                (string.IsNullOrEmpty(Detail) ? string.Empty : " detail=" + Detail);
+        }
+
+        [Serializable]
+        private class JupiterConnectDto
+        {
+            public string state;
+            public string reason;
+            public string address;
+            public string detail;
+            public string projectId;
+        }
+
+        /// <summary>
+        /// True when the page can offer the Jupiter door at all — i.e. a Reown
+        /// projectId reached the page. This is asked BEFORE the door is shown, so a
+        /// clone with no `reown.config.json` never offers a button that can only
+        /// refuse. Never throws.
+        /// </summary>
+        internal static bool JupiterConfigured()
+        {
+            try { return EoaJupiterConfigured() == 1; }
+            catch (Exception ex)
+            {
+                FlowTrace.Fail("Wallet", "Jupiter configured probe threw " +
+                                         ex.GetType().Name + ": " + ex.Message);
+                return false;
+            }
+        }
+
+        /// <summary>True when wallet-connect.bundle.js is already loaded on the page.
+        /// False is NOT a failure — the bundle is injected lazily on the connect tap,
+        /// because it is multi-megabyte and boot payload is this build's scarcest
+        /// resource.</summary>
+        internal static bool JupiterBundleLoaded()
+        {
+            try { return EoaJupiterAvailable() == 1; }
+            catch (Exception) { return false; }
+        }
+
+        /// <summary>
+        /// Runs the Jupiter Mobile connect. Returns, never throws — a refusal is a
+        /// value, for the same reason SignBase64 works that way.
+        /// </summary>
+        internal static async UniTask<JupiterConnectResult> ConnectJupiter()
+        {
+            var result = default(JupiterConnectResult);
+            result.Address = string.Empty;
+            result.Reason = string.Empty;
+            result.Detail = string.Empty;
+
+            int handle;
+            try { handle = EoaJupiterConnectBegin(JupiterWalletId); }
+            catch (Exception ex)
+            {
+                FlowTrace.Fail("Wallet", "Jupiter connect begin threw " +
+                                         ex.GetType().Name + ": " + ex.Message);
+                result.Reason = "no-bundle";
+                result.Detail = "this build cannot reach the Jupiter door";
+                return result;
+            }
+            if (handle <= 0)
+            {
+                result.Reason = "no-bundle";
+                result.Detail = "the Jupiter bridge did not start";
+                return result;
+            }
+
+            FlowTrace.Step("Wallet", "Jupiter connect requested handle=" + handle +
+                                     " bundleLoaded=" + JupiterBundleLoaded());
+
+            try
+            {
+                double deadline = UnityEngine.Time.realtimeSinceStartupAsDouble + SignDeadlineSeconds;
+                while (true)
+                {
+                    int state = EoaJupiterConnectPoll(handle);
+                    if (state == 1 || state == 2)
+                    {
+                        var dto = ParseJupiter(EoaJupiterConnectResult(handle));
+                        result.Ok = state == 1 && !string.IsNullOrEmpty(dto.address);
+                        result.Address = dto.address ?? string.Empty;
+                        result.Reason = string.IsNullOrEmpty(dto.reason)
+                            ? (result.Ok ? "connected" : "failed")
+                            : dto.reason;
+                        result.Detail = dto.detail ?? string.Empty;
+                        if (result.Ok) FlowTrace.Step("Wallet", "Jupiter connect " + result);
+                        else FlowTrace.Warn("Wallet", "Jupiter connect REFUSED " + result);
+                        return result;
+                    }
+                    if (state == 3)
+                    {
+                        result.Reason = "failed";
+                        result.Detail = "the Jupiter bridge lost the request";
+                        FlowTrace.Fail("Wallet", "Jupiter connect " + result);
+                        return result;
+                    }
+                    if (UnityEngine.Time.realtimeSinceStartupAsDouble > deadline)
+                    {
+                        // The C#-side deadline. The page has its own, and BOTH exist on
+                        // purpose: a tab that was frozen by iOS while the player was in
+                        // the wallet app can miss the page timer entirely.
+                        result.Reason = "timeout";
+                        result.Detail = "no approval arrived within " + SignDeadlineSeconds + "s";
+                        FlowTrace.Fail("Wallet", "Jupiter connect " + result);
+                        return result;
+                    }
+                    await UniTask.Yield();
+                }
+            }
+            finally
+            {
+                try { EoaJupiterConnectRelease(handle); } catch (Exception) { }
+            }
+        }
+
+        private static JupiterConnectDto ParseJupiter(string json)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(json)) return new JupiterConnectDto();
+                return UnityEngine.JsonUtility.FromJson<JupiterConnectDto>(json) ?? new JupiterConnectDto();
+            }
+            catch (Exception)
+            {
+                return new JupiterConnectDto();
+            }
         }
 
         /// <summary>
