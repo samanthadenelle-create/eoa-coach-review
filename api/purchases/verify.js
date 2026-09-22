@@ -105,25 +105,177 @@ async function readFinalizedTransfer(url, signature, wallet, contract) {
         .map(k => String(k.pubkey || ''));
     if (!signers.includes(wallet)) return { state: 'rejected', reason: 'wrong_signer' };
 
-    const instructions = message && Array.isArray(message.instructions) ? message.instructions : [];
-    const matches = instructions.filter(ix => {
-        const parsed = ix && ix.parsed;
-        const info = parsed && parsed.info;
-        const tokenAmount = info && info.tokenAmount;
-        return ix.program === 'spl-token' && parsed.type === 'transferChecked' && info && tokenAmount &&
-            String(info.authority || '') === wallet &&
-            String(info.destination || '') === contract.recipientAta &&
-            String(info.mint || '') === contract.mint &&
-            Number(tokenAmount.decimals) === contract.decimals &&
-            String(tokenAmount.amount || '') === String(contract.amountBaseUnits);
-    });
     // ⚠ blockTime is WHEN THE PLAYER ACTUALLY PAID, and it is the only honest
     // clock for judging a quote's expiry. See QUOTE_SETTLEMENT_GRACE_SECONDS.
     const blockTimeMs = Number.isFinite(Number(tx.blockTime)) && Number(tx.blockTime) > 0
         ? Number(tx.blockTime) * 1000 : null;
-    return matches.length === 1
-        ? { state: 'verified', slot: Number(tx.slot) || null, blockTimeMs }
-        : { state: 'rejected', reason: 'transfer_contract_mismatch' };
+    const slot = Number(tx.slot) || null;
+
+    // ── SHAPE 1 (unchanged): one top-level transferChecked, wallet -> treasury ATA.
+    // This is what the SKR-in-hand branch (`_wallet.Pay`) produces.
+    const instructions = message && Array.isArray(message.instructions) ? message.instructions : [];
+    const matches = instructions.filter(ix => topLevelTransferMatches(ix, wallet, contract));
+    if (matches.length === 1) return { state: 'verified', shape: 'transfer', slot, blockTimeMs };
+
+    // ── SHAPE 2 (one-sheet option (b), 2026-09-22): the swap IS the payment.
+    // Jupiter delivers `destinationTokenAccount` by CPI, so none of shape 1's
+    // predicates can see it; the treasury SKR ATA's token-balance DELTA can.
+    const delta = matchTreasuryDelta(tx, keys, wallet, contract);
+    if (delta.ok) return { state: 'verified', shape: 'treasury-delta', slot, blockTimeMs };
+
+    // Neither shape. The transaction LANDED (finalized, no error, signed by the
+    // wallet), so whatever it moved is money support may have to find: report
+    // what was observed so the handler can write the manual_review row.
+    return { state: 'rejected', reason: delta.reason || 'transfer_contract_mismatch',
+        landed: true, observed: observeLanding(tx, keys, wallet, contract), slot, blockTimeMs };
+}
+
+const AMOUNT_RE = /^\d+$/;
+
+/** Shape 1's five-predicate match on ONE top-level instruction (verbatim from the pre-09-22 filter). */
+function topLevelTransferMatches(ix, wallet, contract) {
+    const parsed = ix && ix.parsed;
+    const info = parsed && parsed.info;
+    const tokenAmount = info && info.tokenAmount;
+    return !!(ix && ix.program === 'spl-token' && parsed && parsed.type === 'transferChecked' && info && tokenAmount &&
+        String(info.authority || '') === wallet &&
+        String(info.destination || '') === contract.recipientAta &&
+        String(info.mint || '') === contract.mint &&
+        Number(tokenAmount.decimals) === contract.decimals &&
+        String(tokenAmount.amount || '') === String(contract.amountBaseUnits));
+}
+
+/**
+ * Normalise one side of meta.pre/postTokenBalances into rows keyed by account
+ * pubkey. `accountIndex` indexes `message.accountKeys`, which under jsonParsed
+ * ALREADY INCLUDES the lookup-table-loaded keys (`source: 'lookupTable'`) — read
+ * off a real mainnet Jupiter v0 swap on 2026-09-22 (27 keys, balances indexing up
+ * to 14). An amount that is not a plain digit string is kept as null so a
+ * malformed RPC row can never throw out of the verifier as a 500.
+ */
+function tokenBalanceRows(list, keys) {
+    const rows = [];
+    if (!Array.isArray(list)) return rows;
+    for (const entry of list) {
+        if (!entry || typeof entry !== 'object') continue;
+        const key = keys[Number(entry.accountIndex)];
+        const account = key && typeof key === 'object' ? String(key.pubkey || '') : '';
+        const ui = entry.uiTokenAmount && typeof entry.uiTokenAmount === 'object' ? entry.uiTokenAmount : {};
+        const amountText = String(ui.amount == null ? '' : ui.amount);
+        rows.push({
+            account,
+            mint: String(entry.mint || ''),
+            owner: entry.owner == null ? null : String(entry.owner),
+            decimals: Number(ui.decimals),
+            amount: AMOUNT_RE.test(amountText) ? BigInt(amountText) : null,
+        });
+    }
+    return rows;
+}
+
+/**
+ * SHAPE 2 — accept a swap-delivered payment by the treasury ATA's balance delta.
+ *
+ * Fail-closed on every predicate:
+ *   - the wallet is the FEE PAYER (accountKeys[0]) and a signer; the treasury never signs
+ *   - exactly one pre AND one post row for {recipientAta, mint} — a missing pre row
+ *     is a refusal (the ATA is required initialized; it is never treated as 0)
+ *   - both rows: owner === recipient (absent owner fails), decimals === contract
+ *   - post − pre === amountBaseUnits EXACTLY (partial and over both refuse)
+ *   - no account owned by the treasury (any mint) lost balance or disappeared
+ *
+ * A reason more specific than transfer_contract_mismatch is only emitted when
+ * the treasury ATA actually appears in the token balances — the shape-1 fixtures
+ * carry no balances at all and keep their historical reason.
+ */
+function matchTreasuryDelta(tx, keys, wallet, contract) {
+    const meta = tx.meta || {};
+    const pre = tokenBalanceRows(meta.preTokenBalances, keys);
+    const post = tokenBalanceRows(meta.postTokenBalances, keys);
+    const ata = String(contract.recipientAta || '');
+    const mint = String(contract.mint || '');
+    const treasury = String(contract.recipient || '');
+    if (!ata || !mint || !treasury) return { ok: false, reason: null };
+
+    const postRows = post.filter(r => r.account === ata && r.mint === mint);
+    const preRows = pre.filter(r => r.account === ata && r.mint === mint);
+    if (!postRows.length && !preRows.length) return { ok: false, reason: null };  // not a candidate
+
+    const feePayer = keys[0] && typeof keys[0] === 'object' ? String(keys[0].pubkey || '') : '';
+    if (feePayer !== wallet) return { ok: false, reason: 'wrong_fee_payer' };
+    if (keys.some(k => k && k.signer === true && String(k.pubkey || '') === treasury))
+        return { ok: false, reason: 'treasury_debited' };
+
+    // Any treasury-owned account (any mint) that went DOWN, or vanished, refuses.
+    for (const row of pre) {
+        if (row.owner !== treasury) continue;
+        const after = post.find(p => p.account === row.account && p.mint === row.mint);
+        if (!after) return { ok: false, reason: 'treasury_debited' };
+        // An unreadable amount is a refusal, but it is "cannot read", not "went down".
+        if (after.amount == null || row.amount == null) return { ok: false, reason: 'treasury_delta_mismatch' };
+        if (after.amount < row.amount) return { ok: false, reason: 'treasury_debited' };
+    }
+
+    if (postRows.length !== 1 || preRows.length !== 1) return { ok: false, reason: 'treasury_delta_mismatch' };
+    const before = preRows[0], after = postRows[0];
+    if (before.owner !== treasury || after.owner !== treasury) return { ok: false, reason: 'treasury_delta_mismatch' };
+    if (before.decimals !== contract.decimals || after.decimals !== contract.decimals)
+        return { ok: false, reason: 'treasury_delta_mismatch' };
+    if (before.amount == null || after.amount == null) return { ok: false, reason: 'treasury_delta_mismatch' };
+    const expected = String(contract.amountBaseUnits);
+    if (!AMOUNT_RE.test(expected)) return { ok: false, reason: 'treasury_delta_mismatch' };
+    if (after.amount - before.amount !== BigInt(expected)) return { ok: false, reason: 'treasury_delta_mismatch' };
+    return { ok: true };
+}
+
+/**
+ * What did a LANDED-but-refused transaction actually move? Best single
+ * observation, for the manual_review ledger row (MONEY_HANDLING_AUDIT §1):
+ *   1. a balance CREDIT to any treasury-owned account (SKR mint preferred), then
+ *   2. any spl-token transfer/transferChecked authorised by the wallet, top-level
+ *      or CPI-wrapped (meta.innerInstructions), with the mint read off the
+ *      instruction or, for a plain `transfer`, off the destination's balance row.
+ * Returns null when nothing attributable moved — then there is no money to find
+ * and no row is written (observed_lamports is CHECK > 0, api/schema.sql).
+ */
+function observeLanding(tx, keys, wallet, contract) {
+    const meta = tx.meta || {};
+    const treasury = String(contract.recipient || '');
+    const pre = tokenBalanceRows(meta.preTokenBalances, keys);
+    const post = tokenBalanceRows(meta.postTokenBalances, keys);
+    const credits = [];
+    for (const after of post) {
+        if (after.owner !== treasury || after.amount == null) continue;
+        const before = pre.find(p => p.account === after.account && p.mint === after.mint);
+        const beforeAmount = before && before.amount != null ? before.amount : 0n;
+        if (after.amount > beforeAmount)
+            credits.push({ via: 'balance-delta', amount: String(after.amount - beforeAmount),
+                mint: after.mint, destination: after.account });
+    }
+    const skr = credits.find(c => c.mint === String(contract.mint || ''));
+    if (skr) return skr;
+    if (credits.length) return credits[0];
+
+    const message = tx.transaction && tx.transaction.message;
+    const top = message && Array.isArray(message.instructions) ? message.instructions : [];
+    const inner = [];
+    if (Array.isArray(meta.innerInstructions))
+        for (const group of meta.innerInstructions)
+            if (group && Array.isArray(group.instructions)) inner.push(...group.instructions);
+    for (const ix of top.concat(inner)) {
+        const parsed = ix && ix.program === 'spl-token' && ix.parsed;
+        const info = parsed && parsed.info;
+        if (!info || (parsed.type !== 'transfer' && parsed.type !== 'transferChecked')) continue;
+        if (String(info.authority || '') !== wallet) continue;
+        const amountText = String(parsed.type === 'transferChecked'
+            ? (info.tokenAmount && info.tokenAmount.amount) : info.amount);
+        if (!AMOUNT_RE.test(amountText) || amountText === '0') continue;
+        const destination = String(info.destination || '');
+        const row = post.find(p => p.account === destination) || pre.find(p => p.account === destination);
+        return { via: parsed.type === 'transferChecked' ? 'transfer-checked' : 'transfer',
+            amount: amountText, mint: String(info.mint || (row && row.mint) || '') || null, destination };
+    }
+    return null;
 }
 
 function entitlementResponse(row, signature, sku) {
@@ -346,10 +498,48 @@ async function handler(req, res) {
         // ⚠ THIS IS THE TAMPERED-AMOUNT REFUSAL. The chain was checked against the
         // amount the SERVER issued, so a client that transferred anything else
         // lands here as transfer_contract_mismatch and is granted nothing.
+        //
+        // ⛔ BUT A REFUSED TRANSFER THAT LANDED IS STILL MONEY (MONEY_HANDLING_AUDIT
+        // 2026-09-22 §1). Before this branch was widened, an over/under amount, a
+        // wrong mint or ATA, a plain `transfer` or a CPI-wrapped one ended as a 400
+        // plus a log line, and support had no row to find the payment by. Now a
+        // transaction that is finalized, error-free and SIGNED BY THE WALLET writes a
+        // purchase_entitlements row in 'manual_review' — the same shape the
+        // quote_expired branch below has always used — carrying the signature, the
+        // quote id, what was actually observed moving (amount / mint / destination)
+        // and the refusal reason. The quote is NOT consumed and nothing is granted.
+        // A failed transaction or a stranger's signature moved nothing of the
+        // player's, so those two reasons still write nothing.
+        // SITE 3b -- idempotent (ON CONFLICT DO NOTHING); a retry re-lands it.
+        const observed = chain.landed && chain.observed && AMOUNT_RE.test(String(chain.observed.amount)) &&
+            String(chain.observed.amount) !== '0' ? chain.observed : null;
+        if (observed) {
+            const reviewQ = await tryDb(() => sql`
+                INSERT INTO purchase_entitlements
+                    (tx_signature, wallet, sku, rail, network, currency, expected_lamports,
+                     observed_lamports, recipient, observed_recipient, chain_slot, status,
+                     verified_at, quote_ref, usd_anchor, usd_rate, rate_source,
+                     review_reason, observed_mint)
+                VALUES (${signature}, ${playerId}, ${sku}, 'solana', ${network}, ${contract.currency},
+                        ${contract.amountBaseUnits}, ${observed.amount}, ${contract.recipient},
+                        ${observed.destination || contract.recipientAta}, ${chain.slot}, 'manual_review', NOW(),
+                        ${quote ? quote.quote_ref : null}, ${quote ? quote.usd_anchor : null},
+                        ${ledgerRate(quote)}, ${quote ? quote.rate_source : 'server-pinned'},
+                        ${chain.reason}, ${observed.mint || null})
+                ON CONFLICT (tx_signature) DO NOTHING`);
+            if (!reviewQ.ok)
+                return recordFailure(sql, res, playerId, ref, 'record_rejected_review',
+                    reviewQ.err, { sku: sku, network: network, quoteId: quoteId || null,
+                        chainSlot: chain.slot, txSignature: signature, reason: chain.reason,
+                        observed: observed });
+        }
         await logApiEvent(sql, playerId, 'purchase_verification_rejected',
             { ref, sku, network, quoteId: quoteId || null, reason: chain.reason,
-              expectedBaseUnits: String(contract.amountBaseUnits) });
-        return res.status(400).json({ success: false, state: 'rejected', code: chain.reason, ref });
+              expectedBaseUnits: String(contract.amountBaseUnits),
+              landed: chain.landed === true, observed: observed,
+              manualReview: !!observed });
+        return res.status(400).json({ success: false, state: 'rejected', code: chain.reason, ref,
+            manualReview: !!observed });
     }
 
     // ── Expiry, judged against the moment the player actually paid. ──────────
@@ -461,7 +651,8 @@ async function handler(req, res) {
 
     await logApiEvent(sql, playerId, 'purchase_entitlement_created', { ref, sku, network,
         quoteId: quoteId || null, amountBaseUnits: String(contract.amountBaseUnits),
-        rate: ledgerRate(quote), rateSource: quote ? quote.rate_source : 'server-pinned' });
+        rate: ledgerRate(quote), rateSource: quote ? quote.rate_source : 'server-pinned',
+        shape: chain.shape || 'transfer' });
     return res.status(200).json({ success: true, state: 'verified', sku,
         txSignature: signature, network, currency: contract.currency,
         amountLamports: Number(contract.amountBaseUnits), chainSlot: chain.slot,
@@ -472,4 +663,5 @@ module.exports = handler;
 module.exports.config = { api: { bodyParser: false } };
 module.exports._test = { readFinalizedTransfer, rpcUrl, entitlementMatches, entitlementResponse,
     evaluateQuoteRow, evaluatePaidQuote, QUOTE_MESSAGES, QUOTE_REF_RE,
-    tryDb, recordFailure, RECORD_FAILED_MESSAGE, ledgerRate };
+    tryDb, recordFailure, RECORD_FAILED_MESSAGE, ledgerRate,
+    matchTreasuryDelta, observeLanding, tokenBalanceRows, topLevelTransferMatches };
