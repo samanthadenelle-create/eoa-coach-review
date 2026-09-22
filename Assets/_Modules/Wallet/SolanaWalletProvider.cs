@@ -93,7 +93,23 @@ namespace DeNelle.Wallet
     /// deep-link on desktop), reads SOL / USDC / SKR balances, and builds + sends
     /// the pack-purchase transfer on devnet.
     /// </summary>
+    // ISwapSigningWallet is DECLARED here rather than inferred: SignAndSendSwapTransaction
+    // already existed with this exact signature, and WalletService used to reach it through
+    // `_provider is SolanaWalletProvider` - a test that asks which CLASS this is when the
+    // only question is whether this wallet can sign a swap. The two answers diverged the
+    // moment a second real provider existed (web), and the web player was told "this wallet
+    // cannot sign a Jupiter swap" by a wallet that can. Nothing about this class changes; it
+    // now ANSWERS THE QUESTION instead of being recognised by name.
+    // ⚠ The base list is guarded because the IMPLEMENTATION is: SignAndSendSwapTransaction
+    // lives inside this file's `#if SOLANA_SDK` SDK-helpers region, so declaring the capability
+    // unconditionally would not compile with the define off. (The region is named, not cited by
+    // line - this comment carried a line range for about an hour and the WO-1948 merge moved it,
+    // which is the same duplicated-state rot CLAUDE.md sec.2/sec.5/sec.8 each describe.)
+#if SOLANA_SDK
+    public sealed class SolanaWalletProvider : IWalletProvider, ISwapSigningWallet
+#else
     public sealed class SolanaWalletProvider : IWalletProvider
+#endif
     {
         /// <summary>
         /// True when the Solana Unity SDK is compiled in (the <c>SOLANA_SDK</c>
