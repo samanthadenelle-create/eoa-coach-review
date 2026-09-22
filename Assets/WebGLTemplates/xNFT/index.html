@@ -4,10 +4,7 @@
     <meta charset="utf-8">
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
     <title>Unity XNFT | {{{ PRODUCT_NAME }}}<</title>
-    <!-- WO-1962 — removed <link rel="icon" href="favicon.ico">: this template ships no
-         favicon.ico, so the reference 404'd on every load. Same class as the two dead
-         TemplateData/ links removed from the Pi template; pinned by the
-         WEB_TEMPLATE_REFERENCES contract row in tools/web-build-contracts.ps1. -->
+    <link rel="icon" type="image/x-icon" href="favicon.ico">
     <!-- WO-1910. A real browser build of npm buffer 6.0.3, generated from node_modules by
          tools/build-page-buffer.mjs. Provides the page global the Solana wallet SIGN path
          reads. FIRST, and before the loader below - the wallet-adapter CDN bundle prefers
@@ -103,6 +100,29 @@
         // lets a DPR-3 phone allocate 9x the fragments of the CSS box. Same cap as the Pi template.
         devicePixelRatio: Math.min(window.devicePixelRatio || 1, 2),
         showBanner: unityShowBanner,
+        // WO-1963: the same alert this template's `.catch` already refuses (see :419) is STILL
+        // reachable after a successful boot, through the loader's own window 'error' /
+        // 'unhandledrejection' listeners -> E() -> alert(). `showBanner` does not cover that path;
+        // only `errorHandler` does, because every config key is copied onto the Module
+        // (`for(o in n)w[o]=n[o]`) and a truthy return short-circuits the alert. Derivation is
+        // written out in full in the Pi template - this is the same fix, kept in step.
+        // ⛔ Every <script> on this page is LOCAL (page-buffer.js, page-globals.js,
+        // wallet-handoff.js, reown-config.js, the loader), so there is deliberately no
+        // crossorigin work here: nothing same-origin is ever masked as "Script error.".
+        errorHandler: function (message, source, lineno) {
+          var text = '' + (message || '');
+          console.error('[Loader] runtime error: ' + text + ' @ ' + (source || '<masked>') + ':' + (lineno || 0));
+          try {
+            eoaTraceEmit('[PageError] kind=unity-errorHandler msg=' + JSON.stringify(text) +
+              ' src=' + JSON.stringify('' + (source || '')) + ' line=' + (lineno || 0) +
+              ' masked=' + (!source && !lineno) +
+              ' session=' + eoaTraceSession + ' upMs=' + (Date.now() - eoaBootAt));
+          } catch (e) { /* telemetry never throws out of the error reporter */ }
+          try { unityShowBanner('Something went wrong. You can keep playing; please report it.', 'error'); }
+          catch (e) { /* the banner is a nicety - never let it resurrect the alert */ }
+          try { eoaDoorPromote('runtime-error'); } catch (e) { }
+          return true;   // handled - do NOT let the loader alert()
+        },
       };
 
       // Mobile device style: fill the whole browser client area with the game canvas.
@@ -322,6 +342,10 @@
       function eoaDoorPromote(reason) {
         try {
           if (!eoaDoorOpen) return;
+          // WO-1963: RE-SHOW the door. eoaDoorHide() sets display:none once the runtime is up, so
+          // a promote AFTER boot (the new 'runtime-error' reason) would style an invisible element
+          // and give the player nothing. No-op for the pre-runtime reasons.
+          if (eoaDoorEl) eoaDoorEl.style.display = '';
           // Promotion is by weight/size/border, never colour alone (owner is colourblind).
           eoaDoorOpen.style.minHeight = '56px';
           eoaDoorOpen.style.color = '#17100a';
