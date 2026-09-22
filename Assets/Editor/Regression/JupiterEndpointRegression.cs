@@ -44,6 +44,9 @@ namespace DeNelle.Editor.Regression
     {
         private const string ServicePath = "Assets/_Modules/Web3/JupiterSwapService.cs";
         private const string ModulesRoot = "Assets/_Modules";
+        // WO-1943: the two files that carry the refusal contract.
+        private const string ProviderPath = "Assets/_Modules/Wallet/SolanaWalletProvider.cs";
+        private const string DoorPath = "Assets/_Modules/Core/Backend/JupiterSwapDoor.cs";
 
         private const string QuoteConst = "https://lite-api.jup.ag/swap/v1/quote";
         private const string SwapConst  = "https://lite-api.jup.ag/swap/v1/swap";
@@ -172,11 +175,98 @@ namespace DeNelle.Editor.Regression
                          "build whose SwapFeeConfig has no fee wallet - the same closed door, one step later.";
                 return false;
             }
-            notes.Append("[fee] platformFeeBps gated on a configured feeAccount");
+            notes.Append("[fee] platformFeeBps gated on a configured feeAccount; ");
+
+            // --- 6. a wallet sign REFUSAL is returned, never thrown --------------------
+            // WO-1943. The owner's Seeker swap got a 200 quote AND a 200 /swap, then the
+            // wallet answered sign_transactions with MWA ERROR_AUTHORIZATION_FAILED (-1).
+            // SignAndSendSwapTransaction caught ONLY TimeoutException, so the generic
+            // Exception unwound into PackStore.Purchase's outer catch and told the player
+            // the outcome was indeterminate and a charge might have settled. It had not:
+            // the stack dies before TryReadPrimarySignature and before
+            // SubmitSignedTransaction. The check is METHOD-SCOPED (a slice between the
+            // method header and the next method) so an unrelated catch elsewhere in that
+            // 2000-line provider can never satisfy it.
+            if (!TryRead(ProviderPath, out string prov, out reason)) return false;
+            string signSlice = SliceBetween(prov, "SignAndSendSwapTransaction(", "SubmitSignedTransaction(");
+            if (signSlice == null)
+            {
+                reason = "[jupiter-endpoint] SOURCE LINT FAIL [sign]: could not locate " +
+                         "SignAndSendSwapTransaction in " + ProviderPath + " (or the method no longer " +
+                         "precedes SubmitSignedTransaction). The suite fails rather than pass on a file " +
+                         "it cannot recognise as the MWA swap-signing path.";
+                return false;
+            }
+            if (!signSlice.Contains("catch (TimeoutException"))
+            {
+                reason = "[jupiter-endpoint] SOURCE LINT FAIL [sign]: SignAndSendSwapTransaction no longer " +
+                         "catches TimeoutException. That arm is what lets PackStore say the wallet never " +
+                         "answered and NOTHING was submitted (SignTimeoutMessage); losing it turns the " +
+                         "wallet-slow case back into an indeterminate-charge scare.";
+                return false;
+            }
+            if (!signSlice.Contains("ExplainConnectFailure("))
+            {
+                reason = "[jupiter-endpoint] SOURCE LINT FAIL [sign]: SignAndSendSwapTransaction does not " +
+                         "route its failure through ExplainConnectFailure. Without the generic " +
+                         "catch (Exception) arm that calls it, an MWA ERROR_AUTHORIZATION_FAILED (-1) " +
+                         "PROPAGATES out of the provider, through JupiterSwapService and the Core door, " +
+                         "into PackStore.Purchase's outer catch - which tells the player the outcome is " +
+                         "indeterminate and \"if a charge settled the entitlement may be lost\". That is " +
+                         "FALSE here: nothing is signed and nothing is submitted on this path (WO-1943, " +
+                         "owner's Seeker attempt on build 2026.09.21.379625).";
+                return false;
+            }
+            if (CountOf(signSlice, "catch (Exception") < 2)
+            {
+                reason = "[jupiter-endpoint] SOURCE LINT FAIL [sign]: SignAndSendSwapTransaction has fewer " +
+                         "than two catch (Exception) arms - the base64 decode guard AND the sign-refusal " +
+                         "guard. A sign failure that is not caught is returned to the player as a charge " +
+                         "scare instead of \"the pack was not charged\" (WO-1943).";
+                return false;
+            }
+            notes.Append("[sign] MWA refusal returned via ExplainConnectFailure, not thrown; ");
+
+            // --- 7. the Core door cannot throw into the store -------------------------
+            if (!TryRead(DoorPath, out string door, out reason)) return false;
+            if (!door.Contains("CoreServices.Jupiter.TopUpSkrAsync"))
+            {
+                reason = "[jupiter-endpoint] SOURCE LINT FAIL [door]: " + DoorPath + " no longer awaits " +
+                         "CoreServices.Jupiter.TopUpSkrAsync. The suite fails rather than pass on a file " +
+                         "it cannot recognise as the Core-side swap door.";
+                return false;
+            }
+            if (!door.Contains("catch (Exception"))
+            {
+                reason = "[jupiter-endpoint] SOURCE LINT FAIL [door]: " + DoorPath + " awaits the Web3 " +
+                         "implementation with no catch (Exception). This is a Core seam over another " +
+                         "assembly: anything it raises lands in PackStore.Purchase's outer catch and is " +
+                         "reported as an indeterminate outcome with a possible lost entitlement. The " +
+                         "top-up runs BEFORE the pack Pay, so nothing can have been charged - the door " +
+                         "must return a traced false (WO-1943).";
+                return false;
+            }
+            notes.Append("[door] Core swap door returns a traced false, cannot throw into PackStore");
 
             reason = "[jupiter-endpoint] SOURCE LINT PASS (text only - does NOT reach Jupiter; a live quote " +
                      "and an owner swap attempt are the WO-1901 acceptance): " + notes;
             return true;
+        }
+
+        /// <summary>
+        /// The text between the first occurrence of <paramref name="start"/> and the first
+        /// occurrence of <paramref name="end"/> after it, or null when either is missing or
+        /// out of order. Keeps a method-scoped check from being satisfied by an unrelated
+        /// catch elsewhere in a 2000-line file (WO-1943).
+        /// </summary>
+        private static string SliceBetween(string haystack, string start, string end)
+        {
+            if (string.IsNullOrEmpty(haystack)) return null;
+            int a = haystack.IndexOf(start, StringComparison.Ordinal);
+            if (a < 0) return null;
+            int b = haystack.IndexOf(end, a + start.Length, StringComparison.Ordinal);
+            if (b < 0) return null;
+            return haystack.Substring(a, b - a);
         }
 
         private static int CountOf(string haystack, string needle)
