@@ -5,7 +5,8 @@
         "DeNelle.Core",
         "DeNelle.Commerce",
         "DeNelle.Wallet",
-        "UniTask"
+        "UniTask",
+        "Unity.TextMeshPro"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
