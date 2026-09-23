@@ -772,22 +772,10 @@ namespace DeNelle.Web3
                     how = "auto";
                     break;
 
-                case SwapFundingOutcome.Picker:
-                    // s3.3: two or more tokens cover it - the player taps the one to spend,
-                    // BEFORE any /swap POST or MWA sign request. Quotes are already in hand.
-                    FlowTrace.Step("Swap", "TopUpSkrAsync: " + decision.Eligible.Count +
-                                           " tokens cover it - showing the picker before any sign request.");
-                    int picked = await SwapFundingPickerModal.ShowPickerAsync(decision.Eligible);
-                    if (picked < 0 || picked >= decision.Eligible.Count)
-                    {
-                        FlowTrace.Warn("Swap", "TopUpSkrAsync: picker dismissed without a choice - no sign request (player NOT charged).");
-                        TrackFundingDecision(minimumSkr, balances, decision, "picker-dismissed", null, null);
-                        return SwapPaymentOutcome.Refused("picker dismissed");
-                    }
-                    chosen = decision.Eligible[picked];
-                    how = "picker";
-                    break;
-
+                // WO-1970: ExactOut SOL-primary / no currency picker. SwapFundingSelector.Select
+                // now Auto-picks the first eligible (SOL preference). The Picker arm is retired
+                // on this rail; a stale Picker outcome (should not happen) falls through to refuse
+                // rather than open a sheet for an ambiguous spend.
                 default:
                     // s3.4: NEVER request a signature for a spend the wallet cannot make.
                     FlowTrace.Warn("Swap", "TopUpSkrAsync: no token covers minimumSkr — refusing before any sign request. " +

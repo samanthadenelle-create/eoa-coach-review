@@ -232,13 +232,17 @@ namespace DeNelle.Web3
                     SetStatus(ShortfallStatus(decision), isError: true);
                     return;
                 }
-                // Auto -> that token. Picker (both cover) -> the panel's v1 default stays USDC: this
-                // surface has one amount field and no token toggle, so a modal here would be a
-                // second picker owner; the store top-up (JupiterSwapService.TopUpSkrAsync) is the
-                // surface that shows the one-tap picker.
-                inputToken = decision.Outcome == SwapFundingOutcome.Auto ? decision.Chosen.Token : SwapInputToken.USDC;
-                FlowTrace.Step("Swap", "DebounceQuote input token selected: " + inputToken +
-                                       " (" + (decision.Outcome == SwapFundingOutcome.Auto ? "auto" : "both cover; v1 default") + ")");
+                // WO-1970: SOL-primary Auto. Selector returns Auto with Chosen = first eligible
+                // (SOL when it covers; USDC only as fallback). Never default to USDC when both cover.
+                if (decision.Outcome != SwapFundingOutcome.Auto)
+                {
+                    FlowTrace.Warn("Swap", "DebounceQuote: unexpected funding outcome " + decision.Outcome +
+                                           " after non-Refused path - refusing before quote (player NOT charged).");
+                    SetStatus(ShortfallStatus(decision), isError: true);
+                    return;
+                }
+                inputToken = decision.Chosen.Token;
+                FlowTrace.Step("Swap", "DebounceQuote input token selected: " + inputToken + " (WO-1970 SOL-primary auto)");
             }
 
             _quoteLoading = true;
