@@ -1049,10 +1049,12 @@
         piBootCrumb('unity-loading');
         // WO-1927: arm the stall watch HERE, not on the first progress callback - a loader that
         // 404s its dataUrl may never call progress at all, and that is the loudest stall there is.
-        piDoorNoteProgress();
         // WO-2025 Lane I: the marker has to land BEFORE the heavy fetch/decode, which is the
         // window the WebKit kill actually happens in - writing it any later would race the kill.
+        // It sits above the stall-watch arm because WO-1927 pins piDoorNoteProgress() as the
+        // statement immediately before the append.
         if (piIosDevice) piIosNetWrite();
+        piDoorNoteProgress();
         document.body.appendChild(script);
       }
       function isLandscape() { return window.innerWidth >= window.innerHeight; }
