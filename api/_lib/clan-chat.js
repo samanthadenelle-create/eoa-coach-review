@@ -3,7 +3,11 @@
 // -----------------------------------------------------------------------------
 // TWO rooms, one embed:
 //   1. Global — every Remnant, one FIXED world room UUID.
-//   2. Order — per-clan room (clans.id), unchanged from WO-1847/1858.
+//   2. Order — per-Order Cherry room = clans.cherry_room_id, created SERVER-SIDE by
+//      api/_lib/cherry-rooms.js and sent to the client as `orderRoomId` (WO-2027).
+//      ⛔ NOT clans.id: until 2026-09-24 the Order face opened clans.id, which our Postgres
+//      mints and Cherry has never seen, so every Order showed "Could not load this chat".
+//      clans.id is still the membership + REPORT key (api/clan/report-message.js).
 //
 // ⚠ WO-1905, THE "COMMONS -> GLOBAL" RENAME, AND WHAT IT ACTUALLY TOUCHED ON THE
 // SERVER: nothing executable. The room's WIRE VALUE has been the string `global`
