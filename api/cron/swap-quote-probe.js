@@ -79,6 +79,13 @@ module.exports = async (req, res) => {
     // still returned in the response body where a Vercel log read finds it.
     const probe = await probeJupiterQuote({});
 
+    // WO-1969: page Discord on OK->DOWN (and recover). Never throws; missing
+    // DISCORD_WEBHOOK_URL = log/no-op. Must not change this route's HTTP 200 contract.
+    try {
+        const { emitProbeTransition } = require('../_lib/jupiter-fail-alert.js');
+        await emitProbeTransition(probe, {});
+    } catch (_) { /* alert must never break the probe response */ }
+
     try { console.log('[cron/swap-quote-probe] ' + summarize(probe) + ' ' + JSON.stringify(probe)); }
     catch (_) { /* a log must never break the request */ }
 
