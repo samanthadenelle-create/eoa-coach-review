@@ -138,7 +138,8 @@ Breach (Village2/dungeon) ► GoBattle(BattleParams) ► ATBBattle ► returns t
 - **Streaming is North-Star, built lazily.** Today zones are *logical* (one OuterWorld scene,
   classified by position via `ZoneManager`); the load/unload streamer + per-zone state rehydration
   are designed but built only when zones carry real weight. **Defend-the-Tower / PatriciaLight =
-  REMOVED 2026-06-09.**
+  REMOVED 2026-06-09** (module + scene); **FULLY RETIRED 2026-09-25 (WO-1986)** - the kept art under
+  `Assets/Resources/PatriciaLight/` and the dead SceneRouter route are deleted too.
 
 ---
 
