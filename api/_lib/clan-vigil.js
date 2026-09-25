@@ -82,7 +82,8 @@ async function readClanVigilRoster(sql, clanId) {
                COALESCE(
                    GREATEST(EXTRACT(EPOCH FROM (NOW() - wi.first_seen_staked_at)), 0),
                    0
-               )::float8 AS tenure_seconds
+               )::float8 AS tenure_seconds,
+               (wi.sgt_verified_at IS NOT NULL) AS genesis_verified
         FROM clan_members m
         LEFT JOIN wallet_identity wi ON wi.wallet = m.wallet
         WHERE m.clan_id = ${clanId}
@@ -94,6 +95,9 @@ async function readClanVigilRoster(sql, clanId) {
         role: r.role,
         firstSeenStakedAt: r.first_seen_staked_at != null ? r.first_seen_staked_at : null,
         tenureSeconds: Number(r.tenure_seconds) || 0,
+        // WO-2030 addendum / WO-2032 badge. The member's OWN wallet_identity row, so the
+        // "a signer is not a member" argument in toWire's note does not apply here.
+        genesisVerified: r.genesis_verified === true,
     }));
 }
 
@@ -217,6 +221,7 @@ async function readClanVigil(sql, clanId, opts) {
             firstSeenStakedAt: firstSeenStakedAt,
             vigilBegan: stampedNow,
             degraded: degraded,
+            genesisVerified: member.genesisVerified === true,
         });
     }
 
@@ -321,6 +326,8 @@ async function stampMemberVigil(sql, wallet) {
  * the correct signal, because a SIGNER is not a MEMBER: the two sets overlap by accident at
  * best (a vault signer need not be in the clan, and a member need not be a signer), so
  * hanging vault status off a roster row would state a relationship that does not exist.
+ * ⚠ WO-2030's Genesis Token addendum DID add one per-member field, `genesis_verified`, and
+ *   updated that deepEqual pin: it is the member's OWN wallet_identity row, not vault state.
  *
  * ⚠ BOTH SPELLINGS OF THE TWO NEW FIELDS ARE EMITTED, and that is not indecision. This
  *   endpoint's established convention is snake_case (WO-1852 chose it because that work
@@ -355,6 +362,10 @@ function toWire(vigil) {
             tenure_seconds: m.tenureSeconds,
             vigil_contribution: m.vigilContribution,
             degraded: m.degraded,
+            // WO-2030 addendum: the WO-2032 member-row badge. Boolean derived from
+            // wallet_identity.sgt_verified_at; false = NOT verified, never "holds none".
+            // ⛔ Never the mint, never the timestamp.
+            genesis_verified: m.genesisVerified === true,
         })),
     };
 }

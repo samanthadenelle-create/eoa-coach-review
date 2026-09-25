@@ -22,22 +22,20 @@
   ],
   "headers": [
     {
+      "source": "/Build/:file(.*\\.unityweb)",
+      "headers": [{ "key": "Content-Encoding", "value": "br" }]
+    },
+    {
       "source": "/Build/:file(.*\\.data\\.unityweb)",
       "headers": [{ "key": "Content-Type", "value": "application/octet-stream" }]
     },
     {
       "source": "/Build/:file(.*\\.wasm\\.unityweb)",
-      "headers": [
-        { "key": "Content-Type", "value": "application/wasm" },
-        { "key": "Content-Encoding", "value": "br" }
-      ]
+      "headers": [{ "key": "Content-Type", "value": "application/wasm" }]
     },
     {
       "source": "/Build/:file(.*\\.js\\.unityweb)",
-      "headers": [
-        { "key": "Content-Type", "value": "application/javascript" },
-        { "key": "Content-Encoding", "value": "br" }
-      ]
+      "headers": [{ "key": "Content-Type", "value": "application/javascript" }]
     },
     {
       "source": "/",
