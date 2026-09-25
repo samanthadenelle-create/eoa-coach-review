@@ -415,7 +415,8 @@ const TUNABLE_KEYS = [
     // percents - the encoding is in the key NAME (the dungeon.lanternDrainPerSecX100 shape).
     // Every default is the value the WO-2061 capture proved (n/p/q passes):
     //   heart.softFadeNearX100   - 15  = 0.15 m soft-particle near fade of the aura band.
-    //   heart.softFadeFarX100    - 80  = 0.8 m far fade. 0 = soft fade OFF.
+    //   heart.softFadeFarX100    - 0   = soft fade OFF (WO-2061r: with both fades on the band
+    //                              drew nothing; the camera fade is kept). 80 = 0.8 m turns it on.
     //   heart.cameraFadeNearX100 - 100 = 1 m camera near fade.
     //   heart.cameraFadeFarX100  - 300 = 3 m camera far fade. 0 = camera fade OFF.
     //   heart.fireflyEmissiveX100 - 60 = _EmissiveAmount 0.60 on the fireflies (ships 4 = x21).
