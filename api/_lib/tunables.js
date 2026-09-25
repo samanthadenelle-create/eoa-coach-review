@@ -420,12 +420,14 @@ const TUNABLE_KEYS = [
     //   heart.cameraFadeNearX100 - 100 = 1 m camera near fade.
     //   heart.cameraFadeFarX100  - 300 = 3 m camera far fade. 0 = camera fade OFF.
     //   heart.fireflyEmissiveX100 - 60 = _EmissiveAmount 0.60 on the fireflies (ships 4 = x21).
-    //   heart.bandAlphaPct       - 70  = the band discs' alpha.
+    //   heart.bandAlphaPct       - 100 = the band discs' alpha (WO-2061t: 70 -> 100, the s log's
+    //                              HEART_TREE_GLOW_PICK highest-passing alpha).
     //   heart.bandSize           - 44  = the band's particle-size multiplier.
     //   heart.bandEmissionPct    - 100 = the per-motif emission extremes as authored.
-    //   heart.bandGlowPct        - 0   = the band's MATERIAL glow off (WO-2061s: a tint-matched
-    //                              emission term between the r-proven clip-free off and the
-    //                              authored white that clipped 24,667 px; the capture's grid picks).
+    //   heart.bandGlowPct        - 20  = the band's MATERIAL glow (WO-2061t: 0 -> 20, the s log's
+    //                              HEART_TREE_GLOW_PICK, the lowest glow that passed the state gate;
+    //                              a tint-matched emission term between the r-proven clip-free off
+    //                              and the authored white that clipped 24,667 px).
     // They sit in the Command Center's "Heart Tree" section (tunable-manifest.js GROUPS)
     // beside the serverOnly realm threshold. Clamped at the consumer.
     { key: 'heart.softFadeNearX100', kind: 'int' },
