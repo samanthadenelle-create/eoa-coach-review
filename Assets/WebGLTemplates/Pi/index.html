@@ -321,12 +321,55 @@
           return out.join(',');
         } catch (e) { return '<unreadable:' + e + '>'; }
       }
-      function piReportPageError(kind, message, source, lineno, colno, stack) {
+      // ---- piHeapProbe BEGIN (WO-2037 add-on: pure, macro-free; test/webgl-ios-net.test.js executes this slice) ----
+      // The live iPhone build dies in town with `abort("OOM")` from abortOnCannotGrowMemory <-
+      // _emscripten_resize_heap. READ AT SOURCE in the built framework (Builds/WebGL-preview-2025,
+      // 2026-09-25): that abort fires BOTH when the request exceeds getHeapMax() AND when
+      // wasmMemory.grow() is refused below it, and the text is the bare word "OOM" either way. The
+      // heap size at the moment of the abort is the one number that tells the two apart. The same
+      // framework assigns Module["HEAPU8"] in updateMemoryViews(), and the loader exposes that
+      // Module as unityInstance.Module and calls config.errorHandler as w.errorHandler(...), so
+      // `this` there IS the Module. Every access is guarded: this runs inside the error reporter.
+      function piIsOomText(text) {
+        var s = '' + (text || '');
+        return /\bOOM\b/.test(s) || /out of memory|cannot enlarge memory|out of bounds memory access/i.test(s);
+      }
+      function piHeapSnapshot(mods, perfMemory) {
+        var heap = '?', via = 'none';
+        try {
+          for (var i = 0; mods && i < mods.length; i++) {
+            var m = mods[i];
+            if (!m) continue;
+            var bytes = -1;
+            try { if (m.HEAPU8 && typeof m.HEAPU8.length === 'number') { bytes = m.HEAPU8.length; via = 'HEAPU8'; } } catch (e) { }
+            if (bytes < 0) {
+              try { if (m.wasmMemory && m.wasmMemory.buffer) { bytes = m.wasmMemory.buffer.byteLength; via = 'wasmMemory'; } } catch (e) { }
+            }
+            if (bytes >= 0) { heap = (Math.round(bytes / 104857.6) / 10).toFixed(1); break; }
+          }
+        } catch (e) { heap = '?'; via = 'threw'; }
+        var used = '?', limit = '?';
+        try {
+          if (perfMemory) {
+            used = Math.round(perfMemory.usedJSHeapSize / 1048576);
+            limit = Math.round(perfMemory.jsHeapSizeLimit / 1048576);
+          }
+        } catch (e) { }
+        return ' wasmHeapMB=' + heap + ' heapVia=' + via + ' jsHeapUsedMB=' + used + ' jsHeapLimitMB=' + limit;
+      }
+      // ---- piHeapProbe END ----
+      function piPerfMemory() {
+        try { return (window.performance && performance.memory) ? performance.memory : null; }
+        catch (e) { return null; }
+      }
+      function piReportPageError(kind, message, source, lineno, colno, stack, module) {
         try {
           var msg = '' + (message || '');
           if (piPageErrorSeen[msg]) return;          // one row per distinct message
           piPageErrorSeen[msg] = 1;
-          if (piPageErrorCount >= PI_PAGE_ERROR_MAX) return;
+          // WO-2037 add-on: an OOM is the one row the per-boot cap must never evict.
+          var piOom = piIsOomText(msg) || piIsOomText(stack);
+          if (piPageErrorCount >= PI_PAGE_ERROR_MAX && !piOom) return;
           piPageErrorCount++;
           // The browser's masking signature: no source, no line AND no stack. The stack matters in
           // the test: an unhandledrejection legitimately has no source/lineno while still carrying
@@ -343,6 +386,11 @@
             ' vis=' + document.visibilityState +
             ' stack=' + JSON.stringify(('' + (stack || '')).slice(0, 700));
           if (masked) line += ' scripts=' + JSON.stringify(piScriptSnapshot());
+          if (piOom) {
+            var piUi = null;
+            try { piUi = window.unityInstance ? window.unityInstance.Module : null; } catch (e) { }
+            line += ' oom=true' + piHeapSnapshot([module, piUi], piPerfMemory());
+          }
           console.error('[PageError] ' + line);
           // useBeacon=true: an uncaught error is frequently teardown-adjacent, and :774 already
           // records that a plain fetch does not survive teardown. It also has to be DISPATCHED
@@ -729,7 +777,8 @@
           console.error('[Loader] runtime error: ' + head + ' @ ' + (source || '<masked>') + ':' + (lineno || 0));
           // Same recorder as window.onerror, keyed on the SAME head text, so an error that reaches
           // both paths costs one row and not two - which the split above is what makes true.
-          piReportPageError('unity-errorHandler', head, source, lineno, 0, tail);
+          // `this` is the Unity Module here (loader calls w.errorHandler(...)) - the heap probe's source.
+          piReportPageError('unity-errorHandler', head, source, lineno, 0, tail, this);
           // The page's own non-blocking notice: the bug-report door the player can actually use,
           // which carries the trace tail with it. Never a modal.
           piDoorPromote('runtime-error');
@@ -766,8 +815,10 @@
           // the trace sink and NO iPhone could ever prove a successful boot in ?view=traces - the
           // one acceptance the P0 hangs on. Emit it, same as every other lifecycle crumb.
           try {
+            // WO-2037 add-on: the heap at unity-running is the baseline an OOM row is read against.
             piTraceEmit('[PiLifecycle] unity-running boot=' + bootId +
-              ' upMs=' + (Date.now() - piBootAt), false);
+              ' upMs=' + (Date.now() - piBootAt) +
+              piHeapSnapshot([unityInstance && unityInstance.Module], piPerfMemory()), false);
           } catch (e) { /* telemetry never blocks a boot */ }
           if (loadingBar) loadingBar.style.display = "none";
           piDoorHide();   // WO-1927: the runtime owns the feedback door from here
@@ -817,10 +868,79 @@
         } catch (e) { return false; }
       }
       var piIosDevice = piIsIosDevice();
-      function piIosNetWrite() {
-        try { window.localStorage.setItem(PI_IOS_NET_KEY, JSON.stringify({ buildId: piTraceBuild, at: Date.now() })); }
+      // WO-2037 Part B: the floor under which a surviving marker is a RELOAD, not a kill. The
+      // marker is written in startUnityOnce() BEFORE the loader <script> is even appended, and the
+      // load-time deaths this file records sat deep in the load (the loader-progress comment: "dies at
+      // 65% every time"; the loader-failed comment: 11 iPhones at progress=90% on 2026-09-21), while
+      // the fastest iPhone boot in the WO-2037 data reached unity-running at upMs=3567 in total
+      // (wt-pi74216d67a0) - so the heavy window starts seconds after the marker. A kill there, plus
+      // Safari re-creating the tab, plus this page re-parsing down to the boot check, cannot land
+      // under 2 s. The false positive it removes was MEASURED: `ios-net shown reason=marker-recent
+      // age=92ms` on a plain Safari reload (wt-pid73e287366, 2026-09-25). This is a chosen constant
+      // anchored on those points, not a value fitted to a distribution.
+      var PI_IOS_NET_FLOOR_MS = 2000;
+      // `phase` is new in WO-2037. A marker written by the pre-WO-2037 build carries none and is
+      // read as 'unity-loading' (see piIosNetDecide), so the net stays armed across the deploy.
+      function piIosNetWrite(phase, via) {
+        try {
+          window.localStorage.setItem(PI_IOS_NET_KEY, JSON.stringify({
+            buildId: piTraceBuild, at: Date.now(), phase: phase || 'unity-loading', via: via || 'boot' }));
+        }
         catch (e) { console.info('[PiLifecycle] ios-net marker write unavailable: ' + e); }
       }
+      // WO-2037 Part B: the page is being LEFT on purpose (reload, back/forward, the wallet handoff,
+      // an app switch). Stamp the marker 'left' so the NEXT boot does not read this load as a kill.
+      // Only an EXISTING marker is rewritten: once unity-running cleared it there is nothing to
+      // disarm, and writing one here would arm a net that no load ever set. A real WebKit kill runs
+      // none of these callers (no pagehide, no visibilitychange - WO-2025 note above #eoa-ios-net),
+      // so the kill still leaves 'unity-loading' behind and the net stays armed for it.
+      // Global on purpose: wallet-handoff.js reaches it as window.piIosNetLeave, the same way it
+      // reaches piTraceEmit.
+      function piIosNetLeave(via) {
+        try {
+          if (!piIosDevice) return;
+          var prev = piIosNetRead();
+          if (!prev) { console.info('[PiLifecycle] ios-net leave via=' + via + ' no-marker'); return; }
+          if (prev.phase === 'left') return;
+          window.localStorage.setItem(PI_IOS_NET_KEY, JSON.stringify({
+            buildId: prev.buildId, at: Date.now(), phase: 'left', via: '' + via }));
+          var line = '[PiLifecycle] ios-net marker left via=' + via + ' boot=' + bootId +
+            ' upMs=' + (Date.now() - piBootAt);
+          console.info(line);
+          piTraceEmit(line, true); // teardown: only a beacon survives
+        } catch (e) { console.info('[PiLifecycle] ios-net leave unavailable via=' + via + ': ' + e); }
+      }
+      // The page came BACK while the load is still in flight (tab visible again, bfcache restore):
+      // re-arm, so a kill that happens after the return is still caught on the next boot.
+      function piIosNetRearm(via) {
+        try {
+          if (!piIosDevice || !unityStarted || window.unityInstance) return;
+          var prev = piIosNetRead();
+          if (!prev || prev.phase !== 'left') return;
+          piIosNetWrite('unity-loading', 'rearm-' + via);
+          var line = '[PiLifecycle] ios-net marker re-armed via=' + via + ' boot=' + bootId +
+            ' upMs=' + (Date.now() - piBootAt);
+          console.info(line);
+          piTraceEmit(line, false);
+        } catch (e) { console.info('[PiLifecycle] ios-net rearm unavailable via=' + via + ': ' + e); }
+      }
+      // ---- piIosNetDecide BEGIN (WO-2037: pure, macro-free; test/webgl-ios-net.test.js executes this slice) ----
+      // The ONE decision the boot check makes. Pure: no storage, no DOM, no clock of its own, so the
+      // node suite runs the shipped text rather than a copy of it.
+      //   show=true  only for a same-build marker that was NOT left on purpose and whose age sits
+      //              between the reload floor and the freshness ceiling.
+      function piIosNetDecide(prev, nowMs, buildId, floorMs, freshMs) {
+        if (!prev || typeof prev !== 'object') return { show: false, reason: 'none', phase: '', age: -1 };
+        var phase = prev.phase ? ('' + prev.phase) : 'unity-loading'; // pre-WO-2037 marker = loading
+        var age = (typeof prev.at === 'number') ? (nowMs - prev.at) : -1;
+        if (prev.buildId !== buildId) return { show: false, reason: 'build-mismatch', phase: phase, age: age };
+        if (phase === 'left') return { show: false, reason: 'left', phase: phase, age: age };
+        if (age < 0) return { show: false, reason: 'no-age', phase: phase, age: age };
+        if (age < floorMs) return { show: false, reason: 'under-floor', phase: phase, age: age };
+        if (age >= freshMs) return { show: false, reason: 'stale', phase: phase, age: age };
+        return { show: true, reason: 'marker-recent', phase: phase, age: age };
+      }
+      // ---- piIosNetDecide END ----
       function piIosNetClear() {
         try { window.localStorage.removeItem(PI_IOS_NET_KEY); }
         catch (e) { console.info('[PiLifecycle] ios-net marker clear unavailable: ' + e); }
@@ -1053,7 +1173,7 @@
         // window the WebKit kill actually happens in - writing it any later would race the kill.
         // It sits above the stall-watch arm because WO-1927 pins piDoorNoteProgress() as the
         // statement immediately before the append.
-        if (piIosDevice) piIosNetWrite();
+        if (piIosDevice) piIosNetWrite('unity-loading', 'boot');
         piDoorNoteProgress();
         document.body.appendChild(script);
       }
@@ -1321,12 +1441,15 @@
         // NOT a beacon: pageshow is a restore, not a teardown, so an ordinary fetch survives and
         // keeps this off the beacon queue that pagehide/hidden depend on.
         piTraceEmit(line, false);
+        // WO-2037 Part B: a bfcache restore mid-load puts the load back in front of the kill.
+        if (e.persisted) piIosNetRearm('pageshow');
         recheckLandscape();
       });
       window.addEventListener('pagehide', function (e) {
         var line = '[PiLifecycle] pagehide boot=' + bootId + ' persisted=' + !!e.persisted;
         console.info(line);
         piBootCrumb('pagehide');
+        piIosNetLeave('pagehide');  // WO-2037 Part B: a reload / navigation is not a kill
         piTraceEmit(line, true);   // beacon: a plain fetch does not survive teardown
       });
       window.addEventListener('beforeunload', function (e) {
@@ -1335,6 +1458,7 @@
         // measure how many buffered entries exist at the moment of death.
         var line = '[WebTrace] final-flush-on-unload boot=' + bootId + ' upMs=' + (Date.now() - piBootAt);
         console.info(line);
+        piIosNetLeave('beforeunload');  // WO-2037 Part B: some WebKit teardowns skip pagehide
         piTraceEmit(line, true);   // beacon: must survive unload
       });
       document.addEventListener('visibilitychange', function () {
@@ -1343,7 +1467,12 @@
         // 'hidden' is the last event some webviews deliver before jettisoning the tab, so that
         // one goes out by beacon too - a fetch issued here can be cancelled with the document.
         piTraceEmit(line, document.visibilityState === 'hidden');
-        if (document.visibilityState === 'visible') recheckLandscape();
+        // WO-2037 Part B: an app/tab switch mid-load (the wallet in-app browser is the measured
+        // case) is not the foreground load kill the net is for - that kill fires NO
+        // visibilitychange (PROD-022 note above; WO-2025 note above #eoa-ios-net). Coming back
+        // re-arms, so a kill after the return is still caught.
+        if (document.visibilityState === 'hidden') piIosNetLeave('hidden');
+        if (document.visibilityState === 'visible') { piIosNetRearm('visible'); recheckLandscape(); }
       });
       // ===================================================================================
       // WO-1906: FIT THE CANVAS TO THE VISUAL VIEWPORT. Every host, no UA gate.
@@ -1475,10 +1604,27 @@
       // unity-running clear means the load THIS tab attempted last time died silently (the
       // WebKit kill has no other tell - see the HTML comment above #eoa-ios-net). Only iOS
       // reads the marker at all; every other platform falls straight to piApplyOrientation().
+      // WO-2037 Part B: the decision is piIosNetDecide (pure, node-tested), and EVERY read is logged
+      // with its source, phase, age and verdict, so the next trace proves which branch ran.
       var piIosNetPrev = piIosDevice ? piIosNetRead() : null;
-      if (piIosDevice && piIosNetPrev && piIosNetPrev.buildId === piTraceBuild &&
-          (Date.now() - piIosNetPrev.at) < PI_IOS_NET_FRESH_MS) {
-        piShowIosNet('marker-recent age=' + (Date.now() - piIosNetPrev.at) + 'ms');
+      var piIosNetVerdict = { show: false, reason: 'not-ios', phase: '', age: -1 };
+      if (piIosDevice) {
+        piIosNetVerdict = piIosNetDecide(piIosNetPrev, Date.now(), piTraceBuild,
+                                         PI_IOS_NET_FLOOR_MS, PI_IOS_NET_FRESH_MS);
+        try {
+          var piIosNetReadLine = '[PiLifecycle] ios-net marker read source=localStorage' +
+            ' phase=' + (piIosNetVerdict.phase || 'none') +
+            ' via=' + ((piIosNetPrev && piIosNetPrev.via) || 'none') +
+            ' age=' + piIosNetVerdict.age + 'ms floor=' + PI_IOS_NET_FLOOR_MS + 'ms' +
+            ' sameBuild=' + (!!piIosNetPrev && piIosNetPrev.buildId === piTraceBuild) +
+            ' decision=' + (piIosNetVerdict.show ? 'show' : 'skip') +
+            ' reason=' + piIosNetVerdict.reason + ' boot=' + bootId;
+          console.info(piIosNetReadLine);
+          piTraceEmit(piIosNetReadLine, false);
+        } catch (e) { console.info('[PiLifecycle] ios-net read log skipped: ' + e); }
+      }
+      if (piIosNetVerdict.show) {
+        piShowIosNet('marker-recent age=' + piIosNetVerdict.age + 'ms');
       } else {
         piApplyOrientation();
       }
