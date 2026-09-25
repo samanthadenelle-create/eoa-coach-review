@@ -423,6 +423,9 @@ const TUNABLE_KEYS = [
     //   heart.bandAlphaPct       - 70  = the band discs' alpha.
     //   heart.bandSize           - 44  = the band's particle-size multiplier.
     //   heart.bandEmissionPct    - 100 = the per-motif emission extremes as authored.
+    //   heart.bandGlowPct        - 0   = the band's MATERIAL glow off (WO-2061s: a tint-matched
+    //                              emission term between the r-proven clip-free off and the
+    //                              authored white that clipped 24,667 px; the capture's grid picks).
     // They sit in the Command Center's "Heart Tree" section (tunable-manifest.js GROUPS)
     // beside the serverOnly realm threshold. Clamped at the consumer.
     { key: 'heart.softFadeNearX100', kind: 'int' },
@@ -433,6 +436,7 @@ const TUNABLE_KEYS = [
     { key: 'heart.bandAlphaPct', kind: 'int' },
     { key: 'heart.bandSize', kind: 'int' },
     { key: 'heart.bandEmissionPct', kind: 'int' },
+    { key: 'heart.bandGlowPct', kind: 'int' },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
