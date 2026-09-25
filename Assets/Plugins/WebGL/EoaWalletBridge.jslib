@@ -395,62 +395,6 @@ mergeInto(LibraryManager.library, {
     delete S.slots[handle];
   },
 
-  // ===========================================================================
-  // WO-2037 add-on — MESSAGE signing through the Jupiter (Reown) session.
-  //
-  // ⛔ MEASURED DEFECT (owner iPhone, live build 385039, 2026-09-25): after a
-  // successful Jupiter connect, `[Flow:Wallet] MintSessionAsync aborted (no signer)
-  // why=explicit-connect`, then Order Chat "Sign in with your wallet". The C#
-  // provider could only sign messages through the Magicblock `_adapter`, which the
-  // Jupiter door never builds. These two entries give it the Reown provider's
-  // signMessage instead.
-  //
-  // Result channel: the SAME slots and the SAME EoaWalletBridgeSignPoll /
-  // EoaWalletBridgeSignResult / EoaWalletBridgeSignRelease as the transaction
-  // path — one polling contract in this file. Value on success = BASE64 of the raw
-  // signature bytes (C# base58-encodes). ⛔ Never logs the message or signature.
-  // ===========================================================================
-
-  // 1 when a Reown/WalletConnect provider is connected and exposes signMessage.
-  EoaJupiterCanSignMessage: function () {
-    try {
-      return (window.eoaWalletConnect && window.eoaWalletConnect.canSignMessage &&
-              window.eoaWalletConnect.canSignMessage()) ? 1 : 0;
-    } catch (err) { return 0; }
-  },
-
-  EoaJupiterSignMessageBegin__deps: ['$EoaWalletBridgeState'],
-  EoaJupiterSignMessageBegin: function (textPtr) {
-    var S = EoaWalletBridgeState;
-    var handle = S.nextHandle++;
-    var slot = { state: 0, value: '' };   // 0 pending, 1 done, 2 error
-    S.slots[handle] = slot;
-    try {
-      var text = UTF8ToString(textPtr);
-      if (!window.eoaWalletConnect || !window.eoaWalletConnect.signMessageBase64) {
-        slot.state = 2;
-        slot.value = 'wallet-connect.bundle.js is not loaded, so there is no Jupiter session to sign with';
-        return handle;
-      }
-      Promise.resolve(window.eoaWalletConnect.signMessageBase64(text)).then(function (b64) {
-        if (!b64) {
-          slot.state = 2;
-          slot.value = 'the wallet returned no signature (cancelled or refused)';
-          return;
-        }
-        slot.value = String(b64);
-        slot.state = 1;
-      }).catch(function (err) {
-        slot.state = 2;
-        slot.value = (err && err.message) ? err.message : 'the wallet refused to sign the message';
-      });
-    } catch (err) {
-      slot.state = 2;
-      slot.value = (err && err.message) ? err.message : 'message sign could not be started';
-    }
-    return handle;
-  },
-
   // The wallet id we came back FROM, or ''. Read off `?eoaWallet=` at page load,
   // because the wallet's in-app browser is a different browsing context and
   // sessionStorage does not travel.

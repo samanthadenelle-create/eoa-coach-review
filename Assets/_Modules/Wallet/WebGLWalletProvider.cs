@@ -31,18 +31,16 @@ namespace DeNelle.Wallet
         public string ProviderName => "Solana Wallet Adapter (WebGL)";
         public bool IsConnected => _connected && _account.IsValid;
         public WalletAccount Account => _account;
-        // WO-2037 add-on — the WO-1958 named gap is CLOSED here. A session that came in
-        // through the Jupiter Mobile door has NO `_adapter` (Connect returns before the SDK
-        // adapter is built). MEASURED consequence on the owner's iPhone (live build 385039,
-        // 2026-09-25): `MintSessionAsync aborted (no signer) why=explicit-connect`, then
-        // `[BackendAuth] ... no real signer available` and Order Chat asking her to sign
-        // in. That session now signs through the Reown provider's
-        // `signMessage(Uint8Array): Promise<Uint8Array>` (@reown/appkit-adapter-solana
-        // 1.8.24, SolanaWalletConnectProvider.js:67-74) via EoaWalletBridge.jslib.
-        public bool CanSignMessages =>
-            _connected && (_adapter != null || (IsJupiterSession && WebGLWalletBridge.JupiterCanSignMessages()));
-
-        private bool IsJupiterSession => _connected && _account.WalletName == JupiterMobileWalletName;
+        // ⚠ WO-1958, NAMED GAP RATHER THAN A HALF-WIRE. A session that came in through the
+        // Jupiter Mobile door has NO `_adapter` (Connect returns before the SDK adapter is
+        // built), so this reads FALSE and `SignMessageBase58` returns null — the
+        // wallet-nonce login signature is therefore unavailable on that path today.
+        // The capability EXISTS: SolanaWalletConnectProvider declares
+        // `signMessage(message: Uint8Array): Promise<Uint8Array>` (read at source in
+        // @reown/appkit-adapter-solana 1.8.24). Wiring it is a bridge entry point plus a
+        // base58 encode, and it is deliberately NOT done in this ticket rather than done
+        // untested. It is written up in WO-1958 section 7.
+        public bool CanSignMessages => _connected && _adapter != null;
 
         /// <summary>
         /// WO-1957. The last sentence this provider owes the player about a connect that did not
@@ -362,33 +360,8 @@ namespace DeNelle.Wallet
 
         public async UniTask<string> SignMessageBase58(string utf8Message)
         {
-            if (string.IsNullOrEmpty(utf8Message))
+            if (_adapter == null || string.IsNullOrEmpty(utf8Message))
                 return null;
-            if (_adapter == null)
-            {
-                if (!IsJupiterSession)
-                {
-                    FlowTrace.Warn("Wallet",
-                        "WebGLWalletProvider.SignMessageBase58 — no Magicblock adapter and not a Jupiter " +
-                        "session; nothing can sign.");
-                    return null;
-                }
-                // WO-2037 add-on: the Jupiter (Reown / WalletConnect) arm. On a phone the
-                // page persists the WalletConnect deep-link choice so the sign-client
-                // foregrounds Jupiter for this request (wallet-connect.core.js).
-                FlowTrace.Step("Wallet",
-                    "WebGLWalletProvider.SignMessageBase58 via Jupiter (WalletConnect) len=" + utf8Message.Length);
-                var jup = await WebGLWalletBridge.SignMessageJupiter(utf8Message);
-                if (!jup.ok || jup.signature == null || jup.signature.Length == 0)
-                {
-                    FlowTrace.Warn("Wallet",
-                        "WebGLWalletProvider.SignMessageBase58 via Jupiter did not sign: " + jup.error);
-                    return null;
-                }
-                FlowTrace.Step("Wallet",
-                    "WebGLWalletProvider.SignMessageBase58 via Jupiter signed sigBytes=" + jup.signature.Length);
-                return Merkator.BitCoin.Base58Encoding.Encode(jup.signature);
-            }
             var bytes = System.Text.Encoding.UTF8.GetBytes(utf8Message);
             var sig = await _adapter.SignMessage(bytes);
             if (sig == null || sig.Length == 0) return null;

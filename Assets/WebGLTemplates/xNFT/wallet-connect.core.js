@@ -56,42 +56,13 @@
 //     FRAMEWORK-AGNOSTIC core export: `createAppKitWalletButton({namespace})`
 //     (@reown/appkit-wallet-button `dist/types/exports/index.d.ts`).
 //
-// -----------------------------------------------------------------------------
-// ⛔ WO-2037 — WHY THE OWNER'S iPHONE GOT A QR CODE (read at source, 1.8.24).
-//
-// The earlier note here said the wallet-button "pushes the AllWallets view on a
-// mobile browser". That is FALSE for 'jupiter': @reown/appkit-wallet-button
-// dist/esm/src/client.js:68 passes `walletConnect: wallet === 'walletConnect'`,
-// so ConnectorControllerUtil.js:29 calls `onOpen(isMobile() && false)` and the
-// button ALWAYS pushes 'ConnectingWalletConnect' with `{ wallet: walletButton }`
-// (client.js:76). `walletButton` comes from WalletUtil.getWalletButton
-// (WalletUtil.js:7), which reads `ApiController.state.walletButtons` — filled by
-// an ASYNC `/getWallets` fetch the button's CONSTRUCTOR starts (client.js:9-15,
-// ApiController.js:42-53). The old code constructed the button and called
-// `.connect('jupiter')` in the SAME synchronous turn, so the list was still `[]`,
-// `wallet` was undefined, and appkit-scaffold-ui
-// views/w3m-connecting-wc-view/index.js:117-120 —
-//     if (!this.wallet) { this.platforms.push('qrcode'); ... return; }
-// — chose QR before `CoreHelperUtil.isMobile()` (line 138) was ever consulted.
-// The phone / landscape-956px viewport was irrelevant: isMobile() is
-// `pointer:coarse || /iPhone|.../ UA` (CoreHelperUtil.js:13-16), true on her device.
-//
-// THE FIX, two layers, ONE navigation owner per attempt:
-//  A. connect() now waits (bounded, READY_WAIT_MS) for the button's wallet list,
-//     so AppKit receives Jupiter's `mobile_link` ('jupiter://') and on a phone
-//     renders w3m-connecting-wc-mobile, which deep-links itself
-//     (ConnectionControllerUtil.onConnectMobile -> openHref(redirect,'_self')) AND
-//     shows its own gesture-backed "Open" button if Safari refuses the async one.
-//  B. If the list is NOT ready in time (fetch failed / slow) the modal falls back
-//     to QR; on a PHONE this file then owns the deep link: it listens to the
-//     UniversalProvider's `display_uri` and navigates to `jupiter://wc?uri=...`
-//     itself. Only one of A/B ever navigates, so the player never gets two
-//     app-switch prompts.
-//  ⚠ NOT PROVEN: whether iOS Safari honours a custom-scheme navigation that
-//    happens seconds after the tap (the relay hop). The `deeplink outcome=` trace
-//    line is the instrument; AppKit's "Open" button (path A) is the fallback.
-//
 // ⚠ AND WHAT IS NOT PROVEN, STATED HERE SO NOBODY READS OPTIMISM INTO THE CODE:
+//  - `AppKitWalletButton.connect(wallet)` on a MOBILE browser pushes the
+//    `AllWallets` VIEW (client.js `connectWalletConnect.onOpen(isMobile)`), not a
+//    one-tap Jupiter deeplink. So on a phone the player taps "Jupiter Mobile" and
+//    then taps Jupiter in AppKit's own list. `includeWalletIds` pins that list to
+//    Jupiter alone so the second tap is unambiguous — that is the mitigation, and
+//    it is not the same thing as one tap.
 //  - Jupiter registers NO universal link (`universal:null`), so iOS has only the
 //    custom scheme. If the app is not installed, nothing happens and there is no
 //    App Store fallback. The timeout below is the only thing that turns that
@@ -114,84 +85,6 @@
     // WebGL tab that gets backgrounded on iOS can take seconds to resume.
     var DEFAULT_TIMEOUT_MS = 180000;
 
-    // WO-2037 layer A: how long connect() waits for the wallet-button's `/getWallets`
-    // list before letting AppKit open anyway. Bounded because ApiController's fetch
-    // has no try/finally — a failed fetch leaves `ready` false forever.
-    var READY_WAIT_MS = 4000;
-
-    // How long after a deep link we watch for the page going hidden (= iOS switched
-    // to Jupiter) before recording "no app switch".
-    var DEEPLINK_OBSERVE_MS = 4000;
-
-    // Jupiter's explorer `mobile.native`. AppKit's CoreHelperUtil.formatNativeUrl
-    // turns it into `jupiter://wc?uri=<encodeURIComponent(wc uri)>`; buildDeepLink
-    // below produces the byte-identical string.
-    var JUPITER_NATIVE = 'jupiter://';
-
-    // Pure byte helpers — no TextEncoder / btoa dependency, so the vm-realm suite
-    // runs them exactly as the page does.
-    function utf8Bytes(str) {
-        var out = [];
-        for (var i = 0; i < str.length; i += 1) {
-            var c = str.charCodeAt(i);
-            if (c >= 0xd800 && c <= 0xdbff && i + 1 < str.length) {
-                var d = str.charCodeAt(i + 1);
-                if (d >= 0xdc00 && d <= 0xdfff) {
-                    c = 0x10000 + ((c - 0xd800) << 10) + (d - 0xdc00);
-                    i += 1;
-                }
-            }
-            if (c < 0x80) out.push(c);
-            else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63));
-            else if (c < 0x10000) out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
-            else out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
-        }
-        return out;
-    }
-
-    function toByteArray(v) {
-        if (!v || typeof v.length !== 'number') return [];
-        var out = [];
-        for (var i = 0; i < v.length; i += 1) out.push(v[i] & 255);
-        return out;
-    }
-
-    var B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-    function bytesToBase64(bytes) {
-        var s = '';
-        for (var i = 0; i < bytes.length; i += 3) {
-            var a = bytes[i], b = bytes[i + 1], c = bytes[i + 2];
-            var n = (a << 16) | ((b || 0) << 8) | (c || 0);
-            s += B64.charAt((n >> 18) & 63) + B64.charAt((n >> 12) & 63) +
-                 (i + 1 < bytes.length ? B64.charAt((n >> 6) & 63) : '=') +
-                 (i + 2 < bytes.length ? B64.charAt(n & 63) : '=');
-        }
-        return s;
-    }
-
-    function buildDeepLink(wcUri) {
-        return JUPITER_NATIVE + 'wc?uri=' + encodeURIComponent(String(wcUri));
-    }
-
-    // "Is this a phone/tablet browser?" — COPIED from wallet-handoff.js
-    // isMobileBrowser() (WO-2037: same rule, not edited there). iPadOS 13+ reports a
-    // DESKTOP Macintosh UA, so the touch-point probe is the only reliable iPad tell.
-    // Returns the answer AND the reason, because the trace must say why.
-    function classifyDevice(nav) {
-        var s = '';
-        try { s = String((nav && nav.userAgent) || ''); } catch (e) { s = ''; }
-        if (/android|iphone|ipod|ipad|iemobile|blackberry|opera mini/i.test(s)) {
-            return { phone: true, why: 'ua-mobile-token' };
-        }
-        try {
-            if (/Macintosh/i.test(s) && nav && typeof nav.maxTouchPoints === 'number' &&
-                nav.maxTouchPoints > 1) {
-                return { phone: true, why: 'ipad-as-mac-touch' };
-            }
-        } catch (e) { /* hardened browsers hide maxTouchPoints; fall through */ }
-        return { phone: false, why: s ? 'no-mobile-token' : 'no-user-agent' };
-    }
-
     // Terminal reason codes. Each is a DIFFERENT FACT and the C# side branches on
     // them; none of them may be collapsed into a generic failure.
     var REASON = {
@@ -211,14 +104,6 @@
         var trace = typeof opts.trace === 'function' ? opts.trace : noop;
         var timeoutMs = typeof opts.timeoutMs === 'number' ? opts.timeoutMs : DEFAULT_TIMEOUT_MS;
         var projectId = opts.projectId ? String(opts.projectId) : '';
-        var readyWaitMs = typeof opts.readyWaitMs === 'number' ? opts.readyWaitMs : READY_WAIT_MS;
-        var observeMs = typeof opts.deeplinkObserveMs === 'number' ? opts.deeplinkObserveMs : DEEPLINK_OBSERVE_MS;
-        // The one navigation this file performs (WO-2037 layer B). Injected so the
-        // suite can capture it; in the page it is a same-frame location change, the
-        // same frame AppKit's own openHref targets outside an iframe ('_self').
-        var navigate = typeof opts.navigate === 'function' ? opts.navigate : function (url) {
-            global.location.href = url;
-        };
 
         var state = 'idle';
         var reason = '';
@@ -343,79 +228,15 @@
                 state = 'awaiting-approval';
                 trace('[EoaWalletConnect] awaiting approval for wallet=' + wallet);
 
-                var device = classifyDevice(opts.navigator || global.navigator);
-                trace('[EoaWalletConnect] platform=' + (device.phone ? 'phone' : 'desktop') +
-                      ' why=' + device.why);
-                var startedAt = now();
-                var uriSeen = false;
-                var detachUri = noop;
-
-                // ONE navigation owner per attempt (see header): AppKit when the
-                // wallet list arrived in time, this file when it did not AND we are on
-                // a phone, nobody on desktop (the QR is the desktop path).
-                var owner = 'appkit';
-
-                function onDisplayUri(uri) {
-                    if (done || uriSeen) return;
-                    uriSeen = true;
-                    var u = String(uri || '');
-                    // ⛔ NEVER the uri itself: it carries the pairing symKey.
-                    trace('[EoaWalletConnect] display_uri received scheme=' +
-                          (u.indexOf('wc:') === 0 ? 'wc' : 'other') + ' len=' + u.length +
-                          ' afterMs=' + (now() - startedAt) + ' owner=' + owner);
-                    if (owner !== 'eoa') {
-                        if (device.phone) observeDeepLink('appkit');
-                        return;
-                    }
-                    var link = buildDeepLink(u);
-                    trace('[EoaWalletConnect] deeplink attempted scheme=' +
-                          JUPITER_NATIVE.replace('://', '') + ' owner=eoa via=location');
-                    try {
-                        navigate(link);
-                    } catch (err) {
-                        trace('[EoaWalletConnect] deeplink outcome=threw owner=eoa detail=' + msg(err) +
-                              ' - the QR modal stays up');
-                        return;
-                    }
-                    observeDeepLink('eoa');
+                var attempt;
+                try {
+                    attempt = walletButton.connect(wallet);
+                } catch (err) {
+                    finish(settle('refused', REASON.FAILED, 'connect threw: ' + msg(err)));
+                    return;
                 }
 
-                waitForWalletButton(walletButton, readyWaitMs).then(function (ready) {
-                    if (done) return null;
-                    trace('[EoaWalletConnect] wallet-button ready=' + ready +
-                          ' waitedMs=' + (now() - startedAt));
-                    if (ready !== true) {
-                        owner = device.phone ? 'eoa' : 'none';
-                        trace('[EoaWalletConnect] wallet list not ready - AppKit will show its QR view; ' +
-                              (device.phone ? 'this page owns the jupiter:// deep link'
-                                            : 'desktop keeps the QR'));
-                    }
-                    return attachDisplayUri(onDisplayUri);
-                }).then(function (detach) {
-                    if (typeof detach === 'function') detachUri = detach;
-                    if (done) { detachUri(); return; }
-
-                    var attempt;
-                    try {
-                        attempt = walletButton.connect(wallet);
-                    } catch (err) {
-                        detachUri();
-                        finish(settle('refused', REASON.FAILED, 'connect threw: ' + msg(err)));
-                        return;
-                    }
-                    Promise.resolve(attempt).then(function (r) { detachUri(); onResult(r); },
-                                                  function (e) { detachUri(); onError(e); })
-                        .catch(onError);
-                }).catch(function (err) {
-                    detachUri();
-                    onError(err);
-                });
-
-                function onError(err) {
-                    finish(settle('refused', REASON.FAILED, msg(err)));
-                }
-
-                function onResult(result) {
+                Promise.resolve(attempt).then(function (result) {
                     var addr = readAddress(result) || readAppKitAddress();
                     if (!addr) {
                         // Resolved with nothing = the modal closed without an account.
@@ -426,207 +247,13 @@
                     }
                     address = addr;
                     try { if (appKit && appKit.close) appKit.close(); } catch (e) { /* best effort */ }
-                    if (device.phone) ensureDeepLinkChoice('connect owner=' + owner);
                     finish(settle('connected', REASON.CONNECTED, 'address=' + addr));
-                }
+                }).catch(function (err) {
+                    finish(settle('refused', REASON.FAILED, msg(err)));
+                });
             });
 
             return inFlight;
-        }
-
-        function now() {
-            try { return Date.now(); } catch (e) { return 0; }
-        }
-
-        // -------------------------------------------------------------------------
-        // WO-2037 add-on — SIGN A MESSAGE through the Reown session, and make the
-        // request HOP to Jupiter on the same phone.
-        //
-        // The request itself: SolanaWalletConnectProvider.signMessage(Uint8Array) ->
-        // Promise<Uint8Array> (@reown/appkit-adapter-solana 1.8.24
-        // dist/esm/src/providers/SolanaWalletConnectProvider.js:67-74: it sends
-        // `solana_signMessage` with the message base58-encoded and returns
-        // `base58.decode(result.signature)`, i.e. the raw 64 signature bytes).
-        // This returns those bytes BASE64 so the jslib/C# boundary stays a string;
-        // C# base58-encodes, exactly as its Magicblock arm already does.
-        //
-        // The hop: WalletConnect's sign-client, on every session request, reads
-        // localStorage `WALLETCONNECT_DEEPLINK_CHOICE` and, when present and the
-        // document has focus, opens `<href>/wc?requestId=..&sessionTopic=..` with
-        // window.open(_self) (@walletconnect/sign-client engine request ->
-        // utils handleDeeplinkRedirect, read in the bundled dist). AppKit writes that
-        // key only when ITS mobile view did the connect (onConnectMobile ->
-        // setWcLinking -> finalizeWcConnection). A connect that went through the QR
-        // (the owner's 2026-09-25 session) or through this file's own deep link never
-        // wrote it, so no sign request would ever foreground Jupiter. On a phone this
-        // file writes the SAME value AppKit would ({href:'jupiter://',name}) when it
-        // is absent, so the sign-client's own hop runs.
-        // -------------------------------------------------------------------------
-        var DEEPLINK_CHOICE_KEY = 'WALLETCONNECT_DEEPLINK_CHOICE';
-
-        function storageRef() {
-            try { return opts.storage || global.localStorage || null; } catch (e) { return null; }
-        }
-
-        function readDeepLinkChoice() {
-            var s = storageRef();
-            if (!s) return '';
-            try { return String(s.getItem(DEEPLINK_CHOICE_KEY) || ''); } catch (e) { return ''; }
-        }
-
-        function ensureDeepLinkChoice(why) {
-            var s = storageRef();
-            if (!s) { trace('[EoaWalletConnect] deeplink-choice unwritable (no storage) why=' + why); return false; }
-            var existing = readDeepLinkChoice();
-            if (existing) {
-                trace('[EoaWalletConnect] deeplink-choice present why=' + why +
-                      ' jupiter=' + (existing.indexOf(JUPITER_NATIVE) >= 0));
-                return true;
-            }
-            try {
-                s.setItem(DEEPLINK_CHOICE_KEY, JSON.stringify({ href: JUPITER_NATIVE, name: 'Jupiter' }));
-                trace('[EoaWalletConnect] deeplink-choice set href=' + JUPITER_NATIVE + ' why=' + why);
-                return true;
-            } catch (e) {
-                trace('[EoaWalletConnect] deeplink-choice write threw why=' + why + ' detail=' + msg(e));
-                return false;
-            }
-        }
-
-        function canSignMessage() {
-            var p = provider();
-            return !!(p && typeof p.signMessage === 'function');
-        }
-
-        // Resolves the BASE64 of the signature bytes; rejects with a named Error.
-        // ⛔ Never traces the message or the signature — lengths only.
-        function signMessageBase64(utf8Text) {
-            var p = provider();
-            if (!p || typeof p.signMessage !== 'function') {
-                trace('[EoaWalletConnect] signMessage refused: no Reown provider is connected');
-                return Promise.reject(new Error('no Jupiter/WalletConnect provider is connected'));
-            }
-            var bytes = utf8Bytes(String(utf8Text == null ? '' : utf8Text));
-            var dev = classifyDevice(opts.navigator || global.navigator);
-            trace('[EoaWalletConnect] signMessage requested len=' + bytes.length +
-                  ' platform=' + (dev.phone ? 'phone' : 'desktop') +
-                  ' deeplinkChoice=' + (readDeepLinkChoice() ? 'present' : 'absent'));
-            if (dev.phone) {
-                ensureDeepLinkChoice('signMessage');
-                observeDeepLink('walletconnect-request');
-            }
-            var started = now();
-            var call;
-            try { call = p.signMessage(new Uint8Array(bytes)); }
-            catch (e) { call = Promise.reject(e); }
-            return Promise.resolve(call).then(function (sig) {
-                var raw = toByteArray(sig);
-                if (!raw.length) {
-                    trace('[EoaWalletConnect] signMessage returned NO signature afterMs=' + (now() - started));
-                    throw new Error('the wallet returned no signature');
-                }
-                trace('[EoaWalletConnect] signMessage signed sigBytes=' + raw.length +
-                      ' afterMs=' + (now() - started));
-                return bytesToBase64(raw);
-            }, function (err) {
-                trace('[EoaWalletConnect] signMessage refused afterMs=' + (now() - started) +
-                      ' detail=' + msg(err));
-                throw (err instanceof Error) ? err : new Error(msg(err));
-            });
-        }
-
-        // Resolves true when the wallet-button's wallet list is loaded, false when it
-        // did not arrive within `ms`, 'unknown' when the button exposes no readiness
-        // API (older shapes / test fakes) — 'unknown' is treated as ready, i.e.
-        // AppKit keeps the navigation, which is the pre-WO-2037 behaviour.
-        function waitForWalletButton(button, ms) {
-            return new Promise(function (resolve) {
-                if (!button || typeof button.isReady !== 'function') { resolve('unknown'); return; }
-                var settled = false;
-                var t = null;
-                function done(v) {
-                    if (settled) return;
-                    settled = true;
-                    if (t) { try { clearTimeout(t); } catch (e) { /* vm realm */ } }
-                    resolve(v);
-                }
-                try { if (button.isReady()) { done(true); return; } } catch (e) { /* fall through */ }
-                try {
-                    if (typeof button.subscribeIsReady === 'function') {
-                        button.subscribeIsReady(function (s) { if (s && s.isReady) done(true); });
-                    }
-                } catch (e) { /* the timer below still settles it */ }
-                try { t = setTimeout(function () { done(false); }, ms); } catch (e) { done(false); }
-            });
-        }
-
-        // Subscribes `handler` to the WalletConnect UniversalProvider's
-        // `display_uri` (the event that carries the `wc:` pairing uri) BEFORE the
-        // connect starts, so the uri cannot be missed. Resolves a detach function.
-        // AppKit.getUniversalProvider() is public and memoised
-        // (@reown/appkit appkit-base-client.js:1595-1615).
-        function attachDisplayUri(handler) {
-            if (!appKit || typeof appKit.getUniversalProvider !== 'function') {
-                trace('[EoaWalletConnect] display_uri not observable: AppKit exposes no getUniversalProvider');
-                return Promise.resolve(noop);
-            }
-            var got;
-            try { got = appKit.getUniversalProvider(); } catch (e) { got = null; }
-            var bounded = new Promise(function (resolve) {
-                try { setTimeout(function () { resolve(null); }, readyWaitMs); } catch (e) { /* vm */ }
-            });
-            return Promise.race([Promise.resolve(got), bounded]).then(function (up) {
-                if (!up || typeof up.on !== 'function') {
-                    trace('[EoaWalletConnect] display_uri not observable: no UniversalProvider');
-                    return noop;
-                }
-                up.on('display_uri', handler);
-                return function detach() {
-                    try {
-                        if (typeof up.off === 'function') up.off('display_uri', handler);
-                        else if (typeof up.removeListener === 'function') up.removeListener('display_uri', handler);
-                    } catch (e) { /* detaching is best effort */ }
-                };
-            }, function (err) {
-                trace('[EoaWalletConnect] display_uri not observable: ' + msg(err));
-                return noop;
-            });
-        }
-
-        // The OUTCOME instrument for a deep link: iOS backgrounds the page when it
-        // switches to Jupiter, so `visibilitychange -> hidden` within the window is
-        // the proof the hop happened. No hide = blocked, prompt still up, or app
-        // not installed (Jupiter registers no universal link).
-        function observeDeepLink(who) {
-            var doc = opts.document || global.document;
-            if (!doc || typeof doc.addEventListener !== 'function') {
-                trace('[EoaWalletConnect] deeplink outcome=unobservable owner=' + who);
-                return;
-            }
-            var t0 = now();
-            var over = false;
-            var timer = null;
-            function onVis() {
-                if (over) return;
-                if (doc.visibilityState === 'hidden') {
-                    over = true;
-                    try { doc.removeEventListener('visibilitychange', onVis); } catch (e) { /* ok */ }
-                    if (timer) { try { clearTimeout(timer); } catch (e) { /* vm */ } }
-                    trace('[EoaWalletConnect] deeplink outcome=app-switched owner=' + who +
-                          ' hiddenAfterMs=' + (now() - t0));
-                }
-            }
-            try { doc.addEventListener('visibilitychange', onVis); } catch (e) { return; }
-            try {
-                timer = setTimeout(function () {
-                    if (over) return;
-                    over = true;
-                    try { doc.removeEventListener('visibilitychange', onVis); } catch (e) { /* ok */ }
-                    trace('[EoaWalletConnect] deeplink outcome=no-app-switch owner=' + who +
-                          ' withinMs=' + observeMs + ' (blocked, prompt pending, or Jupiter not ' +
-                          'installed) - the AppKit modal stays up as the fallback');
-                }, observeMs);
-            } catch (e) { /* vm realm */ }
         }
 
         function msg(err) {
@@ -685,8 +312,6 @@
             connect: connect,
             disconnect: disconnect,
             provider: provider,
-            canSignMessage: canSignMessage,
-            signMessageBase64: signMessageBase64,
             address: function () { return address; },
             state: snapshot,
             JUPITER_WALLET: JUPITER_WALLET,
@@ -700,11 +325,6 @@
         JUPITER_WALLET: JUPITER_WALLET,
         JUPITER_EXPLORER_ID: JUPITER_EXPLORER_ID,
         DEFAULT_TIMEOUT_MS: DEFAULT_TIMEOUT_MS,
-        READY_WAIT_MS: READY_WAIT_MS,
-        buildDeepLink: buildDeepLink,
-        classifyDevice: classifyDevice,
-        utf8Bytes: utf8Bytes,
-        bytesToBase64: bytesToBase64,
         REASON: REASON
     };
 
