@@ -139,6 +139,11 @@ globalThis.eoaWalletConnect = {
         return !!(provider && typeof provider.signTransaction === 'function');
     },
 
+    // WO-2037 add-on: the MESSAGE-signing seam (the wallet-nonce login / session
+    // mint). Logic lives in wallet-connect.core.js; base64 of the raw signature out.
+    canSignMessage() { return this.instance().canSignMessage(); },
+    signMessageBase64(utf8Text) { return this.instance().signMessageBase64(utf8Text); },
+
     disconnect() { return this.instance().disconnect(); },
     provider() { return this.instance().provider(); },
     address() { return this.instance().address(); },

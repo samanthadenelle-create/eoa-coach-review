@@ -47,6 +47,8 @@ namespace DeNelle.Wallet
         [DllImport("__Internal")] private static extern int EoaJupiterConnectPoll(int handle);
         [DllImport("__Internal")] private static extern string EoaJupiterConnectResult(int handle);
         [DllImport("__Internal")] private static extern void EoaJupiterConnectRelease(int handle);
+        [DllImport("__Internal")] private static extern int EoaJupiterCanSignMessage();
+        [DllImport("__Internal")] private static extern int EoaJupiterSignMessageBegin(string utf8Message);
 
         // A wallet sheet is a HUMAN action. The deadline exists so a page the player
         // abandoned reports a refusal instead of leaving the store spinning forever;
@@ -367,6 +369,103 @@ namespace DeNelle.Wallet
             finally
             {
                 try { EoaJupiterConnectRelease(handle); } catch (Exception) { }
+            }
+        }
+
+        // =====================================================================
+        // WO-2037 add-on — MESSAGE signing through the Jupiter (Reown) session.
+        //
+        // ⛔ MEASURED (owner iPhone, live build 385039, 2026-09-25): a Jupiter
+        // connect succeeded and the very next line was
+        //     [Flow:Wallet] MintSessionAsync aborted (no signer) why=explicit-connect
+        // because WebGLWalletProvider could sign messages only through the
+        // Magicblock adapter, which the Jupiter door never builds. The page side is
+        // SolanaWalletConnectProvider.signMessage (@reown/appkit-adapter-solana
+        // 1.8.24), reached through wallet-connect.core.js signMessageBase64; the
+        // bytes come back BASE64 and are decoded here. Same slot/poll/release
+        // contract as SignBase64. ⛔ Never logs the message or the signature.
+        // =====================================================================
+
+        /// <summary>True when the page has a connected Reown provider that can sign a
+        /// message. Never throws; never traces (it is read as a property).</summary>
+        internal static bool JupiterCanSignMessages()
+        {
+            try { return EoaJupiterCanSignMessage() == 1; }
+            catch (Exception) { return false; }
+        }
+
+        /// <summary>
+        /// Signs a UTF-8 message with the Jupiter (WalletConnect) session and returns the
+        /// RAW signature bytes. Returns, never throws — a refusal is a value.
+        /// </summary>
+        internal static async UniTask<(bool ok, byte[] signature, string error)> SignMessageJupiter(
+            string utf8Message)
+        {
+            if (string.IsNullOrEmpty(utf8Message))
+                return (false, null, "there was no message to sign");
+
+            int handle;
+            try { handle = EoaJupiterSignMessageBegin(utf8Message); }
+            catch (Exception ex)
+            {
+                FlowTrace.Fail("Wallet", "Jupiter signMessage begin threw " +
+                                         ex.GetType().Name + ": " + ex.Message);
+                return (false, null, "this build cannot reach the Jupiter signer");
+            }
+            if (handle <= 0)
+                return (false, null, "the Jupiter signer did not start");
+
+            FlowTrace.Step("Wallet", "Jupiter signMessage requested handle=" + handle +
+                                     " len=" + utf8Message.Length);
+            try
+            {
+                double deadline = UnityEngine.Time.realtimeSinceStartupAsDouble + SignDeadlineSeconds;
+                while (true)
+                {
+                    int state = EoaWalletBridgeSignPoll(handle);
+                    if (state == 1)
+                    {
+                        string b64 = EoaWalletBridgeSignResult(handle);
+                        byte[] sig = null;
+                        try { if (!string.IsNullOrEmpty(b64)) sig = Convert.FromBase64String(b64); }
+                        catch (FormatException)
+                        {
+                            FlowTrace.Fail("Wallet", "Jupiter signMessage returned non-base64 (chars=" +
+                                                     (b64 == null ? 0 : b64.Length) + ")");
+                            return (false, null, "the wallet returned an unreadable signature");
+                        }
+                        if (sig == null || sig.Length == 0)
+                        {
+                            FlowTrace.Fail("Wallet", "Jupiter signMessage returned an EMPTY signature");
+                            return (false, null, "the wallet returned an empty signature");
+                        }
+                        FlowTrace.Step("Wallet", "Jupiter signMessage signed sigBytes=" + sig.Length);
+                        return (true, sig, null);
+                    }
+                    if (state == 2)
+                    {
+                        string message = EoaWalletBridgeSignResult(handle);
+                        if (string.IsNullOrEmpty(message)) message = "the wallet refused to sign the message";
+                        FlowTrace.Fail("Wallet", "Jupiter signMessage REFUSED: " + message);
+                        return (false, null, message);
+                    }
+                    if (state == 3)
+                    {
+                        FlowTrace.Fail("Wallet", "Jupiter signMessage: the bridge lost handle=" + handle);
+                        return (false, null, "the Jupiter signer lost the request");
+                    }
+                    if (UnityEngine.Time.realtimeSinceStartupAsDouble > deadline)
+                    {
+                        FlowTrace.Fail("Wallet", "Jupiter signMessage TIMED OUT after " +
+                                                 SignDeadlineSeconds + "s");
+                        return (false, null, "the wallet approval was never completed");
+                    }
+                    await UniTask.Yield();
+                }
+            }
+            finally
+            {
+                try { EoaWalletBridgeSignRelease(handle); } catch (Exception) { }
             }
         }
 

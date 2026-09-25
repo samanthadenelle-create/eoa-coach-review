@@ -169,8 +169,21 @@
       return false;
     }
     trace('[EoaWalletHandoff] opening ' + id + ' framed=' + framed() + ' url=' + url);
+    // WO-2037 Part B: this is a DELIBERATE departure, so tell the iOS safety net before the
+    // navigation starts - otherwise a load still in flight here reads as a WebKit kill on the next
+    // boot. index.html owns the marker; this only calls its hook when the page provides one (the
+    // xNFT template carries no net, so there it is a no-op), the same guard as piTraceEmit above.
+    try {
+      if (typeof global.piIosNetLeave === 'function') global.piIosNetLeave('handoff:' + id);
+    } catch (e) { trace('[EoaWalletHandoff] ios-net leave threw: ' + (e && e.message)); }
     var how = navigate(url);
     trace('[EoaWalletHandoff] navigation via=' + (how || 'NONE') + ' target=' + id);
+    if (!how) {
+      // Nothing navigated: the page is still here, so put the net back the way it was.
+      try {
+        if (typeof global.piIosNetRearm === 'function') global.piIosNetRearm('handoff-failed');
+      } catch (e) { trace('[EoaWalletHandoff] ios-net rearm threw: ' + (e && e.message)); }
+    }
     return how !== '';
   }
 
