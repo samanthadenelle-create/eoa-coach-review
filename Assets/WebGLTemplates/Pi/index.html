@@ -171,26 +171,6 @@
         font: 700 17px sans-serif; }
       #eoa-preruntime-status { margin-top: 6px; min-height: 18px;
         color: #d7c9f0; font: 600 14px/1.3 sans-serif; }
-
-      /* ---------------------------------------------------------------------------------
-         WO-2025 Lane I: the iOS safety net (owner ruling 2026-09-24, item I). Full-screen,
-         above everything else on the page (z-index clears both the landscape gate 99999 and
-         the pre-runtime bug door 100000) because it replaces the boot entirely rather than
-         sitting alongside it. Never rotated (a sibling of #unity-container, same reasoning
-         as the bug door above). --------------------------------------------------------- */
-      #eoa-ios-net { display: none; position: fixed; inset: 0; z-index: 100001;
-        align-items: center; justify-content: center; flex-direction: column; gap: 16px;
-        padding: 28px; box-sizing: border-box; text-align: center; color: #f4e5b5;
-        background: #0d0a14; font: 600 18px/1.4 sans-serif; }
-      #eoa-ios-net a.eoa-ios-net-link { display: inline-block; min-width: 260px;
-        min-height: 56px; line-height: 56px; padding: 0 20px; margin: 4px;
-        color: #17100a; background: #d9ad38; border: 2px solid #f4d16b; border-radius: 8px;
-        font: 700 17px sans-serif; text-decoration: none; box-sizing: border-box; }
-      /* Secondary by POSITION and WEIGHT, never by colour alone (owner is red/green
-         colourblind - CLAUDE.md house rule). */
-      #eoa-ios-net-retry { min-height: 52px; margin-top: 8px; padding: 10px 20px;
-        color: #f4e5b5; background: transparent; border: 2px solid #6b5a2e;
-        border-radius: 8px; font: 600 15px sans-serif; }
     </style>
   </head>
   <body>
@@ -228,24 +208,6 @@
         <button id="eoa-preruntime-send" type="button">Send report</button>
         <div id="eoa-preruntime-status" role="status" aria-live="polite"></div>
       </div>
-    </div>
-    <!-- WO-2025 Lane I: iOS safety net. iOS WebKit kills the tab under memory pressure with NO
-         script-visible event (memory + WO-1925 RESULT D1: no onerror, no unhandledrejection, no
-         webglcontextlost - the process just dies and Safari later re-creates the tab). So this
-         cannot react to the kill itself; the JS below shows it on the NEXT load, when a recent
-         "load started" marker for this build survives with no unity-running clear, and also
-         directly on any CATCHABLE loader failure while on iOS. It is a net, not the fix - owner
-         ruling 2026-09-24, item I. Same recorded gap as the pre-runtime door above: this template
-         has no page-side locale seam (runs before Unity's locale tables exist), so this copy is a
-         hardcoded en literal, stated here rather than invented. -->
-    <div id="eoa-ios-net" role="dialog" aria-modal="true" aria-label="Play on the app">
-      <div>Echoes of Elarion needs more memory than this browser allows on iPhone.<br />
-           Play on Solana Seeker or Android &mdash; get the app.</div>
-      <a class="eoa-ios-net-link"
-         href="solanadappstore://details?id=com.denellestudios.echoesofelarion">Open Solana dApp Store</a>
-      <a class="eoa-ios-net-link" href="https://echoes-of-elarion.vercel.app/"
-         target="_blank" rel="noopener">echoes-of-elarion.vercel.app</a>
-      <button id="eoa-ios-net-retry" type="button">Try again anyway</button>
     </div>
     <script>
       // --- WO-678: own the global JS error surface --------------------------------------
@@ -760,7 +722,6 @@
         }).then(function (unityInstance) {
           window.unityInstance = unityInstance; // SendMessage targets this
           piBootCrumb('unity-running');
-          if (piIosDevice) piIosNetClear(); // WO-2025 Lane I: this load reached the runtime, clear the net's marker
           console.info('[PiLifecycle] unity-running boot=' + bootId);
           // WO-1925 (2026-09-21): this line was localStorage + console ONLY, so it never reached
           // the trace sink and NO iPhone could ever prove a successful boot in ?view=traces - the
@@ -788,80 +749,9 @@
           // WO-1927: the ONE line this ticket adds inside WO-1926's catch. The loader has
           // failed, so the runtime's own feedback UI will never exist - promote the page door.
           piDoorPromote('loader-failed');
-          // WO-2025 Lane I: on iOS this is a CATCHABLE failure, so show the net immediately
-          // rather than waiting for a reload the player may never trigger.
-          if (piIosDevice) piShowIosNet('loader-failed err=' + ('' + message));
         });
       };
       var piBrowser = /PiBrowser/i.test(navigator.userAgent || '');
-
-      // ===================================================================================
-      // WO-2025 Lane I: iOS safety net (owner ruling 2026-09-24, item I).
-      // ===================================================================================
-      // The kill leaves nothing to react to IN THE SAME SESSION (see the HTML comment above),
-      // so the net works off a marker this code writes just before the heavy load starts and
-      // clears the instant unity-running fires. A recent, same-build marker with no clear means
-      // the PREVIOUS load in this tab died silently - checked once at boot, below.
-      // Detection is iOS-device, not iOS-Safari: Apple mandates every iOS browser embed WebKit
-      // (Chrome-on-iOS included, per the WO-2025 title), so there is no separate engine test.
-      // iPadOS 13+ spoofs a Mac desktop UA; maxTouchPoints>1 is the standard discriminator (a
-      // real Mac reports 0).
-      var PI_IOS_NET_KEY = 'eoa.ios.loadNet';
-      var PI_IOS_NET_FRESH_MS = 5 * 60 * 1000; // generous vs. reload latency, tight vs. a fresh session
-      function piIsIosDevice() {
-        try {
-          var ua = navigator.userAgent || '';
-          if (/iPhone|iPad|iPod/i.test(ua)) return true;
-          if (/Macintosh/i.test(ua) && navigator.maxTouchPoints > 1) return true; // iPadOS desktop-mode UA
-          return false;
-        } catch (e) { return false; }
-      }
-      var piIosDevice = piIsIosDevice();
-      function piIosNetWrite() {
-        try { window.localStorage.setItem(PI_IOS_NET_KEY, JSON.stringify({ buildId: piTraceBuild, at: Date.now() })); }
-        catch (e) { console.info('[PiLifecycle] ios-net marker write unavailable: ' + e); }
-      }
-      function piIosNetClear() {
-        try { window.localStorage.removeItem(PI_IOS_NET_KEY); }
-        catch (e) { console.info('[PiLifecycle] ios-net marker clear unavailable: ' + e); }
-      }
-      function piIosNetRead() {
-        try {
-          var raw = window.localStorage.getItem(PI_IOS_NET_KEY);
-          return raw ? JSON.parse(raw) : null;
-        } catch (e) {
-          console.info('[PiLifecycle] ios-net marker read unavailable: ' + e);
-          return null;
-        }
-      }
-      var piIosNetEl    = document.querySelector('#eoa-ios-net');
-      var piIosNetRetry = document.querySelector('#eoa-ios-net-retry');
-      var piIosNetShown = false;
-      function piShowIosNet(reason) {
-        try {
-          if (piIosNetShown || !piIosNetEl) return;
-          piIosNetShown = true;
-          var line = '[PiLifecycle] ios-net shown reason=' + reason + ' boot=' + bootId +
-            ' upMs=' + (Date.now() - piBootAt);
-          console.info(line);
-          piTraceEmit(line, true); // teardown-adjacent on the loader-failed path; harmless otherwise
-          var gate = document.querySelector('#pi-landscape-gate');
-          if (gate) gate.style.display = 'none';
-          piDoorHide();
-          piIosNetEl.style.display = 'flex';
-        } catch (e) { console.info('[PiLifecycle] ios-net show skipped: ' + e); }
-      }
-      if (piIosNetRetry) {
-        piIosNetRetry.addEventListener('click', function () {
-          console.info('[PiLifecycle] ios-net retry tapped boot=' + bootId);
-          piTraceEmit('[PiLifecycle] ios-net retry boot=' + bootId, false);
-          piIosNetClear();
-          piIosNetShown = false;
-          if (piIosNetEl) piIosNetEl.style.display = 'none';
-          piApplyOrientation();
-        });
-      }
-
       var unityStarted = false;
       var bootId = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
       var previousBoot = piReadBootCrumb();
@@ -1049,11 +939,6 @@
         piBootCrumb('unity-loading');
         // WO-1927: arm the stall watch HERE, not on the first progress callback - a loader that
         // 404s its dataUrl may never call progress at all, and that is the loudest stall there is.
-        // WO-2025 Lane I: the marker has to land BEFORE the heavy fetch/decode, which is the
-        // window the WebKit kill actually happens in - writing it any later would race the kill.
-        // It sits above the stall-watch arm because WO-1927 pins piDoorNoteProgress() as the
-        // statement immediately before the append.
-        if (piIosDevice) piIosNetWrite();
         piDoorNoteProgress();
         document.body.appendChild(script);
       }
@@ -1471,17 +1356,7 @@
       // client size during startup, so the box has to be right before that first read, not after.
       eoaApplyFit('boot');
 
-      // WO-2025 Lane I: the boot-time net check. A recent, same-build marker with no
-      // unity-running clear means the load THIS tab attempted last time died silently (the
-      // WebKit kill has no other tell - see the HTML comment above #eoa-ios-net). Only iOS
-      // reads the marker at all; every other platform falls straight to piApplyOrientation().
-      var piIosNetPrev = piIosDevice ? piIosNetRead() : null;
-      if (piIosDevice && piIosNetPrev && piIosNetPrev.buildId === piTraceBuild &&
-          (Date.now() - piIosNetPrev.at) < PI_IOS_NET_FRESH_MS) {
-        piShowIosNet('marker-recent age=' + (Date.now() - piIosNetPrev.at) + 'ms');
-      } else {
-        piApplyOrientation();
-      }
+      piApplyOrientation();
     </script>
   </body>
 </html>

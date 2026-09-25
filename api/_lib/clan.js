@@ -193,46 +193,6 @@ async function ensureRenameCreditsColumn(sql) {
     _renameCreditsEnsured = true;
 }
 
-// WO-2027. Memoised like _renameCreditsEnsured, for the same reason.
-let _cherryRoomColumnsEnsured = false;
-
-/**
- * WO-2027. Idempotent ADD COLUMN for clans.cherry_room_id + clan_members.cherry_synced_at.
- *
- * ⛔ WHY A LIVE ENSURE AND NOT ONLY THE MIGRATION: readMembership now SELECTs both columns,
- * and readMembership is the first statement of GET /api/clan/me — which also carries
- * `globalRoomId`, i.e. the GLOBAL chat room that works today. If this code deployed before
- * api/migrations/20260924_0042_clans_cherry_room_id.sql ran, every clan/me would 500 and
- * Global chat would die for every player over an ORDER-chat change. The ensure closes that
- * deploy-order window exactly as ensureRenameCreditsColumn does. The migration still ships
- * (it is the applyable record, and it adds the partial UNIQUE index this ensure leaves out
- * because building an index is not something a cold start should do).
- * One statement per call: the Neon HTTP driver sends one statement per call.
- *
- * ⛔ 2026-09-25 (migration 20260924_0043): cherry_room_id is TEXT, not UUID. Cherry's
- * app-created room ids are 20-char alphanumerics (proven: 'cOlSQdWaioo1l8xrmpjL', the room the
- * prod create made for 'Royal Command'). The third statement is 0043's guarded type change, run
- * live for the same deploy-order reason as the ADDs: code that ships before the migration must
- * not 22P02 on the store — the provisioning path deletes a room it cannot store.
- */
-async function ensureCherryRoomColumns(sql) {
-    if (_cherryRoomColumnsEnsured) return;
-    await sql`ALTER TABLE clans ADD COLUMN IF NOT EXISTS cherry_room_id TEXT NULL`;
-    await sql`ALTER TABLE clan_members ADD COLUMN IF NOT EXISTS cherry_synced_at TIMESTAMPTZ NULL`;
-    await sql`DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_schema = 'public' AND table_name = 'clans'
-          AND column_name = 'cherry_room_id' AND data_type = 'uuid'
-    ) THEN
-        ALTER TABLE clans ALTER COLUMN cherry_room_id TYPE TEXT USING cherry_room_id::text;
-    END IF;
-END
-$$`;
-    _cherryRoomColumnsEnsured = true;
-}
-
 /** True when a pack SKU itself is order_rename, or its contents.orderRename is > 0. */
 function skuGrantsOrderRenameCredit(sku, contents) {
     if (String(sku || '') === ORDER_RENAME_SKU) return true;
@@ -387,10 +347,8 @@ function identityForeignKeyViolation(err) {
  */
 async function readMembership(sql, wallet) {
     await ensureRenameCreditsColumn(sql);
-    await ensureCherryRoomColumns(sql);
     const rows = await sql`
         SELECT c.id AS clan_id, c.code, c.name, c.tag, c.join_policy, c.rename_credits, c.created_at,
-               c.cherry_room_id, m.cherry_synced_at,
                m.role, m.joined_at,
                (SELECT COUNT(*) FROM clan_members x WHERE x.clan_id = c.id)::int AS member_count
         FROM clan_members m
@@ -411,11 +369,6 @@ async function readMembership(sql, wallet) {
         role: r.role,
         joinedAt: r.joined_at,
         memberCount: Number(r.member_count),
-        // WO-2027. The CHERRY room for this Order, or null until the server has created it.
-        // ⛔ NEVER clanId: clans.id is minted by our Postgres and Cherry has never seen it.
-        orderRoomId: r.cherry_room_id != null ? String(r.cherry_room_id) : null,
-        // WO-2027. When this wallet was last confirmed a member of that Cherry room, or null.
-        cherrySyncedAt: r.cherry_synced_at != null ? r.cherry_synced_at : null,
     };
 }
 
@@ -595,8 +548,6 @@ async function renameClan(sql, callerWallet, rawName) {
         ok: true,
         name: rows[0].name,
         renameCredits: Number(rows[0].rename_credits) || 0,
-        // WO-2027: so the route can retitle the Cherry room (best-effort, after the write).
-        orderRoomId: caller.orderRoomId || null,
     };
 }
 
@@ -690,9 +641,6 @@ async function kickMember(sql, callerWallet, rawTarget) {
         wallet: String(rows[0].wallet),
         removedRole: rows[0].role,
         by: callerRole,
-        // WO-2027: read BEFORE the delete (readRoleContext), so the route can kick the same
-        // wallet out of the Cherry room. Null when the Order's room is not provisioned yet.
-        orderRoomId: ctx.caller.orderRoomId || null,
     };
 }
 
@@ -805,7 +753,7 @@ async function joinClan(sql, wallet, rawCode) {
     try {
         rows = await sql`
             WITH target AS (
-                SELECT id, code, name, tag, join_policy, created_at, cherry_room_id
+                SELECT id, code, name, tag, join_policy, created_at
                 FROM clans
                 WHERE code = ${code.value}
                 LIMIT 1
@@ -815,7 +763,7 @@ async function joinClan(sql, wallet, rawCode) {
                 RETURNING clan_id, role, joined_at
             )
             SELECT target.id, target.code, target.name, target.tag,
-                   target.join_policy, target.created_at, target.cherry_room_id,
+                   target.join_policy, target.created_at,
                    seated.role, seated.joined_at
             FROM target
             JOIN seated ON seated.clan_id = target.id
@@ -846,8 +794,6 @@ async function joinClan(sql, wallet, rawCode) {
         role: r.role,
         joinPolicy: r.join_policy,
         createdAt: r.created_at,
-        // WO-2027: the Order's Cherry room, so the route can invite the new member into it.
-        orderRoomId: r.cherry_room_id != null ? String(r.cherry_room_id) : null,
     };
 }
 
@@ -896,14 +842,7 @@ async function leaveClan(sql, wallet) {
         // Report it rather than claiming a removal that did not happen.
         return { ok: false, status: 409, code: ClanCode.LEADER_MUST_TRANSFER, detail: { raced: true } };
     }
-    // WO-2027: orderRoomId comes from the membership read made BEFORE the delete — after it
-    // the clans row may be gone, and the room id with it.
-    return {
-        ok: true,
-        clanId: existing.clanId,
-        clanRemoved: (Number(r.emptied_rows) || 0) > 0,
-        orderRoomId: existing.orderRoomId || null,
-    };
+    return { ok: true, clanId: existing.clanId, clanRemoved: (Number(r.emptied_rows) || 0) > 0 };
 }
 
 /**
@@ -996,9 +935,6 @@ async function leaveAsLeader(sql, wallet, existing) {
         clanDeleted: clanDeleted,
         newLeader: newLeader,
         successionFrom: r.successor_prior_role != null ? String(r.successor_prior_role) : null,
-        // WO-2027: read before the statement (see leaveClan). The room's OWNER is the studio
-        // steward, so succession needs no Cherry change — only the leaver is removed.
-        orderRoomId: existing && existing.orderRoomId ? existing.orderRoomId : null,
     };
 }
 
@@ -1255,8 +1191,6 @@ module.exports = {
     ORDER_RENAME_COST_SKR,
     ORDER_RENAME_SKU,
     ensureRenameCreditsColumn,
-    // ── WO-2027 — Cherry Order rooms ─────────────────────────────────────────
-    ensureCherryRoomColumns,
     skuGrantsOrderRenameCredit,
     renameClan,
     grantOrderRenameCredit,
