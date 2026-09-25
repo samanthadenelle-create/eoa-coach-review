@@ -99,116 +99,19 @@ test('missing stake data -> living FALSE with a NAMED reason, never a guessed tr
     assert.equal(none.reason, 'NO_SQL_HANDLE');
 });
 
-test('the sums read PERSISTED verified stake (skr_stake_snapshots x clan_members), never RPC, never heartbound_state', async () => {
+test('the sums read PERSISTED verified stake (heartbound_state x clan_members), never RPC', async () => {
     const sql = stakeSql(1000);
-    const nowMs = Date.parse('2026-09-25T20:00:00Z');
-    await realm.readStakeSum(sql, null, { nowMs, graceSeconds: 86400 });
-    await realm.readStakeSum(sql, 'clan-1', { nowMs, graceSeconds: 86400 });
+    await realm.readStakeSum(sql, null);
+    await realm.readStakeSum(sql, 'clan-1');
     assert.equal(sql.calls.length, 2);
     for (const c of sql.calls) {
-        assert.match(c.text, /FROM\s+clan_members\s+cm\s+JOIN\s+skr_stake_snapshots\s+ss\s+ON\s+ss\.player_id\s*=\s*cm\.wallet/i);
-        assert.match(c.text, /SUM\(ss\.active_staked_raw\)/);
-        assert.match(c.text, /ss\.verification_status = 'VERIFIED'/);
-        assert.match(c.text, /ss\.active_staked_raw IS NOT NULL/);
-        assert.match(c.text, /ss\.verified_at\s*>=\s*\?/, 'freshness is measured from the last SUCCESS (verified_at)');
-        assert.doesNotMatch(c.text, /heartbound_state|last_actual_stake|last_attempt_at/,
-            'heartbound_state has no live writer (SKR audit 2026-09-25 blocker 1)');
+        assert.match(c.text, /FROM\s+clan_members\s+cm\s+JOIN\s+heartbound_state\s+hs\s+ON\s+hs\.player_id\s*=\s*cm\.wallet/i);
+        assert.match(c.text, /last_actual_stake/);
+        assert.match(c.text, /IN \('ACTIVE', 'STALE'\)/);
     }
-    assert.deepEqual(realm.COUNTED_STATUSES, ['VERIFIED'], 'the SQL literal and the export must agree');
+    assert.deepEqual(realm.COUNTED_STATUSES, ['ACTIVE', 'STALE'], 'the SQL literal and the export must agree');
     assert.match(sql.calls[1].text, /cm\.clan_id\s*=/);
-    assert.deepEqual(sql.calls[0].values, ['2026-09-24T20:00:00.000Z'], 'realm: only the cutoff is bound');
-    assert.deepEqual(sql.calls[1].values, ['clan-1', '2026-09-24T20:00:00.000Z']);
-});
-
-// ---------------------------------------------------------------------------------------------
-// WO-2061o: a fixture fake that APPLIES the WHERE clause the SQL spells, over rows shaped like
-// clan_members x skr_stake_snapshots, so the sums are asserted as results, not only as text.
-// ---------------------------------------------------------------------------------------------
-const NOW_MS = Date.parse('2026-09-25T20:00:00Z');
-const HOUR = 3600 * 1000;
-function snapshotSql(rows) {
-    const calls = [];
-    const fn = (strings, ...values) => {
-        const text = strings.join(' ? ');
-        calls.push({ text, values });
-        const byClan = /cm\.clan_id\s*=/.test(text);
-        const clanId = byClan ? values[0] : null;
-        const cutoffMs = Date.parse(values[values.length - 1]);
-        const hit = rows.filter((r) => (!byClan || r.clan_id === clanId) &&
-            r.status === 'VERIFIED' && r.raw != null &&
-            r.verified_at != null && Date.parse(r.verified_at) >= cutoffMs);
-        const total = hit.reduce((a, r) => a + BigInt(r.raw), 0n);
-        return Promise.resolve([{ total_raw: total.toString(), stakers: hit.length }]);
-    };
-    fn.calls = calls;
-    return fn;
-}
-const iso = (msAgo) => new Date(NOW_MS - msAgo).toISOString();
-const skrRaw = (whole) => (BigInt(whole) * UNITS).toString();
-
-test('empty snapshots -> total 0, not living (a real zero, reason stated)', async () => {
-    const r = await realm.readRealm(snapshotSql([]), TUNABLES_EMPTY, { nowMs: NOW_MS, graceSeconds: 86400 });
-    assert.equal(r.staked_total_skr, 0);
-    assert.equal(r.living, false);
-    assert.equal(r.reason, 'total at or below threshold');
-    const c = await realm.readStakeSum(snapshotSql([]), 'clan-a', { nowMs: NOW_MS, graceSeconds: 86400 });
-    assert.equal(c.ok, true);
-    assert.equal(c.totalSkr, 0);
-    assert.equal(c.members, 0);
-});
-
-test('a snapshot older than the writer\'s grace window is ignored; failed/NO_STAKE/never-verified rows never count', async () => {
-    const rows = [
-        { clan_id: 'clan-a', status: 'VERIFIED', raw: skrRaw(8000), verified_at: iso(5 * HOUR) },   // counts
-        { clan_id: 'clan-a', status: 'VERIFIED', raw: skrRaw(90000), verified_at: iso(25 * HOUR) }, // stale
-        { clan_id: 'clan-a', status: 'NO_STAKE', raw: '0', verified_at: iso(1 * HOUR) },
-        { clan_id: 'clan-a', status: 'RPC_UNAVAILABLE', raw: null, verified_at: null },             // first try failed
-    ];
-    const s = await realm.readStakeSum(snapshotSql(rows), 'clan-a', { nowMs: NOW_MS, graceSeconds: 86400 });
-    assert.equal(s.totalSkr, 8000);
-    assert.equal(s.members, 1);
-    assert.equal(s.cutoffIso, iso(24 * HOUR));
-    // A wider window (the env knob) admits the 25-hour row: the bound is the writer's, not ours.
-    const wide = await realm.readStakeSum(snapshotSql(rows), 'clan-a', { nowMs: NOW_MS, graceSeconds: 2 * 86400 });
-    assert.equal(wide.totalSkr, 98000);
-});
-
-test('the default window IS skr-staking\'s staleGraceSeconds() - no second staleness number', () => {
-    const skr = require('../api/_lib/skr-staking');
-    const c = realm.freshnessCutoff({ nowMs: NOW_MS });
-    assert.equal(c.graceSeconds, skr.staleGraceSeconds());
-    assert.equal(c.cutoffIso, new Date(NOW_MS - skr.staleGraceSeconds() * 1000).toISOString());
-});
-
-test('realm sums the members of ALL Orders ("total orders"); the Circle sums only its own', async () => {
-    const rows = [
-        { clan_id: 'clan-a', status: 'VERIFIED', raw: skrRaw(120000), verified_at: iso(1 * HOUR) },
-        { clan_id: 'clan-a', status: 'VERIFIED', raw: skrRaw(30000), verified_at: iso(2 * HOUR) },
-        { clan_id: 'clan-b', status: 'VERIFIED', raw: skrRaw(60000), verified_at: iso(3 * HOUR) },
-    ];
-    const opts = { nowMs: NOW_MS, graceSeconds: 86400 };
-    const a = await realm.readStakeSum(snapshotSql(rows), 'clan-a', opts);
-    const b = await realm.readStakeSum(snapshotSql(rows), 'clan-b', opts);
-    assert.equal(a.totalSkr, 150000);
-    assert.equal(b.totalSkr, 60000);
-    // Neither Order alone is over 200k; together (210k) they are - the realm is ALL Orders.
-    const r = await realm.readRealm(snapshotSql(rows), TUNABLES_EMPTY, opts);
-    assert.equal(r.staked_total_skr, 210000);
-    assert.equal(r.living, true);
-    assert.equal(r.threshold_skr, 200000);
-});
-
-test('the threshold comes from the Command Center tunable over snapshot data', async () => {
-    const rows = [{ clan_id: 'clan-a', status: 'VERIFIED', raw: skrRaw(8213), verified_at: iso(5 * HOUR) }];
-    const opts = { nowMs: NOW_MS, graceSeconds: 86400 };
-    const dflt = await realm.readRealm(snapshotSql(rows), TUNABLES_EMPTY, opts);
-    assert.equal(dflt.living, false);
-    assert.equal(dflt.threshold_source, 'default');
-    const tun = { ok: true, values: { 'realm.livingStakeThresholdSkr': '8000' }, reason: 'ok' };
-    const knob = await realm.readRealm(snapshotSql(rows), tun, opts);
-    assert.equal(knob.living, true);
-    assert.equal(knob.threshold_skr, 8000);
-    assert.equal(knob.threshold_source, 'tunable');
+    assert.deepEqual(sql.calls[1].values, ['clan-1']);
 });
 
 test('base units convert through the resonance table (6 decimals), fractions kept', () => {

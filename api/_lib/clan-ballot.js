@@ -1341,6 +1341,14 @@ function toWire(state) {
         result: null,
         perk: active ? perkWire(active) : null,
         perks: active ? [perkWire(active)] : [],
+        // WO-2061h - owner 2026-09-25: "We need the leaves to be added to tree on any votes" +
+        // "The higher the stake the more alive it displays" / "For all the circle". The whole
+        // Circle's verified stake (null when the route did not / could not read it) and the
+        // canopy fullness the SERVER derives from it: 0 with no resolved vote (no active banner),
+        // else api/_lib/realm-config.json circleCanopy. The client is told a float, never a ladder.
+        circle_staked_skr: Number.isFinite(s.circleStakedSkr) ? Math.floor(s.circleStakedSkr) : null,
+        canopy_density01: require('./realm-stake').circleCanopyDensity(
+            !!active, Number.isFinite(s.circleStakedSkr) ? s.circleStakedSkr : NaN),
     };
 
     if (ballot) {

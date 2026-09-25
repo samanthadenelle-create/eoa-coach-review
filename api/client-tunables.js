@@ -43,12 +43,23 @@
 //   client sees a 404, drops its cache, and runs today's behaviour.
 //
 //   GET /api/client-tunables
-//   Reply: { ok, version, readOk, reason, values: { "<key>": "<value>" } }
+//   Reply: { ok, version, readOk, reason, values: { "<key>": "<value>" },
+//            realm: { living, staked_total_skr, threshold_skr, threshold_source,
+//                     canopy_density01, reason } }
+//
+// ⭐ WO-2061h - THE `realm` BLOCK IS WORLD STATE, NOT A KNOB OVERRIDE, and it rides HERE on
+// purpose: this is the ONE route every client reads before sign-in and re-reads every 30 s,
+// which is exactly the reach the owner's ruling needs ("should persist to all players showing
+// it's living" - players with no Order included). It sits BESIDE `values`, never inside it, so
+// the "overrides only" contract of `values` above is untouched. The server computes `living`
+// (api/_lib/realm-stake.js) from the Command Center threshold; the client never compares
+// numbers. It fails to living:false with a named reason, never to a guessed true.
 // =============================================================================
 
 const { neon } = require('@neondatabase/serverless');
 const { applyCors } = require('./_lib/http');
 const { readTunables, TUNABLE_KEYS } = require('./_lib/tunables');
+const realmStake = require('./_lib/realm-stake');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ⛔ SERVER-ONLY KEYS NEVER LEAVE THE SERVER (WO-1799).
@@ -99,12 +110,22 @@ module.exports = async (req, res) => {
     // readTunables never throws and never rejects; ok=false is the fail-to-default branch.
     const state = await readTunables(sql);
 
+    // WO-2061h: never throws (readRealm fails to living:false with a named reason).
+    let realm;
+    try { realm = await realmStake.readRealm(sql, state); }
+    catch (err) {
+        realm = { living: false, staked_total_skr: null, threshold_skr: realmStake.DEFAULT_THRESHOLD_SKR,
+                  threshold_source: 'default', canopy_density01: 0,
+                  reason: 'REALM_READ_THREW: ' + ((err && err.message) || String(err)) };
+    }
+
     return res.status(200).json({
         ok: true,
         version: PAYLOAD_VERSION,
         readOk: state.ok === true,
         reason: state.reason,
         values: state.ok ? publicValues(state.values) : {},
+        realm: realm,
     });
 };
 

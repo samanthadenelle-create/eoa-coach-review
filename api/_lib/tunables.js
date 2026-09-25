@@ -473,6 +473,14 @@ const TUNABLE_KEYS = [
 const SERVER_ONLY_TUNABLE_KEYS = [
     { key: 'store.saleBps', kind: 'int', serverOnly: true },
     { key: 'store.saleEndsAtEpochMin', kind: 'int', serverOnly: true },
+    // WO-2061h - owner 2026-09-25, verbatim: "The total should be tunable from the command
+    // center". The REALM living threshold in whole SKR: when the verified stake summed across
+    // every Order's members is OVER this, every player's Heart tree shows the living canopy.
+    // Read by api/_lib/realm-stake.js ON THE SERVER (the client is told `living`, never the
+    // rule); default 200000 lives in api/_lib/realm-config.json. It HAS a Command Center card
+    // (a serverOnly PRESENTATION row in tunable-manifest.js) - unlike the sale keys it is not
+    // money, it is a world rule the owner tunes.
+    { key: 'realm.livingStakeThresholdSkr', kind: 'int', serverOnly: true },
 ];
 
 for (const spec of SERVER_ONLY_TUNABLE_KEYS) {
