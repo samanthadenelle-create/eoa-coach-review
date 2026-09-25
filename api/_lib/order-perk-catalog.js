@@ -21,13 +21,8 @@
 // they are comments, and no code path can put them on the wire.
 //
 // `treeMotifId` is the WO-1921 visual key (ruling 2: gameplay identity and visual identity
-// decoupled). WO-2061 (2026-09-25, lead ruling for the Oct 7 SKR CLOCK IN pitch path): each
-// banner now names ITS OWN motif - motif_lantern / motif_tide / motif_gale, matching the three
-// emblem SHAPES - so "the epic resolved" changes the Heart tree differently for each winner.
-// Until then all three read motif_dormant and the tree could not tell the winners apart.
-// DORMANT_MOTIF_ID stays the fallback for an unknown / unauthored perk (motifFor in
-// api/_lib/clan-ballot.js), never blank. The client draws each motif with a distinct SHAPE,
-// PLACE and RHYTHM (Assets/_Modules/Village/Heart/HeartTreeLook.cs), not by hue alone.
+// decoupled). No motif has been authored for the banners, so each one names the dormant
+// motif explicitly — an unmapped perk must read dormant, never blank the Heart tree.
 //
 // Files under api/_lib/ are NOT routed by Vercel (leading underscore). CommonJS.
 // =============================================================================
@@ -45,13 +40,13 @@ const DORMANT_MOTIF_ID = 'motif_dormant';
 const ORDER_PERKS = Object.freeze([
     Object.freeze({ optionId: 'banner_lantern', perkId: 'banner_lantern',
                     nameKey: 'order.perk.banner_lantern.name', emblem: 'lantern',
-                    treeMotifId: 'motif_lantern' }),
+                    treeMotifId: DORMANT_MOTIF_ID }),
     Object.freeze({ optionId: 'banner_tide', perkId: 'banner_tide',
                     nameKey: 'order.perk.banner_tide.name', emblem: 'wave',
-                    treeMotifId: 'motif_tide' }),
+                    treeMotifId: DORMANT_MOTIF_ID }),
     Object.freeze({ optionId: 'banner_gale', perkId: 'banner_gale',
                     nameKey: 'order.perk.banner_gale.name', emblem: 'gale',
-                    treeMotifId: 'motif_gale' }),
+                    treeMotifId: DORMANT_MOTIF_ID }),
 ]);
 
 /** The ids, in catalog order — the slate every automatic ballot opens with. */
