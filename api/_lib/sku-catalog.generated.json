@@ -127,7 +127,7 @@
       "compareTo": "folks-thanks",
       "tier": 4,
       "storeVisible": true,
-      "name": "Resource Pack I",
+      "name": "Patron of Elarion",
       "tagline": "A patron's gift to Elarion - a meaningful headstart for the Heart.",
       "theme": "Heavyweight cosmetic suite + meaningful economy headstart.",
       "pricing": {
@@ -163,7 +163,7 @@
       "compareTo": "patron-of-elarion",
       "tier": 5,
       "storeVisible": true,
-      "name": "Resource Pack II",
+      "name": "Founder's Vow",
       "tagline": "A thank-you to early believers - a vow kept, not a flex.",
       "theme": "One-time only, available v1 launch only - special founder cosmetic + permanent in-village banner.",
       "founderOnly": true,
@@ -348,7 +348,8 @@
           }
         ]
       },
-      "storeVisible": true,
+      "storeVisible": false,
+      "_hiddenReason": "WO-1968 (owner shelf lock 2026-09-22): browse OFF - the owner named keepers-satchel the preferred $4.99 hero. The row and its art stay loadable so an existing owner's entitlement still resolves via PackCatalog.Find. keepers-satchel itself is still hidden pending its creative copy pass (see its _shelfNote), so no $4.99 pack is browsable until it is unhidden.",
       "_shelfNote": "WO-1118: contents rewritten to the $4.99 resource-forward basket (4000 wood / 2000 iron / 400 crystals / 1500 stone + the 2x lantern, which is the ONE convenience kind with a live redeemer). instant-build + instant-repair were stripped: nothing in the build spends them (see _schemaNotes.convenienceRedeemers). OWNER TODO: the 'theme' above still advertises 'instant-build/repair + one welcome cosmetic' - reword when those redeemers ship."
     },
     {
