@@ -207,12 +207,29 @@ let _cherryRoomColumnsEnsured = false;
  * deploy-order window exactly as ensureRenameCreditsColumn does. The migration still ships
  * (it is the applyable record, and it adds the partial UNIQUE index this ensure leaves out
  * because building an index is not something a cold start should do).
- * Two calls: the Neon HTTP driver sends one statement per call.
+ * One statement per call: the Neon HTTP driver sends one statement per call.
+ *
+ * ⛔ 2026-09-25 (migration 20260924_0043): cherry_room_id is TEXT, not UUID. Cherry's
+ * app-created room ids are 20-char alphanumerics (proven: 'cOlSQdWaioo1l8xrmpjL', the room the
+ * prod create made for 'Royal Command'). The third statement is 0043's guarded type change, run
+ * live for the same deploy-order reason as the ADDs: code that ships before the migration must
+ * not 22P02 on the store — the provisioning path deletes a room it cannot store.
  */
 async function ensureCherryRoomColumns(sql) {
     if (_cherryRoomColumnsEnsured) return;
-    await sql`ALTER TABLE clans ADD COLUMN IF NOT EXISTS cherry_room_id UUID NULL`;
+    await sql`ALTER TABLE clans ADD COLUMN IF NOT EXISTS cherry_room_id TEXT NULL`;
     await sql`ALTER TABLE clan_members ADD COLUMN IF NOT EXISTS cherry_synced_at TIMESTAMPTZ NULL`;
+    await sql`DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'clans'
+          AND column_name = 'cherry_room_id' AND data_type = 'uuid'
+    ) THEN
+        ALTER TABLE clans ALTER COLUMN cherry_room_id TYPE TEXT USING cherry_room_id::text;
+    END IF;
+END
+$$`;
     _cherryRoomColumnsEnsured = true;
 }
 
