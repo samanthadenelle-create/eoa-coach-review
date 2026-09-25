@@ -406,6 +406,32 @@ const TUNABLE_KEYS = [
     { key: 'realm.vfx.atfootprintoftree_Impact', kind: 'int' },
     { key: 'realm.vfx.EliteDeath_Impact', kind: 'int' },
     { key: 'realm.vfx.BossDeath_Impact', kind: 'int' },
+    // WO-2061q - THE HEART TREE'S LOOK KNOBS. Owner 2026-09-25, verbatim: "Allow the two of
+    // those to come from the command center so that I can make this adjustments dynamically
+    // and not need a build" / "There should be a tunable section for this where we can tune
+    // them". Eight CLIENT knobs read by DeNelle.Village.HeartTreeTunables and re-applied to
+    // the LIVE tree on the next accepted payload (no restart). The rail carries no floats,
+    // so metres and the emissive multiplier ride x100 and the alpha / emission ride as
+    // percents - the encoding is in the key NAME (the dungeon.lanternDrainPerSecX100 shape).
+    // Every default is the value the WO-2061 capture proved (n/p/q passes):
+    //   heart.softFadeNearX100   - 15  = 0.15 m soft-particle near fade of the aura band.
+    //   heart.softFadeFarX100    - 80  = 0.8 m far fade. 0 = soft fade OFF.
+    //   heart.cameraFadeNearX100 - 100 = 1 m camera near fade.
+    //   heart.cameraFadeFarX100  - 300 = 3 m camera far fade. 0 = camera fade OFF.
+    //   heart.fireflyEmissiveX100 - 60 = _EmissiveAmount 0.60 on the fireflies (ships 4 = x21).
+    //   heart.bandAlphaPct       - 70  = the band discs' alpha.
+    //   heart.bandSize           - 44  = the band's particle-size multiplier.
+    //   heart.bandEmissionPct    - 100 = the per-motif emission extremes as authored.
+    // They sit in the Command Center's "Heart Tree" section (tunable-manifest.js GROUPS)
+    // beside the serverOnly realm threshold. Clamped at the consumer.
+    { key: 'heart.softFadeNearX100', kind: 'int' },
+    { key: 'heart.softFadeFarX100', kind: 'int' },
+    { key: 'heart.cameraFadeNearX100', kind: 'int' },
+    { key: 'heart.cameraFadeFarX100', kind: 'int' },
+    { key: 'heart.fireflyEmissiveX100', kind: 'int' },
+    { key: 'heart.bandAlphaPct', kind: 'int' },
+    { key: 'heart.bandSize', kind: 'int' },
+    { key: 'heart.bandEmissionPct', kind: 'int' },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
