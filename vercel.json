@@ -18,6 +18,7 @@
     { "source": "/privacy", "destination": "/privacy.html" },
     { "source": "/terms", "destination": "/terms.html" },
     { "source": "/.well-known/assetlinks.json", "destination": "/api/assetlinks" },
+    { "source": "/app-ads.txt", "destination": "/api/app-ads-txt" },
     { "source": "/icon.png", "destination": "/api/icon" }
   ],
   "headers": [
