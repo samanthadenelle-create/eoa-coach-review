@@ -439,6 +439,10 @@ const TUNABLE_KEYS = [
     { key: 'heart.bandSize', kind: 'int' },
     { key: 'heart.bandEmissionPct', kind: 'int' },
     { key: 'heart.bandGlowPct', kind: 'int' },
+    // WO-2069 arena balance — defaults 100 = no change (RemoteTunables).
+    { key: 'arena.garrisonHpPct', kind: 'int' },
+    { key: 'arena.garrisonDamagePct', kind: 'int' },
+    { key: 'arena.bossHpPct', kind: 'int' },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
