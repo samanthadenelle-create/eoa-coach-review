@@ -443,6 +443,8 @@ const TUNABLE_KEYS = [
     { key: 'arena.garrisonHpPct', kind: 'int' },
     { key: 'arena.garrisonDamagePct', kind: 'int' },
     { key: 'arena.bossHpPct', kind: 'int' },
+    // WO-2070 arena clock — default 180 (ArenaTwoBaseOutcome.LimitSeconds).
+    { key: 'arena.clockSeconds', kind: 'int' },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
