@@ -439,6 +439,19 @@ const TUNABLE_KEYS = [
     { key: 'heart.bandSize', kind: 'int' },
     { key: 'heart.bandEmissionPct', kind: 'int' },
     { key: 'heart.bandGlowPct', kind: 'int' },
+    // WO-2146 - THE HEART TREE GROWS (owner 2026-09-28: "The more online and more staked the
+    // larger the tree grows"). PERCENT the tree grows OVER the static resize shipped the same
+    // night (the floor). Every default is 0 = no growth, so an empty table is that static tree.
+    // Read by DeNelle.Village.HeartTreeTunables (clamps 0..200 each) -> HeartTreeLook.GrowthScale
+    // (total capped at +200%), per player (the player's own Circle only), live on the next payload.
+    //   heart.growthJoinedPct     - in an Order, no banner flying (the Joined state).
+    //   heart.growthForeshadowPct - the epoch's last 15%, ballot unresolved (Foreshadow).
+    //   heart.growthMotifPct      - the Circle's banner flies (Motif).
+    //   heart.growthStakePct      - at a FULL Circle canopy (canopy_density01 = 1), linear below it.
+    { key: 'heart.growthJoinedPct', kind: 'int' },
+    { key: 'heart.growthForeshadowPct', kind: 'int' },
+    { key: 'heart.growthMotifPct', kind: 'int' },
+    { key: 'heart.growthStakePct', kind: 'int' },
     // WO-2069 arena balance — defaults 100 = no change (RemoteTunables).
     { key: 'arena.garrisonHpPct', kind: 'int' },
     { key: 'arena.garrisonDamagePct', kind: 'int' },
