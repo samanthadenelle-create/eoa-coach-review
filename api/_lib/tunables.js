@@ -452,6 +452,13 @@ const TUNABLE_KEYS = [
     { key: 'heart.growthForeshadowPct', kind: 'int' },
     { key: 'heart.growthMotifPct', kind: 'int' },
     { key: 'heart.growthStakePct', kind: 'int' },
+    // WO-2147 - the tree's BASE size, the floor the growth rows scale on (owner 2026-09-28: "add these
+    // to the command center, so I can trim from there"). The rail carries no floats, so:
+    //   heart.baseHeightX100     - 467 = 4.67 m (HeartTreeArt.asset TargetHeightMeters).
+    //   heart.baseWidthMultX1000 - 625 = x0.625 (HeartTreeArt.asset WidthMultiplier; x100 cannot carry it).
+    // No row = the asset's values exactly. Read once at seat time, so a change lands on the next reload.
+    { key: 'heart.baseHeightX100', kind: 'int' },
+    { key: 'heart.baseWidthMultX1000', kind: 'int' },
     // WO-2069 arena balance — defaults 100 = no change (RemoteTunables).
     { key: 'arena.garrisonHpPct', kind: 'int' },
     { key: 'arena.garrisonDamagePct', kind: 'int' },
