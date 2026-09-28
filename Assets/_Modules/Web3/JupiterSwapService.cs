@@ -781,7 +781,28 @@ namespace DeNelle.Web3
                     FlowTrace.Warn("Swap", "TopUpSkrAsync: no token covers minimumSkr — refusing before any sign request. " +
                                            SwapFundingSelector.ShortfallSummary(decision.Considered));
                     TrackFundingDecision(minimumSkr, balances, decision, "refused", null, null);
-                    Guard.Try("Swap", "show swap funding refusal", () => SwapFundingPickerModal.ShowRefusal(decision.Considered));
+                    if (!string.IsNullOrEmpty(destinationTokenAccount))
+                    {
+                        // WO-2159 (owner 2026-09-28: "Short wallet gets the cheapest affordable pack,
+                        // not a refusal"): on the swap-as-payment rail - the store's purchase - the
+                        // refusal becomes an OFFER of the dearest shelf pack these same balances can
+                        // cover, or the refusal plus the exact shortfall when nothing fits. It still
+                        // returns Refused below: nothing is signed here, the store records
+                        // checkout_failed provider-refused for the ORIGINAL pack exactly as before, and
+                        // accepting the offer starts a NEW checkout with a NEW quote.
+                        // The top-up path (destination null - TopUpSkrAsync, the AutoPilot probe) keeps
+                        // the plain refusal: it has no pack and no shelf to downgrade to.
+                        FlowTrace.Step("Swap", "TopUpSkrAsync refusal arm: swap-as-payment - offering a downgrade " +
+                                               "(or the exact shortfall) instead of a bare refusal (WO-2159).");
+                        Guard.Try("Swap", "show swap downgrade offer or refusal", () =>
+                        {
+                            SwapFundingPickerModal.ShowDowngradeOrRefusal(decision.Considered, minimumSkr, balances.skr);
+                        });
+                    }
+                    else
+                    {
+                        Guard.Try("Swap", "show swap funding refusal", () => SwapFundingPickerModal.ShowRefusal(decision.Considered));
+                    }
                     return SwapPaymentOutcome.Refused("no token covers the amount");
             }
 
