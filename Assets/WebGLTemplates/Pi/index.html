@@ -845,6 +845,26 @@
         });
       };
       var piBrowser = /PiBrowser/i.test(navigator.userAgent || '');
+      // WO-2173: "is this a phone/tablet touch browser?" - the orientation decision's second host
+      // fact. Measured cause (owner iPhone Safari, wt-pi1d84204425, 2026-09-29): inner=440x758
+      // orient=portrait-primary and NO [PiOrientation] line, because only Pi Browser was ever
+      // routed to the rotated surface / gate. REUSES wallet-handoff.js's isMobileBrowser() (loaded
+      // synchronously above; it already covers the iPadOS desktop-UA case) - never a second UA
+      // table. The coarse-pointer + touch-points probe is ONLY the fallback for a page where that
+      // file failed to load; it is not OR-ed in, because a Windows touch laptop can satisfy it and
+      // desktop browsers must stay on the plain path.
+      function piIsMobileTouchBrowser() {
+        try {
+          if (window.eoaWalletHandoff && typeof window.eoaWalletHandoff.isMobileBrowser === 'function')
+            return !!window.eoaWalletHandoff.isMobileBrowser();
+          var coarse = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+          return coarse && (navigator.maxTouchPoints || 0) > 0;
+        } catch (e) {
+          console.info('[PiOrientation] mobile detection unavailable (treating as desktop): ' + e);
+          return false;
+        }
+      }
+      var piMobileBrowser = piIsMobileTouchBrowser();
 
       // ===================================================================================
       // WO-2025 Lane I: iOS safety net (owner ruling 2026-09-24, item I).
@@ -1140,6 +1160,7 @@
       // a secondary "continue anyway" control appears and boots the game as-is.
       // WO-1312: the gate is now only reachable on the FALLBACK path (a browser that cannot
       // synthesize touch events, so the rotated surface would have broken input). It stays.
+      // WO-2173: that fallback now covers any portrait mobile browser, not only Pi Browser.
       var PI_GATE_ESCAPE_MS = 9000;
       var piGateEscapeTimer = null;
 
@@ -1191,6 +1212,8 @@
       // screen.orientation.lock('landscape') is REFUSED there and no web API can force the host
       // activity to rotate (requestLandscape below already caught and logged that). So we stop
       // asking the player to solve a page problem, and render the game rotated ourselves.
+      // WO-2173: the same surface now serves ANY portrait mobile browser (iPhone Safari with
+      // rotation lock on was the measured case) - see piOrientationDecide below.
       //
       // THE TRAP: Unity WebGL maps a pointer into canvas space from canvas.getBoundingClientRect()
       // plus a linear scale. getBoundingClientRect() returns the AXIS-ALIGNED BOUNDING BOX of a
@@ -1287,6 +1310,10 @@
         // tap on the door (or on its text field) would be eaten and the door would be dead on
         // exactly the rotated Pi surface where a boot failure is most likely.
         if (piDoorEl && e.target && piDoorEl.contains(e.target)) return;
+        // WO-2173: and for the iOS safety net. The rotated surface used to be Pi-only (Android),
+        // so the net (iOS-only) could never sit over it; now an iPhone portrait boot can rotate,
+        // and a loader-failed there shows the net over a live shim that would eat its taps.
+        if (piIosNetEl && e.target && piIosNetEl.contains(e.target)) return;
         var synth = null;
         try {
           if (e.touches) {
@@ -1385,7 +1412,9 @@
 
       async function requestLandscape() {
         // Legacy path only (see piApplyOrientation): reachable when the browser cannot
-        // synthesize touch events, so the rotated surface is unsafe to use.
+        // synthesize touch events, so the rotated surface is unsafe to use. WO-2173: that is now
+        // any portrait mobile browser (Pi Browser or not), so the status text names no host.
+        // English by design: this page runs before the Unity locale seam exists.
         var status = document.querySelector('#pi-landscape-status');
         try {
           if (!document.fullscreenElement && document.documentElement.requestFullscreen)
@@ -1394,7 +1423,7 @@
             await screen.orientation.lock('landscape');
         } catch (e) {
           console.warn('[PiOrientation] landscape request rejected: ' + e);
-          status.textContent = 'Pi Browser refused rotation. Enable Auto-rotate, rotate the device, then tap again.';
+          status.textContent = 'Your browser refused rotation. Turn off rotation lock, rotate the device, then tap again.';
         }
         piApplyOrientation();
       }
@@ -1405,22 +1434,55 @@
         startUnityOnce();
       });
 
+      // ---- piOrientationDecide BEGIN (WO-2173: pure, macro-free; test/webgl-orientation-decision.test.js executes this slice) ----
+      // The ONE orientation rule. Pure: no DOM, no UA, no globals, so the node suite runs the
+      // shipped text rather than a copy of it.
+      //   host              'pi' | 'mobile' | 'desktop'
+      //   landscape         the viewport is at least as wide as it is tall
+      //   rotationAvailable the input shim can synthesize touch events (WO-1312)
+      // Returns 'rotate' (WO-1312 rotated surface), 'gate' (landscape gate + escape hatch) or
+      // 'plain' (boot as-is). Desktop is always plain; a landscape viewport is always plain; a
+      // portrait phone/tablet - Pi Browser OR any other mobile browser - rotates when the shim can
+      // run and is gated when it cannot. Before WO-2173 only host 'pi' could leave 'plain'.
+      function piOrientationDecide(host, landscape, rotationAvailable) {
+        if (host !== 'pi' && host !== 'mobile') return 'plain';
+        if (landscape) return 'plain';
+        if (!rotationAvailable) return 'gate';
+        return 'rotate';
+      }
+      // ---- piOrientationDecide END ----
+
       // The single orientation decision, evaluated at boot and on every orientation/size event.
+      var piOrientLastStamp = '';
+      var piOrientLogged = 0;
       function piApplyOrientation() {
-        if (!piBrowser) {                       // non-Pi browsers: unchanged, straight to Unity
-          if (!unityStarted) startUnityOnce();
-          return;
-        }
-        if (isLandscape()) {                    // a genuinely landscape viewport takes the old path
+        var host = piBrowser ? 'pi' : (piMobileBrowser ? 'mobile' : 'desktop');
+        var decision = piOrientationDecide(host, isLandscape(), piRotationAvailable);
+        // One line per DISTINCT decision (boot, then each orientation flip that moves it). Keyed on
+        // decision|host only - NOT the size - because resize fires on every URL-bar show/hide and a
+        // size-keyed stamp would spend the emit cap on identical decisions and evict the boot window
+        // from the trace (CLAUDE.md 12, same guard as [EoaFit]). The size still rides in the line.
+        try {
+          var inner = window.innerWidth + 'x' + window.innerHeight;
+          var stamp = decision + '|' + host;
+          if (stamp !== piOrientLastStamp) {
+            piOrientLastStamp = stamp;
+            var line = '[PiOrientation] decision=' + decision + ' host=' + host + ' inner=' + inner +
+              ' rotAvail=' + piRotationAvailable + ' started=' + unityStarted + ' boot=' + bootId;
+            console.info(line);
+            if (piOrientLogged < 8) { piOrientLogged++; piTraceEmit(line, false); }
+          }
+        } catch (e) { console.info('[PiOrientation] decision log skipped: ' + e); }
+        if (decision === 'plain') {             // desktop, or a genuinely landscape viewport
           piDeactivateRotation();
           if (!unityStarted) startUnityOnce();
           return;
         }
-        if (!piRotationAvailable) {             // fallback: no working shim, so do NOT rotate
+        if (decision === 'gate') {              // fallback: no working shim, so do NOT rotate
           if (!unityStarted) showLandscapeGate();
           return;
         }
-        piActivateRotation();
+        piActivateRotation();                   // 'rotate': WO-1312 surface + input shim, together
         if (!unityStarted) startUnityOnce();
       }
       function recheckLandscape() { piApplyOrientation(); }
@@ -1505,7 +1567,7 @@
       // zero-size element's padding and we read them back.
       //
       // ROTATION: gated on STATE, never on the UA. piActivateRotation() owns the container box on
-      // the Pi Browser rotated surface (it sets width/height in px itself, and the input shim's
+      // the rotated surface (Pi Browser or, since WO-2173, any portrait mobile browser; it sets width/height in px itself, and the input shim's
       // coordinate maths is derived from exactly those numbers); a second writer there would break
       // input invisibly. `piRotationActive` is that state.
       var EOA_FIT_MIN_PX = 64;          // never hand the runtime a degenerate box
