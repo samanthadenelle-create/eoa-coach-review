@@ -469,6 +469,14 @@ const TUNABLE_KEYS = [
     { key: 'arena.rangedTroopRangePct', kind: 'int' },
     // WO-2070 arena clock — default 180 (ArenaTwoBaseOutcome.LimitSeconds).
     { key: 'arena.clockSeconds', kind: 'int' },
+    // WO-2192 player-chosen dynamic deploy (owner 2026-09-30: the PLAYER chooses where troops deploy,
+    // even deep in the enemy base). CENTIMETRES, read by DeNelle.Core.Combat.DeployPointConfig:
+    //   raid.deploy.snapCm       - 250: largest NavMesh snap a drop may take (wall-top taps refused).
+    //   raid.deploy.spacingCm    - 110: ring spacing between troops sent to one point (was 1.1 m).
+    //   raid.deploy.bodyRadiusCm - 40: body capsule a drop must clear of live structure colliders.
+    { key: 'raid.deploy.snapCm', kind: 'int' },
+    { key: 'raid.deploy.spacingCm', kind: 'int' },
+    { key: 'raid.deploy.bodyRadiusCm', kind: 'int' },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -544,6 +552,14 @@ const SERVER_ONLY_TUNABLE_KEYS = [
     // (a serverOnly PRESENTATION row in tunable-manifest.js) - unlike the sale keys it is not
     // money, it is a world rule the owner tunes.
     { key: 'realm.livingStakeThresholdSkr', kind: 'int', serverOnly: true },
+    // Owner-delegated 2026-09-30 - the ORDER BALLOT CLOSE-EARLY override, in whole SECONDS.
+    // An open Order ballot expires this many seconds before its stored closes_at, so an admin
+    // can close a vote early from the Command Center WITHOUT moving the epoch anchor. Read by
+    // api/_lib/clan-ballot.js ON THE SERVER; default 0 (= no override) is
+    // clan-ballot.js EPOCH_CLOSE_EARLY_DEFAULT_SECONDS. Clamped 0..172799 on the READ (a
+    // negative or a whole-epoch value can be written - normalizeValue is signed 9-digit - and
+    // is clamped there). It HAS a Command Center card (a serverOnly PRESENTATION row).
+    { key: 'order.epochCloseEarlySeconds', kind: 'int', serverOnly: true },
 ];
 
 for (const spec of SERVER_ONLY_TUNABLE_KEYS) {

@@ -53,6 +53,7 @@
 const { readClanVigil } = require('./clan-vigil');
 const { uniqueViolation, UUID_RE } = require('./clan');
 const orderPerks = require('./order-perk-catalog');
+const { readTunables } = require('./tunables');
 
 // ── Machine codes ────────────────────────────────────────────────────────────
 // Prefixed CLAN_BALLOT_ so no code here can ever be confused with one of ClanCode's,
@@ -119,6 +120,131 @@ const EPOCH_ANCHOR_ISO = '2026-01-01T00:00:00Z';
 
 /** 48 hours, the owner-ruled cadence. */
 const EPOCH_SECONDS = 172800;
+
+// ── The close-early override (Command Center, server-only) ──────────────────
+//
+// Owner-delegated design, 2026-09-30: a PERMANENT Command Center lever that lets an admin
+// close an Order ballot early WITHOUT touching the epoch anchor. It is the serverOnly
+// tunable `order.epochCloseEarlySeconds` (api/_lib/tunables.js), written only through
+// api/admin/ops.js tunable.set / tunable.clear (both audited: recordOpsWrite writes an
+// `admin_ops_write` analytics row, and client_tunables carries updated_by / updated_at).
+//
+// ⛔ WHAT IT CHANGES, AND ONLY THIS: a ballot's EXPIRY. An open ballot expires at its
+// EFFECTIVE close instead of its stored `closes_at`:
+//
+//     offset  = 0   ->  effective = closes_at                         (byte-identical to before)
+//     offset  > 0   ->  effective = GREATEST(closes_at - offset,
+//                                            LEAST(closes_at, opened_at + MIN_OPEN))
+//
+// The epoch index math (readEpoch, epochIndexFromTimestamp) does NOT read it, the stored
+// `closes_at` is never rewritten by it, and rollEpoch's "the index never goes backwards"
+// target rule is untouched. So CLEARING the row is safe by construction: a ballot the
+// offset already closed stays closed (closed_at is set; nothing reopens a closed row), and
+// a still-open ballot simply falls back to its stored `closes_at`.
+//
+// ⛔ WHY NEGATIVE VALUES CLAMP TO 0 (a deliberate deviation from "clamp to +-one epoch").
+// normalizeValue accepts any signed 9-digit int, so a negative can land in the table. A
+// negative offset would HOLD a ballot open past its stored close — and the admin demo lever
+// api/admin/order-epoch-force.js ends an epoch by writing `closes_at = NOW()` and relies on
+// the very next read seeing `expired`. Under a negative offset that force would silently do
+// nothing for |offset| seconds. "Close early" never means "close later"; the read clamps to
+// 0..EPOCH_CLOSE_EARLY_MAX_SECONDS.
+
+/** The serverOnly tunable key. The Command Center card and the allowlist name it. */
+const EPOCH_CLOSE_EARLY_KEY = 'order.epochCloseEarlySeconds';
+
+/** Resting state: no override. The ONE home of the default (tunable-manifest.js references it). */
+const EPOCH_CLOSE_EARLY_DEFAULT_SECONDS = 0;
+
+/**
+ * Strictly LESS than one epoch. An offset of a whole epoch or more would make every ballot's
+ * effective close land at or before the previous boundary — i.e. at or before it opened —
+ * which the MIN_OPEN floor would then turn into a 60-second ballot every time.
+ */
+const EPOCH_CLOSE_EARLY_MAX_SECONDS = EPOCH_SECONDS - 1;
+
+/**
+ * The shortest time an open ballot stays open while an offset is pulling its close earlier.
+ *
+ * WHY THE FLOOR EXISTS: a ballot INSERTED with less time left than the offset — the first
+ * ballot of an Order founded late in an epoch, or the one rollEpoch opens right after an
+ * early settle when the offset is large — would otherwise have an effective close at or
+ * before its own opened_at. The next read would see it expired with zero votes, settle it
+ * `no_votes`, switch the Order's active banner OFF (applyEpochOutcome -> deactivatePerksBefore)
+ * and spend an epoch index — a ballot nobody could ever have voted on. The floor keeps it
+ * open for at least this long. It is a guard against a zero-length ballot, NOT a player-
+ * fairness window; 60 s is enough for the request that opened it and its client's re-read to
+ * see it open. LEAST(closes_at, ...) keeps the floor from ever pushing a close LATER than the
+ * stored one, so a forced close (closes_at = NOW()) still expires immediately.
+ */
+const EPOCH_MIN_OPEN_SECONDS = 60;
+
+/**
+ * The live close-early offset from a readTunables() result. PURE. Mirrors
+ * realm-stake.js resolveThreshold: `source` is 'tunable' | 'default', `why` names the reason.
+ *
+ * FAIL-SAFE TO 0: an unreadable table, an absent row or a junk value all answer the default,
+ * which is "no override" — exactly the pre-override behaviour.
+ *
+ * @param {{ok:boolean, values:object, reason?:string}} tunables
+ * @returns {{seconds:number, source:'tunable'|'default', why:string, clamped:boolean}}
+ */
+function resolveCloseEarlySeconds(tunables) {
+    if (!tunables || tunables.ok !== true) {
+        return { seconds: EPOCH_CLOSE_EARLY_DEFAULT_SECONDS, source: 'default', clamped: false,
+                 why: 'tunables unreadable (' + ((tunables && tunables.reason) || 'no read') + ')' };
+    }
+    const raw = tunables.values ? tunables.values[EPOCH_CLOSE_EARLY_KEY] : undefined;
+    if (raw == null || raw === '') {
+        return { seconds: EPOCH_CLOSE_EARLY_DEFAULT_SECONDS, source: 'default', clamped: false,
+                 why: 'no Command Center row' };
+    }
+    const s = String(raw).trim();
+    const n = /^-?\d+$/.test(s) ? parseInt(s, 10) : NaN;
+    if (!Number.isFinite(n)) {
+        return { seconds: EPOCH_CLOSE_EARLY_DEFAULT_SECONDS, source: 'default', clamped: false,
+                 why: 'Command Center row "' + raw + '" is not an integer' };
+    }
+    const seconds = Math.min(EPOCH_CLOSE_EARLY_MAX_SECONDS, Math.max(0, n));
+    return {
+        seconds: seconds,
+        source: 'tunable',
+        clamped: seconds !== n,
+        why: seconds !== n
+            ? 'Command Center row ' + n + ' clamped to ' + seconds + ' (0..' + EPOCH_CLOSE_EARLY_MAX_SECONDS + ')'
+            : 'Command Center row',
+    };
+}
+
+/**
+ * Read the live offset. NEVER throws: readTunables never rejects (it answers ok:false on
+ * any failure), and the belt-and-braces catch here answers 0 as well.
+ */
+async function readCloseEarly(sql) {
+    try {
+        return resolveCloseEarlySeconds(await readTunables(sql));
+    } catch (err) {
+        console.warn('[clan-ballot] close-early override read threw (' + (err && err.message) +
+            ') - offset 0, stored closes_at governs');
+        return { seconds: EPOCH_CLOSE_EARLY_DEFAULT_SECONDS, source: 'default', clamped: false,
+                 why: 'read threw' };
+    }
+}
+
+/** The offset a caller passed in (opts.closeEarlySeconds), clamped; null when none was passed. */
+function passedCloseEarly(opts) {
+    if (!opts || opts.closeEarlySeconds == null) return null;
+    const n = Math.floor(Number(opts.closeEarlySeconds));
+    if (!Number.isFinite(n)) return null;
+    return Math.min(EPOCH_CLOSE_EARLY_MAX_SECONDS, Math.max(0, n));
+}
+
+/** The offset for one read: the caller's, else a fresh (memoised, 5 s) read of the table. */
+async function closeEarlyFor(sql, opts) {
+    const passed = passedCloseEarly(opts);
+    if (passed != null) return passed;
+    return (await readCloseEarly(sql)).seconds;
+}
 
 function parseTimeMs(value) {
     if (value instanceof Date) {
@@ -602,7 +728,21 @@ function rowToBallot(r) {
             ? Number(r.epoch_index) : null,
         // Computed by POSTGRES in the same statement, never by comparing Date.now().
         expired: r.expired === true,
+        // The close-early override. `effective_closes_at` is computed by POSTGRES in the
+        // readLatestBallot / readBallotInClan statement; every other read (the INSERT's
+        // RETURNING, readLastClosedBallot) does not spell it and falls back to the stored
+        // closes_at, which is exactly the effective close at offset 0. `closesAt` above stays
+        // the STORED value — settledEpochIndex derives an epoch from it, and that index math
+        // must never move with the override.
+        effectiveClosesAt: r.effective_closes_at != null ? r.effective_closes_at : r.closes_at,
+        closeOffsetSeconds: 0,
     };
+}
+
+/** Stamp the offset a read ran under onto the ballot it returned (null stays null). */
+function withOffset(b, offsetSeconds) {
+    if (b) b.closeOffsetSeconds = offsetSeconds;
+    return b;
 }
 
 // ── WO-2031: the live column guard (deploy-order safety) ─────────────────────
@@ -677,32 +817,55 @@ function safeParseArray(text) {
  * rule clan.js readMemberInClan and clan-vigil.js readClanVigilRoster each state. The
  * clan id comes from the caller's proven membership and never from the request.
  */
-async function readLatestBallot(sql, clanId) {
+//
+// ⛔ THE EXPIRY VERDICT IS THE EFFECTIVE CLOSE, and both reads below spell it the same way
+// (see "The close-early override" near the top of this file). At offset 0 the CASE answers
+// the stored closes_at, so the verdict is byte-for-byte the old `closes_at <= NOW()`. The
+// offset and the floor are BOUND parameters; the clock is still Postgres's NOW().
+// `opts.closeEarlySeconds` lets a caller that already read the offset (rollEpoch) pass it
+// down; without it each read resolves the offset itself (readTunables memoises for 5 s).
+async function readLatestBallot(sql, clanId, opts) {
     await ensureEpochColumns(sql);
+    const off = await closeEarlyFor(sql, opts);
     const rows = await sql`
-        SELECT id, clan_id, proposed_by_wallet, tier, options, opened_at,
-               closes_at, closed_at, winning_option, epoch_index,
-               (closed_at IS NULL AND closes_at <= NOW()) AS expired
-        FROM clan_ballots
-        WHERE clan_id = ${clanId}
-        ORDER BY opened_at DESC, id ASC
-        LIMIT 1
+        SELECT b.*, (b.closed_at IS NULL AND b.effective_closes_at <= NOW()) AS expired
+        FROM (
+            SELECT id, clan_id, proposed_by_wallet, tier, options, opened_at,
+                   closes_at, closed_at, winning_option, epoch_index,
+                   CASE WHEN ${off}::int > 0
+                        THEN GREATEST(closes_at - (${off}::int * INTERVAL '1 second'),
+                                      LEAST(closes_at, opened_at + (${EPOCH_MIN_OPEN_SECONDS}::int * INTERVAL '1 second')))
+                        ELSE closes_at
+                   END AS effective_closes_at
+            FROM clan_ballots
+            WHERE clan_id = ${clanId}
+            ORDER BY opened_at DESC, id ASC
+            LIMIT 1
+        ) b
     `;
-    return rowToBallot(rows && rows[0] ? rows[0] : null);
+    return withOffset(rowToBallot(rows && rows[0] ? rows[0] : null), off);
 }
 
 /** ONE ballot by id, and only if it belongs to the caller's own clan (see above). */
-async function readBallotInClan(sql, clanId, ballotId) {
+async function readBallotInClan(sql, clanId, ballotId, opts) {
     await ensureEpochColumns(sql);
+    const off = await closeEarlyFor(sql, opts);
     const rows = await sql`
-        SELECT id, clan_id, proposed_by_wallet, tier, options, opened_at,
-               closes_at, closed_at, winning_option, epoch_index,
-               (closed_at IS NULL AND closes_at <= NOW()) AS expired
-        FROM clan_ballots
-        WHERE clan_id = ${clanId} AND id = ${ballotId}
-        LIMIT 1
+        SELECT b.*, (b.closed_at IS NULL AND b.effective_closes_at <= NOW()) AS expired
+        FROM (
+            SELECT id, clan_id, proposed_by_wallet, tier, options, opened_at,
+                   closes_at, closed_at, winning_option, epoch_index,
+                   CASE WHEN ${off}::int > 0
+                        THEN GREATEST(closes_at - (${off}::int * INTERVAL '1 second'),
+                                      LEAST(closes_at, opened_at + (${EPOCH_MIN_OPEN_SECONDS}::int * INTERVAL '1 second')))
+                        ELSE closes_at
+                   END AS effective_closes_at
+            FROM clan_ballots
+            WHERE clan_id = ${clanId} AND id = ${ballotId}
+            LIMIT 1
+        ) b
     `;
-    return rowToBallot(rows && rows[0] ? rows[0] : null);
+    return withOffset(rowToBallot(rows && rows[0] ? rows[0] : null), off);
 }
 
 /**
@@ -1034,8 +1197,20 @@ async function settleBallot(sql, clanId, ballot, opts) {
     const won = await closeBallot(sql, ballot.ballotId, decision.passed ? decision.winner : null);
     if (!won.closed) {
         // Somebody else closed it between our read and our write. Their row is the truth.
-        const fresh = await readBallotInClan(sql, clanId, ballot.ballotId);
+        const fresh = await readBallotInClan(sql, clanId, ballot.ballotId,
+            { closeEarlySeconds: ballot.closeOffsetSeconds });
         return settleBallot(sql, clanId, fresh, opts);
+    }
+
+    // The close-early override's trace: EVERY settle this request made while the offset was
+    // non-zero says so, with the stored and the effective close side by side, so a ballot
+    // that closed "early" is never a mystery in the logs (CLAUDE.md s12: no silent branch).
+    if (Number(ballot.closeOffsetSeconds) > 0) {
+        console.warn('[clan-ballot] settle under close-early override ballot=' + ballot.ballotId +
+            ' clan=' + clanId + ' epoch=' + (ballot.epochIndex != null ? ballot.epochIndex : 'legacy') +
+            ' offset_s=' + ballot.closeOffsetSeconds + ' stored_closes_at=' + String(ballot.closesAt) +
+            ' effective_closes_at=' + String(ballot.effectiveClosesAt) +
+            ' passed=' + decision.passed + ' reason=' + decision.reason);
     }
 
     const closedBallot = Object.assign({}, ballot, {
@@ -1043,6 +1218,7 @@ async function settleBallot(sql, clanId, ballot, opts) {
         winningOption: decision.passed ? decision.winner : null,
         expired: false,
     });
+    // (effectiveClosesAt / closeOffsetSeconds carry over from the read that saw it expire.)
 
     console.log('[clan-ballot] settle closed ballot=' + ballot.ballotId + ' clan=' + clanId +
         ' epoch=' + (ballot.epochIndex != null ? ballot.epochIndex : 'legacy') +
@@ -1153,7 +1329,12 @@ async function rollEpoch(sql, clanId, opts) {
     const epoch = o.epoch || await readEpoch(sql);
     if (!epoch) throw new Error('epoch read returned no row');
 
-    let latest = await readLatestBallot(sql, clanId);
+    // The close-early override, read ONCE for the whole roll and passed down, so the expiry
+    // verdict and the ballot the roll opens are judged under the same offset.
+    const off = await closeEarlyFor(sql, o);
+    const readOpts = { closeEarlySeconds: off };
+
+    let latest = await readLatestBallot(sql, clanId, readOpts);
     let closedNow = null;
     let retired = null;
 
@@ -1187,13 +1368,25 @@ async function rollEpoch(sql, clanId, opts) {
     if (inserted) {
         console.log('[clan-ballot] roll opened ballot=' + inserted.ballotId + ' clan=' + clanId +
             ' epoch=' + target + ' (current ' + cur + ') options=' + inserted.options.join(','));
-        return { epoch: epoch, ballot: inserted, opened: true, closedNow: closedNow, retired: retired,
+        let opened = withOffset(inserted, off);
+        if (off > 0) {
+            // The INSERT's RETURNING carries the STORED closes_at only (the effective-close
+            // expression is spelled in the two reads, not a third time here). Under a live
+            // offset the client must be told the EFFECTIVE close, so ONE re-read through the
+            // spelled expression. At offset 0 stored == effective and no query is spent.
+            const reread = await readLatestBallot(sql, clanId, readOpts);
+            if (reread && reread.ballotId === inserted.ballotId) opened = reread;
+            console.warn('[clan-ballot] roll opened ballot=' + inserted.ballotId + ' under close-early override' +
+                ' offset_s=' + off + ' stored_closes_at=' + String(inserted.closesAt) +
+                ' effective_closes_at=' + String(opened.effectiveClosesAt));
+        }
+        return { epoch: epoch, ballot: opened, opened: true, closedNow: closedNow, retired: retired,
                  targetIndex: target };
     }
 
     // Lost the race (or the slot is held): the row that won is the truth. ONE re-read,
     // never a retry loop.
-    const fresh = await readLatestBallot(sql, clanId);
+    const fresh = await readLatestBallot(sql, clanId, readOpts);
     console.log('[clan-ballot] roll found epoch ' + target + ' already opened clan=' + clanId);
     return { epoch: epoch, ballot: fresh || latest, opened: false, closedNow: closedNow, retired: retired,
              targetIndex: target };
@@ -1323,6 +1516,7 @@ function toWire(state) {
     const epoch = s.epoch || null;
     const closed = closedOutcome(s, ballot, decision);
     const active = activePerk(s);
+    const wireEndsAt = epochWireEndsAt(epoch, ballot);
 
     const body = {
         ok: true,
@@ -1330,9 +1524,12 @@ function toWire(state) {
         epoch: epoch ? {
             index: epoch.epochIndex,
             started_at: epoch.startedAt,
-            ends_at: epoch.endsAt,
+            ends_at: wireEndsAt,
             anchor: EPOCH_ANCHOR_ISO,
             seconds: EPOCH_SECONDS,
+            // The close-early override in force when this answer was built (0 = none). The
+            // client needs no change: ends_at / closes_at already carry the EFFECTIVE close.
+            close_offset_seconds: ballotOffset(ballot),
         } : null,
         tiers: tierWire(s.vigilWeight),
         vigil_weight: s.vigilWeight != null ? Number(s.vigilWeight) : null,
@@ -1364,7 +1561,9 @@ function toWire(state) {
             tier: ballot.tier,
             closed: isClosed,
             opened_at: ballot.openedAt,
-            closes_at: ballot.closesAt,
+            // The EFFECTIVE close (== the stored closes_at at offset 0), so a client counts
+            // down to the moment the server will actually settle this ballot.
+            closes_at: ballot.effectiveClosesAt != null ? ballot.effectiveClosesAt : ballot.closesAt,
             closed_at: ballot.closedAt,
             options: ballot.options.map((id) => {
                 const t = tallies.find((x) => x.optionId === id);
@@ -1399,8 +1598,32 @@ function toWire(state) {
         };
     }
 
-    body.ceremony = ceremonyWire(s, closed, active, epoch);
+    body.ceremony = ceremonyWire(s, closed, active, epoch, wireEndsAt);
     return body;
+}
+
+/** The close-early offset the ballot was read under; 0 when there is no ballot or no offset. */
+function ballotOffset(ballot) {
+    const n = ballot ? Number(ballot.closeOffsetSeconds) : 0;
+    return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/**
+ * `epoch.ends_at` (and `ceremony.next_ends_at`, which the client treats as the same instant).
+ *
+ * Offset 0: epoch.endsAt, exactly as before — nothing about the wire changes while the
+ * override is off. Offset > 0 with an OPEN epoch ballot: that ballot's EFFECTIVE close, the
+ * moment the server will actually settle and roll. (Not `endsAt - offset`: after an early
+ * settle the next ballot runs for the NEXT epoch index, and `endsAt - offset` would already
+ * be in the past, so every countdown would read zero.) Anything else: epoch.endsAt.
+ */
+function epochWireEndsAt(epoch, ballot) {
+    if (!epoch) return null;
+    if (ballotOffset(ballot) > 0 && ballot.closedAt == null && ballot.epochIndex != null &&
+        ballot.effectiveClosesAt != null) {
+        return ballot.effectiveClosesAt;
+    }
+    return epoch.endsAt;
 }
 
 /** One ballot option: catalog fields for a banner, bare id for a retired (legacy) option. */
@@ -1475,7 +1698,7 @@ function closedOutcome(s, ballot, decision) {
  * `perk_title` / `perk_description` fields carried the retired stat catalogue's English and
  * are GONE, not emptied — an empty string would still be a server-authored text field.
  */
-function ceremonyWire(s, closed, active, epoch) {
+function ceremonyWire(s, closed, active, epoch, wireEndsAt) {
     const unlocked = highestUnlockedTier(s.vigilWeight);
     const passed = !!(closed && closed.passed);
     // A closed ballot names its OWN outcome (a failed one names none, and its banner has
@@ -1496,7 +1719,10 @@ function ceremonyWire(s, closed, active, epoch) {
         // object as the perk. No perk (or an unknown one) reads as dormant, never null.
         tree_motif_id: rec ? motifFor(rec.perkId) : DEFAULT_TREE_MOTIF_ID,
         passed: passed,
-        next_ends_at: epoch && epoch.endsAt != null ? epoch.endsAt : null,
+        // The same instant as epoch.ends_at (epochWireEndsAt), override included.
+        next_ends_at: wireEndsAt !== undefined
+            ? (wireEndsAt != null ? wireEndsAt : null)
+            : (epoch && epoch.endsAt != null ? epoch.endsAt : null),
     };
 }
 
@@ -1584,4 +1810,12 @@ module.exports = {
     // WO-2031
     AUTO_BALLOT_TIER,
     EPOCH_PERK_SLOT,
+    // The close-early override (Command Center, serverOnly)
+    EPOCH_CLOSE_EARLY_KEY,
+    EPOCH_CLOSE_EARLY_DEFAULT_SECONDS,
+    EPOCH_CLOSE_EARLY_MAX_SECONDS,
+    EPOCH_MIN_OPEN_SECONDS,
+    resolveCloseEarlySeconds,
+    readCloseEarly,
+    epochWireEndsAt,
 };

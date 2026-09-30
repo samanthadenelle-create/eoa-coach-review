@@ -29,10 +29,16 @@
 // EMPTY table is the correct resting state - which is exactly what ships.
 //
 // ⭐ CACHE-CONTROL IS A TURNAROUND WINDOW, NOT A PERFORMANCE KNOB. These knobs are
-// flipped by a human mid-bisect who then says "reload and tell me". s-maxage is
-// therefore 10 s, matching api/maintenance.js rather than the 60 s
-// api/dungeon-status.js uses. Total worst case to a running client is about 40 s:
-// 10 s edge + the 30 s client poll.
+// flipped by a human mid-bisect who then says "reload and tell me".
+// ⭐ WO-2195 (2026-09-30, owner-delegated): s-maxage is now 120 s with
+// stale-while-revalidate=300, up from 10/30. The Neon free-plan compute allowance
+// ran out, and every client re-reads this route every 30 s, so a 10 s edge
+// cache sent nearly every poll through to Neon (tunables + the realm stake
+// read). The turnaround a running client sees is now about 150 s (120 s edge +
+// the 30 s client poll); a region nobody polled for a while can serve ONE
+// response up to 120 + 300 s old while it revalidates. Operator flips are
+// minutes, not seconds, from here on. api/maintenance.js deliberately stays
+// at 10 s: that window is an exploit-exposure window, not a turnaround.
 //
 // FAIL-SOFT: on any error this returns 200 with `readOk: false` and NO values,
 // rather than a 500. The client treats that as "no overrides", which is the same
@@ -45,7 +51,8 @@
 //   GET /api/client-tunables
 //   Reply: { ok, version, readOk, reason, values: { "<key>": "<value>" },
 //            realm: { living, staked_total_skr, threshold_skr, threshold_source,
-//                     canopy_density01, reason } }
+//                     canopy_density01, reason },
+//            order_epoch: { close_early_seconds, source, clamped, reason } }
 //
 // ⭐ WO-2061h - THE `realm` BLOCK IS WORLD STATE, NOT A KNOB OVERRIDE, and it rides HERE on
 // purpose: this is the ONE route every client reads before sign-in and re-reads every 30 s,
@@ -60,6 +67,7 @@ const { neon } = require('@neondatabase/serverless');
 const { applyCors } = require('./_lib/http');
 const { readTunables, TUNABLE_KEYS } = require('./_lib/tunables');
 const realmStake = require('./_lib/realm-stake');
+const clanBallot = require('./_lib/clan-ballot');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ⛔ SERVER-ONLY KEYS NEVER LEAVE THE SERVER (WO-1799).
@@ -101,7 +109,7 @@ module.exports = async (req, res) => {
         return res.status(400).json({ error: 'Method not allowed' });
     }
 
-    res.setHeader('Cache-Control', 'public, max-age=0, s-maxage=10, stale-while-revalidate=30');
+    res.setHeader('Cache-Control', 'public, max-age=0, s-maxage=120, stale-while-revalidate=300');
 
     let sql = null;
     try { sql = neon(process.env.DATABASE_URL); }
@@ -126,7 +134,25 @@ module.exports = async (req, res) => {
         reason: state.reason,
         values: state.ok ? publicValues(state.values) : {},
         realm: realm,
+        order_epoch: orderEpochBlock(state),
     });
 };
 
-module.exports._test = { SERVER_ONLY_KEYS, publicValues, PAYLOAD_VERSION };
+/**
+ * The Order ballot close-early override AS THE SERVER RESOLVED IT (owner-delegated
+ * 2026-09-30). Like `realm`, it sits BESIDE `values`, never inside it: the raw row is a
+ * serverOnly key and stays withheld above; this block is the clamped value the server is
+ * actually applying, which is what the Command Center card shows as "Now". Nothing on a phone
+ * reads it (the ballot wire already carries the effective close times). Never throws.
+ */
+function orderEpochBlock(state) {
+    try {
+        const r = clanBallot.resolveCloseEarlySeconds(state);
+        return { close_early_seconds: r.seconds, source: r.source, clamped: r.clamped, reason: r.why };
+    } catch (err) {
+        return { close_early_seconds: clanBallot.EPOCH_CLOSE_EARLY_DEFAULT_SECONDS, source: 'default',
+                 clamped: false, reason: 'ORDER_EPOCH_RESOLVE_THREW: ' + ((err && err.message) || String(err)) };
+    }
+}
+
+module.exports._test = { SERVER_ONLY_KEYS, publicValues, PAYLOAD_VERSION, orderEpochBlock };
