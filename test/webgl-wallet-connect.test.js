@@ -189,8 +189,10 @@ test('WO-1958: no reason code anywhere reads like the SDK ambiguous cancel', () 
         .split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
     assert.ok(!/Login cancelled/i.test(code),
         'the core must never emit the SDK sentence that cannot tell a redirect from a cancel');
+    // WO-2197 added two: the relay refusing this origin, and no pairing uri at all.
     assert.deepEqual(Array.from(Object.values(core.REASON)).sort(),
-        ['cancelled', 'connected', 'failed', 'no-bundle', 'no-project-id', 'timeout']);
+        ['cancelled', 'connected', 'failed', 'no-bundle', 'no-project-id', 'no-uri-timeout',
+         'origin-not-allowed', 'timeout']);
 });
 
 test('WO-1958: a second connect while one is in flight does not start a second modal', async () => {
@@ -535,4 +537,305 @@ test('WO-2037 add-on: the jslib exports the message-sign pair and the C# bridge 
     assert.ok(/CanSignMessages\s*=>[\s\S]{0,160}IsJupiterSession[\s\S]{0,80}JupiterCanSignMessages\(\)/.test(provider),
         'CanSignMessages must admit a Jupiter session, or MintSessionAsync aborts with "no signer" again');
     assert.ok(/SignMessageJupiter\(/.test(provider));
+});
+
+// =============================================================================
+// WO-2197 — a relay that refuses this page must never leave a spinner.
+// -----------------------------------------------------------------------------
+// Player bug report #32 (2026-09-29 11:50Z, iPhone Safari, echoes-of-elarion
+// .vercel.app): the relay closed with
+//   `WebSocket connection closed abnormally with code: 3000 (Unauthorized: origin not allowed)`
+// nothing caught it, no display_uri ever came, and the modal spun until the player
+// closed it. The fakes below reproduce the REAL event path read in the bundle:
+// jsonrpc-provider onClose -> Relayer.onProviderErrorHandler ->
+// relayer.events.emit('relayer_error', err), relayer at UniversalProvider
+// `.client.core.relayer`.
+// =============================================================================
+
+const RELAY_REFUSAL = 'WebSocket connection closed abnormally with code: 3000 ' +
+    '(Unauthorized: origin not allowed)';
+const BUG32_ORIGIN = 'https://echoes-of-elarion.vercel.app';
+
+// A vm realm whose timers are COUNTED, so a test can prove a terminal path left
+// no timer behind (the "clean page" half of WO-2197).
+function loadCoreTracked() {
+    const live = new Set();
+    const sandbox = { module: { exports: {} }, console };
+    sandbox.window = sandbox;
+    sandbox.globalThis = sandbox;
+    sandbox.setTimeout = (fn, ms) => {
+        const h = setTimeout(() => { live.delete(h); fn(); }, ms);
+        live.add(h);
+        return h;
+    };
+    sandbox.clearTimeout = (h) => { live.delete(h); clearTimeout(h); };
+    vm.createContext(sandbox);
+    vm.runInContext(fs.readFileSync(CORE_PATH, 'utf8'), sandbox, { filename: CORE_PATH });
+    return { core: sandbox.module.exports, live };
+}
+
+function emitterWithLog(log, name) {
+    const listeners = {};
+    return {
+        on(ev, fn) { (listeners[ev] = listeners[ev] || []).push(fn); log.push(name + ':on:' + ev); },
+        off(ev, fn) { listeners[ev] = (listeners[ev] || []).filter((f) => f !== fn); log.push(name + ':off:' + ev); },
+        emit(ev, arg) { (listeners[ev] || []).slice().forEach((f) => f(arg)); },
+        count(ev) { return (listeners[ev] || []).length; }
+    };
+}
+
+// o.onConnect(stack) decides what happens when the wallet-button connects:
+// emit a relay refusal, emit a uri, or nothing. The connect promise stays PENDING
+// (a spinning modal) unless o.onConnect returns something else, and appKit.close()
+// rejects it with 'Modal closed' exactly as AppKit does.
+function fakeRelayStack(o) {
+    o = o || {};
+    const log = [];
+    const traces = [];
+    const relayer = emitterWithLog(log, 'relayer');
+    const up = emitterWithLog(log, 'up');
+    up.client = { core: { relayer } };
+    const win = emitterWithLog(log, 'window');
+    win.addEventListener = win.on;
+    win.removeEventListener = win.off;
+    const stack = { log, traces, relayer, up, win, closed: 0, connects: 0, rejectPending: null };
+    const appKit = {
+        close() {
+            stack.closed += 1;
+            if (stack.rejectPending) { const r = stack.rejectPending; stack.rejectPending = null; r(new Error('Modal closed')); }
+        },
+        getAddress() { return ''; },
+        getWalletProvider() { return null; },
+        getUniversalProvider() {
+            if (typeof o.providerDelayMs === 'number') {
+                return new Promise((r) => setTimeout(() => r(up), o.providerDelayMs));
+            }
+            return Promise.resolve(up);
+        },
+        disconnect() {}
+    };
+    const button = {
+        isReady() { return true; },
+        subscribeIsReady() {},
+        connect() {
+            stack.connects += 1;
+            const custom = o.onConnect ? o.onConnect(stack) : undefined;
+            if (custom !== undefined) return custom;
+            // Only a PENDING modal gets the close->reject wiring; a supplied promise
+            // must not leave a second, unobserved one behind.
+            return new Promise((resolve, reject) => { stack.rejectPending = reject; stack.resolvePending = resolve; });
+        }
+    };
+    const { core, live } = loadCoreTracked();
+    const machine = core.createEoaWalletConnect({
+        projectId: 'test-project-id',
+        origin: BUG32_ORIGIN,
+        timeoutMs: typeof o.timeoutMs === 'number' ? o.timeoutMs : 3000,
+        readyWaitMs: typeof o.readyWaitMs === 'number' ? o.readyWaitMs : 30,
+        noUriWatchdogMs: typeof o.noUriWatchdogMs === 'number' ? o.noUriWatchdogMs : 2500,
+        deeplinkObserveMs: 5,
+        navigator: { userAgent: IPHONE_UA, maxTouchPoints: 0 },
+        navigate() {},
+        storage: { getItem() { return null; }, setItem() {} },
+        window: win,
+        trace(line) { traces.push(line); },
+        deps: {
+            createAppKit() { return appKit; },
+            SolanaAdapter: function SolanaAdapter() {},
+            createAppKitWalletButton() { return button; },
+            solanaNetwork: { id: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp' }
+        }
+    });
+    return { core, machine, stack, live };
+}
+
+// The page is left as it was before the tap: no per-attempt display_uri listener
+// (the ONE persistent instance listener remains), no window listeners, no timers.
+function assertCleanPage(r, label) {
+    const s = r.stack;
+    assert.equal(s.up.count('display_uri'), 1,
+        label + ': only the ONE persistent display_uri listener may remain, found ' + s.up.count('display_uri'));
+    assert.equal(s.win.count('unhandledrejection'), 0, label + ': a window unhandledrejection listener dangles');
+    assert.equal(s.win.count('error'), 0, label + ': a window error listener dangles');
+    assert.equal(s.relayer.count('relayer_error'), 1, label + ': exactly one persistent relayer_error listener');
+    assert.equal(r.live.size, 0, label + ': ' + r.live.size + ' timer(s) still pending after the attempt ended');
+}
+
+test('WO-2197: classifyRelayRejection names the relay refusal and nothing else', () => {
+    const core = loadCore();
+    const O = 'origin-not-allowed';
+    assert.equal(core.classifyRelayRejection(new Error(RELAY_REFUSAL)), O, 'the exact bug #32 sentence');
+    assert.equal(core.classifyRelayRejection({ code: 3000, reason: 'Unauthorized: origin not allowed' }), O,
+        'a CloseEvent-shaped {code, reason}');
+    assert.equal(core.classifyRelayRejection({ code: 3000, reason: '' }), O, 'close code 3000 alone');
+    assert.equal(core.classifyRelayRejection({ reason: new Error(RELAY_REFUSAL) }), O,
+        'an unhandledrejection-shaped {reason: Error}');
+    assert.equal(core.classifyRelayRejection('Unauthorized: origin not allowed'), O, 'a bare string');
+    assert.equal(core.classifyRelayRejection(new Error('Unauthorized')), O, 'Unauthorized alone');
+    assert.equal(core.classifyRelayRejection(new Error('User rejected the request')), '');
+    assert.equal(core.classifyRelayRejection(new Error('Modal closed')), '');
+    assert.equal(core.classifyRelayRejection({ code: 1006, reason: 'abnormal' }), '');
+    assert.equal(core.classifyRelayRejection(null), '');
+    assert.equal(core.NO_URI_WATCHDOG_MS, 15000, 'the owner-facing budget: a spinner is judged within 15 s');
+});
+
+// ⛔ THE BUG #32 PIN.
+test('WO-2197: relayer_error code 3000 -> origin-not-allowed at once, modal closed, page clean', async () => {
+    const r = fakeRelayStack({
+        onConnect(stack) { setTimeout(() => stack.relayer.emit('relayer_error', new Error(RELAY_REFUSAL)), 5); }
+    });
+    const t0 = Date.now();
+    const snap = await r.machine.connect();
+    const took = Date.now() - t0;
+    assert.equal(snap.state, 'refused');
+    assert.equal(snap.reason, 'origin-not-allowed');
+    assert.equal(snap.origin, BUG32_ORIGIN, 'the snapshot names the origin the relay judged');
+    assert.equal(snap.uriSeen, false);
+    assert.equal(snap.uriObservable, 'yes');
+    assert.match(snap.detail, /origin=https:\/\/echoes-of-elarion\.vercel\.app/);
+    assert.match(snap.detail, /via=relayer_error/);
+    assert.ok(took < 2000, 'resolved in ' + took + 'ms - it must not wait for the watchdog or the timeout');
+    assert.equal(r.stack.closed, 1, 'the modal is closed exactly once');
+    assert.ok(r.stack.traces.some((l) => /door unavailable reason=origin-not-allowed origin=https:\/\/echoes-of-elarion\.vercel\.app/.test(l)),
+        'a trace line names the reason AND the origin');
+    await new Promise((res) => setTimeout(res, 10));
+    assert.equal(r.machine.state().reason, 'origin-not-allowed',
+        'the late "Modal closed" rejection after our own close must not overwrite the reason');
+    assertCleanPage(r, 'origin-not-allowed');
+});
+
+test('WO-2197: the refusal is LATCHED - a second tap answers at once and opens nothing', async () => {
+    const r = fakeRelayStack({
+        onConnect(stack) { setTimeout(() => stack.relayer.emit('relayer_error', new Error(RELAY_REFUSAL)), 5); }
+    });
+    await r.machine.connect();
+    const t0 = Date.now();
+    const again = await r.machine.connect();
+    assert.equal(again.reason, 'origin-not-allowed');
+    assert.match(again.detail, /latched/);
+    assert.ok(Date.now() - t0 < 50, 'the second tap must not cost another wait');
+    assert.equal(r.stack.connects, 1, 'the wallet-button must not be asked to open a second spinner');
+    assert.equal(r.live.size, 0);
+});
+
+test('WO-2197: NO display_uri at all -> no-uri-timeout at the watchdog, not the approval timeout', async () => {
+    const r = fakeRelayStack({ noUriWatchdogMs: 60, timeoutMs: 3000 });
+    const t0 = Date.now();
+    const snap = await r.machine.connect();
+    const took = Date.now() - t0;
+    assert.equal(snap.reason, 'no-uri-timeout');
+    assert.equal(snap.uriSeen, false);
+    assert.equal(snap.origin, BUG32_ORIGIN);
+    assert.match(snap.detail, /no WalletConnect pairing uri within 60ms/);
+    assert.ok(took < 1500, 'fired at the watchdog (' + took + 'ms), not the 3000ms approval timeout');
+    assert.equal(r.stack.closed, 1, 'the spinner is closed');
+    await new Promise((res) => setTimeout(res, 10));
+    assertCleanPage(r, 'no-uri-timeout');
+});
+
+test('WO-2197: the watchdog stands down once a pairing uri arrived (a slow approval stays a timeout)', async () => {
+    const r = fakeRelayStack({
+        noUriWatchdogMs: 30, timeoutMs: 120,
+        onConnect(stack) { stack.up.emit('display_uri', WC_URI); }
+    });
+    const snap = await r.machine.connect();
+    assert.equal(snap.reason, 'timeout', 'a working relay with a slow approval is the approval timeout');
+    assert.equal(snap.uriSeen, true);
+    assertNoSecret(r.stack.traces);
+    await new Promise((res) => setTimeout(res, 10));
+    assertCleanPage(r, 'uri-then-timeout');
+});
+
+test('WO-2197: a relay proven on this page disarms the watchdog for the next tap (AppKit reuses the uri)', async () => {
+    let first = true;
+    const r = fakeRelayStack({
+        noUriWatchdogMs: 30, timeoutMs: 150,
+        onConnect(stack) {
+            if (first) { first = false; stack.up.emit('display_uri', WC_URI); return Promise.resolve(null); }
+            return undefined;   // second tap: no new display_uri, modal pending
+        }
+    });
+    const a = await r.machine.connect();
+    assert.equal(a.reason, 'cancelled');
+    const b = await r.machine.connect();
+    assert.equal(b.reason, 'timeout', 'the second attempt was killed by the watchdog although the relay works');
+    assert.ok(r.stack.traces.some((l) => /watchdog stood down: the relay already produced a pairing uri/.test(l)));
+});
+
+test('WO-2197: an AppKit with no getUniversalProvider keeps the pre-WO-2197 timeout (watchdog cannot judge)', async () => {
+    const { machine } = make({ connect: () => new Promise(() => {}) }, { noUriWatchdogMs: 5, timeoutMs: 60 });
+    const snap = await machine.connect();
+    assert.equal(snap.reason, 'timeout');
+    assert.equal(snap.uriObservable, 'unsupported');
+});
+
+test('WO-2197: a relay refusal seen only as an unhandled rejection is caught; an unrelated Unauthorized is not', async () => {
+    const r = fakeRelayStack({
+        onConnect(stack) {
+            setTimeout(() => stack.win.emit('unhandledrejection', { reason: new Error(RELAY_REFUSAL) }), 5);
+        }
+    });
+    const snap = await r.machine.connect();
+    assert.equal(snap.reason, 'origin-not-allowed');
+    assert.match(snap.detail, /via=unhandledrejection/);
+    assertCleanPage(r, 'unhandledrejection');
+
+    const g = fakeRelayStack({
+        noUriWatchdogMs: 60,
+        onConnect(stack) {
+            // A game-side 401 while the modal is up: not relay-shaped, must not be blamed on the relay.
+            setTimeout(() => stack.win.emit('unhandledrejection', { reason: new Error('Unauthorized') }), 5);
+        }
+    });
+    const other = await g.machine.connect();
+    assert.equal(other.reason, 'no-uri-timeout', 'a non-relay Unauthorized was misread as the relay refusing');
+});
+
+test('WO-2197: the wallet-button rejecting WITH the relay sentence is origin-not-allowed, not failed', async () => {
+    const r = fakeRelayStack({ onConnect() { return Promise.reject(new Error(RELAY_REFUSAL)); } });
+    const snap = await r.machine.connect();
+    assert.equal(snap.reason, 'origin-not-allowed');
+    assert.match(snap.detail, /via=connect-rejection/);
+    assertCleanPage(r, 'connect-rejection');
+});
+
+test('WO-2197: the player closing a spinner that never had a uri reports uriSeen=false (C# reads that as no door)', async () => {
+    const r = fakeRelayStack({
+        onConnect(stack) { setTimeout(() => stack.rejectPending && stack.rejectPending(new Error('Modal closed')), 5); }
+    });
+    const snap = await r.machine.connect();
+    assert.equal(snap.reason, 'failed');
+    assert.match(snap.detail, /Modal closed/);
+    assert.equal(snap.uriSeen, false);
+    assert.equal(snap.uriObservable, 'yes');
+    assertCleanPage(r, 'closed-before-uri');
+});
+
+test('WO-2197: a UniversalProvider slower than the bound is still subscribed LATE, so the watchdog does not misfire', async () => {
+    const r = fakeRelayStack({
+        readyWaitMs: 10, providerDelayMs: 40, noUriWatchdogMs: 200, timeoutMs: 400,
+        onConnect(stack) {
+            setTimeout(() => { stack.up.emit('display_uri', WC_URI); stack.resolvePending({ address: 'LateAddr' }); }, 80);
+            return undefined;
+        }
+    });
+    const snap = await r.machine.connect();
+    assert.equal(snap.state, 'connected');
+    assert.equal(snap.uriSeen, true, 'the late subscription must still see the uri');
+    assert.ok(r.stack.traces.some((l) => /display_uri subscribed LATE/.test(l)));
+    await new Promise((res) => setTimeout(res, 20));
+    assert.equal(r.live.size, 0);
+});
+
+test('WO-2197: the C# provider falls through on both new reasons and logs the origin (source pins)', () => {
+    const provider = fs.readFileSync(path.join(root, 'Assets', '_Modules', 'Wallet', 'WebGLWalletProvider.cs'), 'utf8');
+    const policy = fs.readFileSync(path.join(root, 'Assets', '_Modules', 'Wallet', 'WebWalletFallbackPolicy.cs'), 'utf8');
+    const bridge = fs.readFileSync(path.join(root, 'Assets', '_Modules', 'Wallet', 'WebGLWalletBridge.cs'), 'utf8');
+    for (const reason of ['origin-not-allowed', 'no-uri-timeout']) {
+        assert.ok(policy.includes('"' + reason + '"'), 'WebWalletFallbackPolicy does not name ' + reason);
+    }
+    assert.ok(/WebWalletFallbackPolicy\.IsDoorUnavailable\(/.test(provider), 'the provider must ask the policy');
+    assert.ok(/FlowTrace\.Fail\("Wallet",[\s\S]{0,200}origin=/.test(provider), 'the fallthrough must Fail with the origin');
+    assert.ok(/public string origin;/.test(bridge) && /public bool uriSeen;/.test(bridge) &&
+              /public string uriObservable;/.test(bridge), 'the bridge DTO must read origin/uriSeen/uriObservable');
 });

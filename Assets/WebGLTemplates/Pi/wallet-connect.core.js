@@ -96,6 +96,40 @@
 //    custom scheme. If the app is not installed, nothing happens and there is no
 //    App Store fallback. The timeout below is the only thing that turns that
 //    silence into a sentence.
+//
+// -----------------------------------------------------------------------------
+// ⛔ WO-2197 — A RELAY THAT REFUSES THIS PAGE MUST NOT LEAVE A SPINNER.
+//
+// Player bug report #32 (2026-09-29 11:50Z, iPhone Safari, echoes-of-elarion
+// .vercel.app): the WalletConnect relay answered
+//     WebSocket connection closed abnormally with code: 3000 (Unauthorized: origin not allowed)
+// Nothing here listened for it, no `display_uri` ever arrived, and the modal spun
+// until the player closed it (~40 s; trace `refused reason=failed detail=Modal
+// closed`). Where that sentence is born, read at source in the bundled
+// @walletconnect/core (wallet-connect.bundle.js, 2026-09-30):
+//   jsonrpc-provider onClose: `t.code===3e3 && this.events.emit("error", new
+//     Error("WebSocket connection closed abnormally with code: ..."))`
+//   Relayer onProviderErrorHandler: `this.events.emit("relayer_error", err)`, then
+//     `transportExplicitlyClosed = true` (it does NOT reconnect by itself).
+// and the relayer is reachable as UniversalProvider `.client.core.relayer`.
+//
+// So three layers, each closing the modal and tearing down every per-attempt
+// listener and timer (cleanup() below):
+//  1. `relayer_error` classified by classifyRelayRejection -> reason
+//     `origin-not-allowed` + the page origin, LATCHED on the instance so a second
+//     tap in the same page answers at once instead of costing another wait.
+//  2. The same classifier on the wallet-button's own rejection and on window
+//     `unhandledrejection` / `error` (relay-shaped text only).
+//  3. A NO-PROGRESS watchdog: no `display_uri` within NO_URI_WATCHDOG_MS of the
+//     tap -> reason `no-uri-timeout`. It stands down when display_uri cannot be
+//     observed on this AppKit shape at all, or when the relay already produced a
+//     pairing uri on this page (AppKit reuses an unexpired uri without emitting a
+//     new display_uri, and a healthy second attempt must not be killed).
+// The snapshot carries `origin`, `uriSeen` and `uriObservable` so the C# side can
+// tell "the player closed a working modal" from "the player closed a spinner that
+// never had a pairing uri" - the second is a door that was never open.
+// ⚠ NOT PROVEN FROM HERE: which origins the Reown dashboard allows. That list is
+// the owner's; this code is correct whichever origins are registered.
 // =============================================================================
 (function (global) {
     'use strict';
@@ -122,6 +156,14 @@
     // How long after a deep link we watch for the page going hidden (= iOS switched
     // to Jupiter) before recording "no app switch".
     var DEEPLINK_OBSERVE_MS = 4000;
+
+    // WO-2197: the NO-PROGRESS watchdog. A healthy relay hands AppKit a `wc:`
+    // pairing uri within a few seconds of the tap; none within this window means
+    // the relay never answered this page, and the player must be told so instead of
+    // watching a spinner until DEFAULT_TIMEOUT_MS. Measured from the tap, so it
+    // includes the (bounded) READY_WAIT_MS wallet-list wait and the (bounded)
+    // UniversalProvider wait - up to 2 x READY_WAIT_MS before connect() even starts.
+    var NO_URI_WATCHDOG_MS = 15000;
 
     // Jupiter's explorer `mobile.native`. AppKit's CoreHelperUtil.formatNativeUrl
     // turns it into `jupiter://wc?uri=<encodeURIComponent(wc uri)>`; buildDeepLink
@@ -200,10 +242,69 @@
         NO_BUNDLE: 'no-bundle',
         CANCELLED: 'cancelled',
         TIMEOUT: 'timeout',
-        FAILED: 'failed'
+        FAILED: 'failed',
+        // WO-2197: the relay refused this page's ORIGIN (Reown allow-list). A door
+        // that cannot open here - the C# side falls through to the next wallet.
+        ORIGIN_NOT_ALLOWED: 'origin-not-allowed',
+        // WO-2197: no pairing uri within NO_URI_WATCHDOG_MS - the relay never
+        // answered, whatever the cause. Also a door that cannot open here.
+        NO_URI_TIMEOUT: 'no-uri-timeout'
     };
 
     function noop() {}
+
+    function readText(x) {
+        if (x == null) return '';
+        if (typeof x === 'string') return x;
+        var parts = [];
+        try { if (x.message) parts.push(String(x.message)); } catch (e) { /* opaque */ }
+        try { if (typeof x.reason === 'string') parts.push(x.reason); } catch (e) { /* opaque */ }
+        try {
+            if (x.reason && typeof x.reason === 'object') parts.push(readText(x.reason));
+        } catch (e) { /* opaque */ }
+        try {
+            if (x.error && typeof x.error === 'object') parts.push(readText(x.error));
+        } catch (e) { /* opaque */ }
+        if (!parts.length) { try { parts.push(String(x)); } catch (e) { /* opaque */ } }
+        return parts.join(' ');
+    }
+
+    function readCode(x) {
+        if (!x || typeof x !== 'object') return null;
+        try {
+            if (typeof x.code === 'number') return x.code;
+            if (x.reason && typeof x.reason === 'object' && typeof x.reason.code === 'number') return x.reason.code;
+            if (x.error && typeof x.error === 'object' && typeof x.error.code === 'number') return x.error.code;
+        } catch (e) { /* opaque */ }
+        return null;
+    }
+
+    // WO-2197. Is this error / close event the WalletConnect relay REFUSING this
+    // page? Returns REASON.ORIGIN_NOT_ALLOWED or ''. Accepts an Error (the
+    // relayer's own `relayer_error` payload), a CloseEvent-shaped {code, reason},
+    // an unhandledrejection-shaped {reason: Error} or a bare string. PURE: the
+    // suite drives it directly.
+    function classifyRelayRejection(x) {
+        if (readCode(x) === 3000) return REASON.ORIGIN_NOT_ALLOWED;
+        var text = readText(x);
+        if (/origin not allowed/i.test(text)) return REASON.ORIGIN_NOT_ALLOWED;
+        if (/closed abnormally with code:?\s*3000\b/i.test(text)) return REASON.ORIGIN_NOT_ALLOWED;
+        if (/\bunauthori[sz]ed\b/i.test(text)) return REASON.ORIGIN_NOT_ALLOWED;
+        return '';
+    }
+
+    // The WINDOW-level listeners see every unhandled error on the page, not only
+    // the relay's, so they only act on text that is relay-shaped - a stray game
+    // `Unauthorized` must never be read as "the relay refused this origin".
+    function looksRelayShaped(x) {
+        if (readCode(x) === 3000) return true;
+        return /websocket|relay|walletconnect|origin not allowed|code:?\s*3000\b/i.test(readText(x));
+    }
+
+    function pageOrigin(opts) {
+        try { if (opts && opts.origin) return String(opts.origin); } catch (e) { /* fall through */ }
+        try { return String((global.location && global.location.origin) || ''); } catch (e) { return ''; }
+    }
 
     function createEoaWalletConnect(options) {
         var opts = options || {};
@@ -213,6 +314,8 @@
         var projectId = opts.projectId ? String(opts.projectId) : '';
         var readyWaitMs = typeof opts.readyWaitMs === 'number' ? opts.readyWaitMs : READY_WAIT_MS;
         var observeMs = typeof opts.deeplinkObserveMs === 'number' ? opts.deeplinkObserveMs : DEEPLINK_OBSERVE_MS;
+        var noUriWatchdogMs = typeof opts.noUriWatchdogMs === 'number' ? opts.noUriWatchdogMs : NO_URI_WATCHDOG_MS;
+        var origin = pageOrigin(opts);
         // The one navigation this file performs (WO-2037 layer B). Injected so the
         // suite can capture it; in the page it is a same-frame location change, the
         // same frame AppKit's own openHref targets outside an iframe ('_self').
@@ -228,13 +331,29 @@
         var walletButton = null;
         var inFlight = null;
 
+        // WO-2197 — instance-level relay facts. ONE persistent relayer listener and
+        // ONE persistent display_uri listener per AppKit instance (hookRelayOnce),
+        // never one per attempt, so repeated taps add nothing to the page.
+        var relayHooked = false;
+        var relayRejection = '';   // latched: the relay refused this origin
+        var relayProven = false;   // latched: the relay produced a pairing uri here
+        var active = null;         // the in-flight attempt's reject hook, or null
+        // The current/last attempt's uri facts, carried on every snapshot. The
+        // attempt's ctx IS this object, so no terminal path can forget to stamp it.
+        var facts = { done: false, seen: false, observable: '', detach: noop };
+
         function snapshot() {
             return {
                 state: state,
                 reason: reason,
                 address: address,
                 detail: detail,
-                projectId: projectId ? 'set' : 'missing'
+                projectId: projectId ? 'set' : 'missing',
+                // WO-2197: the page origin the relay judged, and whether a pairing
+                // uri ever arrived. Never the uri itself (it carries the symKey).
+                origin: origin,
+                uriSeen: !!facts.seen,
+                uriObservable: String(facts.observable || '')
             };
         }
 
@@ -300,6 +419,18 @@
             }
             if (!ensureConfigured()) return Promise.resolve(snapshot());
 
+            facts = { done: false, seen: false, observable: '', detach: noop };
+            // WO-2197: the relay already refused this origin on this page. It does
+            // not reconnect by itself (transportExplicitlyClosed), so opening the
+            // modal again would only rebuild the same spinner. Answer at once.
+            if (relayRejection) {
+                trace('[EoaWalletConnect] relay refused this page earlier origin=' + (origin || 'unknown') +
+                      ' - not reopening the modal');
+                return Promise.resolve(settle('refused', REASON.ORIGIN_NOT_ALLOWED,
+                    'the WalletConnect relay refused this page origin=' + (origin || 'unknown') +
+                    ' (latched) detail=' + relayRejection));
+            }
+
             var wallet = walletId ? String(walletId) : JUPITER_WALLET;
             state = 'opening';
             reason = '';
@@ -309,22 +440,91 @@
             inFlight = new Promise(function (resolve) {
                 var done = false;
                 var timer = null;
+                var watchdog = null;
+                var detachWindow = noop;
+                // Shared with attachDisplayUri, which may subscribe LATE (after its
+                // bound) and must know whether the attempt is already over. It is
+                // the instance `facts`, so snapshot() always reports this attempt.
+                var ctx = facts;
+
+                // WO-2197: ONE teardown for every terminal path - the approval
+                // timer, the watchdog, the per-attempt display_uri listener and the
+                // window listeners. The instance-level relay hooks stay (one each).
+                function cleanup() {
+                    if (timer) { try { clearTimeout(timer); } catch (e) { /* no timers in a vm realm */ } timer = null; }
+                    if (watchdog) { try { clearTimeout(watchdog); } catch (e) { /* vm realm */ } watchdog = null; }
+                    try { ctx.detach(); } catch (e) { /* best effort */ }
+                    ctx.detach = noop;
+                    try { detachWindow(); } catch (e) { /* best effort */ }
+                    detachWindow = noop;
+                    active = null;
+                }
 
                 function finish(snap) {
                     if (done) return;
                     done = true;
-                    if (timer) { try { clearTimeout(timer); } catch (e) { /* no timers in a vm realm */ } }
+                    ctx.done = true;
+                    cleanup();
                     inFlight = null;
                     resolve(snap);
+                }
+
+                function closeModal() {
+                    try { if (appKit && appKit.close) appKit.close(); } catch (e) { /* closing is best effort */ }
+                }
+
+                // A door that cannot open here: say so by NAME, close the modal, and
+                // leave the page as it was before the tap.
+                function failUnavailable(nextReason, why) {
+                    if (done) return;
+                    trace('[EoaWalletConnect] door unavailable reason=' + nextReason +
+                          ' origin=' + (origin || 'unknown') + ' uriSeen=' + ctx.seen +
+                          ' uriObservable=' + (ctx.observable || 'unknown'));
+                    finish(settle('refused', nextReason, why));
+                    closeModal();
                 }
 
                 try {
                     ensureAppKit();
                 } catch (err) {
+                    ctx.observable = 'failed';
                     finish(settle('refused', REASON.FAILED,
                                   'AppKit could not be created: ' + msg(err)));
                     return;
                 }
+
+                active = {
+                    reject: function (why, via) {
+                        failUnavailable(REASON.ORIGIN_NOT_ALLOWED,
+                            'the WalletConnect relay refused this page origin=' + (origin || 'unknown') +
+                            ' via=' + via + ' detail=' + why);
+                    }
+                };
+
+                detachWindow = watchWindowErrors(function (why, via) {
+                    if (active) active.reject(why, via);
+                });
+
+                try {
+                    watchdog = setTimeout(function () {
+                        watchdog = null;
+                        if (done || ctx.seen) return;
+                        if (relayProven) {
+                            trace('[EoaWalletConnect] no-uri watchdog stood down: the relay already produced a ' +
+                                  'pairing uri on this page (AppKit may reuse it without a new display_uri)');
+                            return;
+                        }
+                        if (ctx.observable === 'unsupported') {
+                            trace('[EoaWalletConnect] no-uri watchdog cannot judge: display_uri is not observable ' +
+                                  'on this AppKit - the ' + timeoutMs + 'ms approval timeout still applies');
+                            return;
+                        }
+                        failUnavailable(REASON.NO_URI_TIMEOUT,
+                            'no WalletConnect pairing uri within ' + noUriWatchdogMs + 'ms of the tap - the relay ' +
+                            'never answered this page origin=' + (origin || 'unknown') +
+                            ' (uriObservable=' + (ctx.observable || 'unknown') + ')');
+                    }, noUriWatchdogMs);
+                } catch (e) { watchdog = null; }
 
                 try {
                     timer = setTimeout(function () {
@@ -332,23 +532,23 @@
                         // uninstalled app swallows the `jupiter://` navigation with no
                         // error of any kind. Without this the player stares at a modal
                         // forever; with it they get a sentence that names the cause.
+                        timer = null;
                         finish(settle('refused', REASON.TIMEOUT,
                                       'no approval arrived within ' + timeoutMs + 'ms - the Jupiter ' +
                                       'app may not be installed (it registers no universal link, so a ' +
                                       'missing app fails silently)'));
-                        try { if (appKit && appKit.close) appKit.close(); } catch (e) { /* closing is best effort */ }
+                        closeModal();
                     }, timeoutMs);
                 } catch (e) { timer = null; }
 
                 state = 'awaiting-approval';
-                trace('[EoaWalletConnect] awaiting approval for wallet=' + wallet);
+                trace('[EoaWalletConnect] awaiting approval for wallet=' + wallet +
+                      ' origin=' + (origin || 'unknown'));
 
                 var device = classifyDevice(opts.navigator || global.navigator);
                 trace('[EoaWalletConnect] platform=' + (device.phone ? 'phone' : 'desktop') +
                       ' why=' + device.why);
                 var startedAt = now();
-                var uriSeen = false;
-                var detachUri = noop;
 
                 // ONE navigation owner per attempt (see header): AppKit when the
                 // wallet list arrived in time, this file when it did not AND we are on
@@ -356,8 +556,9 @@
                 var owner = 'appkit';
 
                 function onDisplayUri(uri) {
-                    if (done || uriSeen) return;
-                    uriSeen = true;
+                    if (done || ctx.seen) return;
+                    ctx.seen = true;
+                    relayProven = true;
                     var u = String(uri || '');
                     // ⛔ NEVER the uri itself: it carries the pairing symKey.
                     trace('[EoaWalletConnect] display_uri received scheme=' +
@@ -390,32 +591,42 @@
                               (device.phone ? 'this page owns the jupiter:// deep link'
                                             : 'desktop keeps the QR'));
                     }
-                    return attachDisplayUri(onDisplayUri);
-                }).then(function (detach) {
-                    if (typeof detach === 'function') detachUri = detach;
-                    if (done) { detachUri(); return; }
+                    return attachDisplayUri(onDisplayUri, ctx);
+                }).then(function () {
+                    if (done) return;
 
                     var attempt;
                     try {
                         attempt = walletButton.connect(wallet);
                     } catch (err) {
-                        detachUri();
-                        finish(settle('refused', REASON.FAILED, 'connect threw: ' + msg(err)));
+                        onError(err, 'connect threw: ');
                         return;
                     }
-                    Promise.resolve(attempt).then(function (r) { detachUri(); onResult(r); },
-                                                  function (e) { detachUri(); onError(e); })
-                        .catch(onError);
+                    Promise.resolve(attempt).then(function (r) { onResult(r); },
+                                                  function (e) { onError(e); })
+                        .catch(function (e) { onError(e); });
                 }).catch(function (err) {
-                    detachUri();
                     onError(err);
                 });
 
-                function onError(err) {
-                    finish(settle('refused', REASON.FAILED, msg(err)));
+                function onError(err, prefix) {
+                    // After a WO-2197 close, AppKit rejects with "Modal closed" - by
+                    // then `done` is true and this is correctly a no-op.
+                    if (done) return;
+                    // WO-2197: the wallet-button's own rejection can carry the relay's
+                    // refusal sentence; if it does, that is the reason, not `failed`.
+                    if (classifyRelayRejection(err) === REASON.ORIGIN_NOT_ALLOWED) {
+                        relayRejection = msg(err);
+                        failUnavailable(REASON.ORIGIN_NOT_ALLOWED,
+                            'the WalletConnect relay refused this page origin=' + (origin || 'unknown') +
+                            ' via=connect-rejection detail=' + msg(err));
+                        return;
+                    }
+                    finish(settle('refused', REASON.FAILED, (prefix || '') + msg(err)));
                 }
 
                 function onResult(result) {
+                    if (done) return;
                     var addr = readAddress(result) || readAppKitAddress();
                     if (!addr) {
                         // Resolved with nothing = the modal closed without an account.
@@ -425,7 +636,7 @@
                         return;
                     }
                     address = addr;
-                    try { if (appKit && appKit.close) appKit.close(); } catch (e) { /* best effort */ }
+                    closeModal();
                     if (device.phone) ensureDeepLinkChoice('connect owner=' + owner);
                     finish(settle('connected', REASON.CONNECTED, 'address=' + addr));
                 }
@@ -562,35 +773,156 @@
 
         // Subscribes `handler` to the WalletConnect UniversalProvider's
         // `display_uri` (the event that carries the `wc:` pairing uri) BEFORE the
-        // connect starts, so the uri cannot be missed. Resolves a detach function.
+        // connect starts, so the uri cannot be missed. Resolves when subscribed or
+        // when the READY_WAIT_MS bound elapses, whichever is first; it sets
+        // `ctx.detach` and `ctx.observable` itself.
         // AppKit.getUniversalProvider() is public and memoised
         // (@reown/appkit appkit-base-client.js:1595-1615).
-        function attachDisplayUri(handler) {
+        //
+        // WO-2197: `ctx.observable` is what the no-uri watchdog judges by:
+        //   'unsupported' - this AppKit has no getUniversalProvider (older shapes,
+        //                   test fakes): the watchdog cannot judge and stands down.
+        //   'pending'     - asked, not answered yet. If the provider arrives AFTER
+        //                   the bound it is still subscribed (LATE), so a slow init
+        //                   never makes the watchdog kill a working attempt.
+        //   'yes'         - subscribed.
+        //   'failed'      - it threw / rejected / answered no provider: no pairing
+        //                   uri can arrive, so the watchdog fires.
+        function attachDisplayUri(handler, ctx) {
             if (!appKit || typeof appKit.getUniversalProvider !== 'function') {
+                ctx.observable = 'unsupported';
                 trace('[EoaWalletConnect] display_uri not observable: AppKit exposes no getUniversalProvider');
-                return Promise.resolve(noop);
+                return Promise.resolve();
             }
+            ctx.observable = 'pending';
             var got;
-            try { got = appKit.getUniversalProvider(); } catch (e) { got = null; }
-            var bounded = new Promise(function (resolve) {
-                try { setTimeout(function () { resolve(null); }, readyWaitMs); } catch (e) { /* vm */ }
-            });
-            return Promise.race([Promise.resolve(got), bounded]).then(function (up) {
-                if (!up || typeof up.on !== 'function') {
-                    trace('[EoaWalletConnect] display_uri not observable: no UniversalProvider');
-                    return noop;
+            try { got = appKit.getUniversalProvider(); } catch (e) {
+                ctx.observable = 'failed';
+                trace('[EoaWalletConnect] display_uri not observable: getUniversalProvider threw ' + msg(e));
+                return Promise.resolve();
+            }
+            return new Promise(function (resolve) {
+                var released = false;
+                var bound = null;
+                function release() {
+                    if (released) return;
+                    released = true;
+                    if (bound) { try { clearTimeout(bound); } catch (e) { /* vm realm */ } bound = null; }
+                    resolve();
                 }
-                up.on('display_uri', handler);
-                return function detach() {
-                    try {
-                        if (typeof up.off === 'function') up.off('display_uri', handler);
-                        else if (typeof up.removeListener === 'function') up.removeListener('display_uri', handler);
-                    } catch (e) { /* detaching is best effort */ }
-                };
-            }, function (err) {
-                trace('[EoaWalletConnect] display_uri not observable: ' + msg(err));
-                return noop;
+                Promise.resolve(got).then(function (up) {
+                    if (!up || typeof up.on !== 'function') {
+                        ctx.observable = 'failed';
+                        trace('[EoaWalletConnect] display_uri not observable: no UniversalProvider');
+                        release();
+                        return;
+                    }
+                    hookRelayOnce(up);
+                    if (ctx.done) { release(); return; }
+                    if (released) {
+                        trace('[EoaWalletConnect] display_uri subscribed LATE (after the ' + readyWaitMs +
+                              'ms bound) - the watchdog keeps judging');
+                    }
+                    up.on('display_uri', handler);
+                    ctx.observable = 'yes';
+                    ctx.detach = function detach() {
+                        try {
+                            if (typeof up.off === 'function') up.off('display_uri', handler);
+                            else if (typeof up.removeListener === 'function') up.removeListener('display_uri', handler);
+                        } catch (e) { /* detaching is best effort */ }
+                    };
+                    release();
+                }, function (err) {
+                    ctx.observable = 'failed';
+                    trace('[EoaWalletConnect] display_uri not observable: ' + msg(err));
+                    release();
+                });
+                try {
+                    bound = setTimeout(function () {
+                        bound = null;
+                        if (released) return;
+                        trace('[EoaWalletConnect] UniversalProvider not ready within ' + readyWaitMs +
+                              'ms - connecting anyway, still listening');
+                        release();
+                    }, readyWaitMs);
+                } catch (e) { /* vm realm */ }
             });
+        }
+
+        // WO-2197 — ONCE per AppKit instance: listen on the relayer for the
+        // refusal, and on display_uri for proof the relay works here. Both are
+        // deliberately PERSISTENT (one listener each for the instance's life, never
+        // one per tap) - relay facts outlive a single attempt.
+        // The relayer is UniversalProvider `.client.core.relayer`, and its
+        // `relayer_error` event carries the Error built in jsonrpc-provider onClose
+        // for close code 3000 (both read at source in wallet-connect.bundle.js).
+        function hookRelayOnce(up) {
+            if (relayHooked) return;
+            relayHooked = true;
+            var relayer = null;
+            try { relayer = up.client && up.client.core && up.client.core.relayer; } catch (e) { relayer = null; }
+            var target = null;
+            try {
+                if (relayer && typeof relayer.on === 'function') target = relayer;
+                else if (relayer && relayer.events && typeof relayer.events.on === 'function') target = relayer.events;
+            } catch (e) { target = null; }
+            if (target) {
+                try {
+                    target.on('relayer_error', onRelayError);
+                    trace('[EoaWalletConnect] relay watch attached origin=' + (origin || 'unknown'));
+                } catch (e) {
+                    trace('[EoaWalletConnect] relay watch could not attach: ' + msg(e) +
+                          ' - the no-uri watchdog is the backstop');
+                }
+            } else {
+                trace('[EoaWalletConnect] relay errors not observable: no client.core.relayer - ' +
+                      'the no-uri watchdog is the backstop');
+            }
+            try { up.on('display_uri', onAnyDisplayUri); } catch (e) { /* the per-attempt listener still runs */ }
+        }
+
+        function onRelayError(err) {
+            var kind = classifyRelayRejection(err);
+            trace('[EoaWalletConnect] relayer_error kind=' + (kind || 'other') +
+                  ' origin=' + (origin || 'unknown') + ' detail=' + msg(err));
+            if (kind !== REASON.ORIGIN_NOT_ALLOWED) return;
+            relayRejection = msg(err);
+            if (active) active.reject(relayRejection, 'relayer_error');
+        }
+
+        function onAnyDisplayUri() {
+            relayProven = true;
+            if (relayRejection) {
+                trace('[EoaWalletConnect] relay produced a pairing uri after an earlier refusal - latch cleared');
+                relayRejection = '';
+            }
+        }
+
+        // WO-2197 — per ATTEMPT: a relay refusal that surfaces only as an unhandled
+        // error/rejection on the page. Relay-shaped text only (looksRelayShaped).
+        // Returns the detach function; cleanup() always calls it.
+        function watchWindowErrors(onRefusal) {
+            var win = opts.window || global;
+            if (!win || typeof win.addEventListener !== 'function') return noop;
+            function handle(ev, via) {
+                var payload = ev && (ev.reason || ev.error || ev);
+                if (!looksRelayShaped(payload)) return;
+                if (classifyRelayRejection(payload) !== REASON.ORIGIN_NOT_ALLOWED) return;
+                relayRejection = readText(payload);
+                onRefusal(relayRejection, via);
+            }
+            function onRejection(ev) { handle(ev, 'unhandledrejection'); }
+            function onErrorEvent(ev) { handle(ev, 'window-error'); }
+            try {
+                win.addEventListener('unhandledrejection', onRejection);
+                win.addEventListener('error', onErrorEvent);
+            } catch (e) { return noop; }
+            return function detach() {
+                try {
+                    win.removeEventListener('unhandledrejection', onRejection);
+                    win.removeEventListener('error', onErrorEvent);
+                } catch (e) { /* best effort */ }
+            };
         }
 
         // The OUTCOME instrument for a deep link: iOS backgrounds the page when it
@@ -701,6 +1033,8 @@
         JUPITER_EXPLORER_ID: JUPITER_EXPLORER_ID,
         DEFAULT_TIMEOUT_MS: DEFAULT_TIMEOUT_MS,
         READY_WAIT_MS: READY_WAIT_MS,
+        NO_URI_WATCHDOG_MS: NO_URI_WATCHDOG_MS,
+        classifyRelayRejection: classifyRelayRejection,
         buildDeepLink: buildDeepLink,
         classifyDevice: classifyDevice,
         utf8Bytes: utf8Bytes,

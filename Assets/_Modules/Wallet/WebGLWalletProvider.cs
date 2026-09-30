@@ -2,12 +2,14 @@
 // Seeker keeps SolanaWalletProvider / MWA. Editor and Windows stay on StubWalletProvider.
 #if SOLANA_SDK && UNITY_WEBGL && !UNITY_EDITOR
 using System;
+using System.Collections.Generic;
 using Cysharp.Threading.Tasks;
 using Solana.Unity.SDK;
 using UnityEngine;
 using UnityEngine.Networking;
 using DeNelle.Core.Backend;
 using DeNelle.Core.Diagnostics;
+using DeNelle.Core.Platform;
 
 namespace DeNelle.Wallet
 {
@@ -60,6 +62,13 @@ namespace DeNelle.Wallet
         /// event name — StoreFirstScreenRegression fails the build when the count is not 1.
         /// </summary>
         public static string HandoffReturnedFrom { get; private set; } = string.Empty;
+
+        // WO-2197: the WalletConnect relay refused THIS page's origin earlier in this session
+        // (WebWalletFallbackPolicy.LatchesForPage). Static because the page, not the provider
+        // instance, is what the relay judged; a reload clears it, which is the only thing that
+        // could change the answer (the owner editing the Reown allow-list).
+        private static bool _originRefusedThisPage;
+        private static string _originRefusedOrigin = string.Empty;
 
         public async UniTask<WalletAccount> Connect(WalletNetwork network)
         {
@@ -147,8 +156,39 @@ namespace DeNelle.Wallet
                 // rides a custom scheme with no App Store fallback. An uninstalled app
                 // swallows the navigation silently — which is why the bridge's timeout
                 // is a reported refusal and not a hang.
+                //
+                // ⛔ WO-2197 — AND A DOOR THAT CANNOT OPEN MUST NEVER END IN A SPINNER.
+                // Owner rule 2026-09-30: on the web build a player who cannot use Pi must
+                // ALWAYS be able to reach some Solana wallet. Player bug report #32
+                // (2026-09-29 11:50Z, iPhone Safari, echoes-of-elarion.vercel.app): the
+                // WalletConnect relay closed with `code: 3000 (Unauthorized: origin not
+                // allowed)`, the modal spun ~40 s, the player closed it, and the trace read
+                // `refused reason=failed detail=Modal closed` - which the old reading below
+                // took for the player's own cancel, so NOTHING was offered next. Now
+                // WebWalletFallbackPolicy.IsDoorUnavailable reads the core's new reasons
+                // (`origin-not-allowed`, `no-uri-timeout`) and "closed before any pairing
+                // uri" as door-unavailable, and the player gets a localized one-tap
+                // chooser of the remaining Solana doors (Phantom, Solflare handoffs).
+                // ⛔ PI BROWSER KEEPS THE PRE-WO-2197 MAPPING, byte-identical in effect:
+                // `piHost` below routes it through the original lines untouched.
                 // ============================================================
-                if (WebGLWalletBridge.JupiterConfigured())
+                bool piHost = WebGLPiPlatform.IsPiBrowserEnvironment;
+                string unavailableReason = null;
+                string unavailableOrigin = string.Empty;
+
+                if (!piHost && _originRefusedThisPage)
+                {
+                    // The relay refused this page's origin earlier in this session; the
+                    // Reown allow-list does not change mid-session and the relayer does not
+                    // reconnect by itself, so a second tap goes straight to the chooser.
+                    unavailableReason = WebWalletFallbackPolicy.ReasonOriginNotAllowed;
+                    unavailableOrigin = PageOrigin(_originRefusedOrigin);
+                    FlowTrace.Fail("Wallet",
+                        "WebGLWalletProvider.Connect — the WalletConnect relay already refused this page origin=" +
+                        unavailableOrigin + " reason=" + unavailableReason +
+                        " (latched for this page) - skipping the Jupiter door, falling through to the next Solana door.");
+                }
+                else if (WebGLWalletBridge.JupiterConfigured())
                 {
                     LastConnectNotice = StoreStrings.Get(StoreStrings.KeyCommerceAwaitingApproval);
                     FlowTrace.Step("Wallet",
@@ -174,7 +214,14 @@ namespace DeNelle.Wallet
                     // and it is the mirror of the WO-1957 defect (one outcome wearing
                     // another's words). Only "the door was never really available"
                     // falls through to the browse handoff.
-                    bool doorWasUnavailable = jup.Reason == "no-project-id" || jup.Reason == "no-bundle";
+                    //
+                    // WO-2197: off Pi Browser the POLICY decides, and it also reads the
+                    // relay refusal, the no-uri watchdog and "closed before any pairing
+                    // uri" as a door that was never open. Pi Browser keeps the original
+                    // two-reason test, byte for byte.
+                    bool doorWasUnavailable = piHost
+                        ? (jup.Reason == "no-project-id" || jup.Reason == "no-bundle")
+                        : WebWalletFallbackPolicy.IsDoorUnavailable(jup.Reason, jup.UriSeen, jup.UriObservable);
                     if (!doorWasUnavailable)
                     {
                         LastConnectNotice = StoreStrings.Get(StoreStrings.KeyBalanceNoWallet);
@@ -186,11 +233,43 @@ namespace DeNelle.Wallet
                         _account = default;
                         return default;
                     }
-                    FlowTrace.Warn("Wallet",
-                        "WebGLWalletProvider.Connect — the Jupiter door is not available on this " +
-                        "build (" + jup + "). Falling through to the Solflare browse handoff.");
+                    if (piHost)
+                    {
+                        FlowTrace.Warn("Wallet",
+                            "WebGLWalletProvider.Connect — the Jupiter door is not available on this " +
+                            "build (" + jup + "). Falling through to the Solflare browse handoff.");
+                    }
+                    else
+                    {
+                        unavailableReason = jup.Reason;
+                        unavailableOrigin = PageOrigin(jup.Origin);
+                        if (WebWalletFallbackPolicy.LatchesForPage(jup.Reason))
+                        {
+                            _originRefusedThisPage = true;
+                            _originRefusedOrigin = unavailableOrigin;
+                        }
+                        FlowTrace.Fail("Wallet",
+                            "WebGLWalletProvider.Connect — the Jupiter (WalletConnect) door could not open on " +
+                            "this page origin=" + unavailableOrigin + " reason=" + jup.Reason +
+                            " uriSeen=" + jup.UriSeen + " (" + jup + "). Falling through to the next Solana door.");
+                    }
+                }
+                else if (!piHost)
+                {
+                    unavailableReason = WebWalletFallbackPolicy.ReasonNoProjectId;
+                    unavailableOrigin = PageOrigin(string.Empty);
+                    FlowTrace.Fail("Wallet",
+                        "WebGLWalletProvider.Connect — no Reown projectId reached this page origin=" +
+                        unavailableOrigin + " reason=" + unavailableReason +
+                        " - the Jupiter door cannot open; falling through to the next Solana door.");
                 }
 
+                if (!piHost)
+                {
+                    return OfferNextDoor(handoff, unavailableReason, unavailableOrigin);
+                }
+
+                // ⛔ PI BROWSER ONLY FROM HERE (WO-2197): the pre-WO-2197 fallthrough, unchanged.
                 // Solflare is the ONE browse-deeplink target proven at source (the CDN
                 // bundle, and docs.solflare.com .../other-methods/browse) that also
                 // injects a provider into its in-app browser, which is what makes the
@@ -265,6 +344,81 @@ namespace DeNelle.Wallet
             FlowTrace.Step("Wallet",
                 "WebGLWalletProvider connected " + _account.ShortAddress);
             return _account;
+        }
+
+        // =====================================================================
+        // WO-2197 — the fallthrough when the Jupiter (WalletConnect) door cannot open.
+        //
+        // The player ALWAYS ends on a visible, localized choice of the remaining Solana
+        // doors (WebWalletChooserModal, rows from WebWalletFallbackPolicy.ChooserTargets:
+        // Phantom then Solflare, each a browse handoff carrying the return URL), one tap
+        // each. The chooser is FIRE-AND-FORGET on purpose: Connect returns at once (no
+        // account lands on THIS page from a handoff anyway - the tap navigates away), so
+        // no caller ceiling (WalletService's WebGL 90 s, LoginPanelController's 35 s) can
+        // orphan a pending result, and a chooser left open still works when tapped.
+        // =====================================================================
+        private WalletAccount OfferNextDoor(WebGLWalletBridge.HandoffCapability handoff, string reason, string origin)
+        {
+            List<string> targets = WebWalletFallbackPolicy.ChooserTargets(handoff.Targets);
+            FlowTrace.Step("Wallet",
+                "WebGLWalletProvider.Connect — fallthrough target=chooser rows=" + string.Join(",", targets) +
+                " reason=" + (reason ?? "none") + " origin=" + origin +
+                " pageTargets=" + (handoff.Targets == null ? 0 : handoff.Targets.Length));
+            LastConnectNotice = StoreStrings.Get(StoreStrings.KeyBalanceNoWallet);
+            RunChooserAsync(targets, reason ?? "none").Forget();
+            _connected = false;
+            _account = default;
+            return default;
+        }
+
+        private static async UniTaskVoid RunChooserAsync(List<string> targets, string reason)
+        {
+            int index;
+            try
+            {
+                index = await WebWalletChooserModal.ShowAsync(targets, reason);
+            }
+            catch (Exception ex)
+            {
+                FlowTrace.Fail("Wallet", "WebGLWalletProvider chooser threw " + ex.GetType().Name + ": " + ex.Message);
+                index = -2;
+            }
+
+            if (index >= 0 && index < targets.Count)
+            {
+                string target = targets[index];
+                FlowTrace.Step("Wallet", "WebGLWalletProvider fallthrough -> handoff target=" + target +
+                                         " (the player tapped it in the chooser)");
+                WebGLWalletBridge.OpenHandoff(target);
+                return;
+            }
+            if (index == -2)
+            {
+                // The chooser could not be drawn. Never a dead end: the pre-WO-2197 door.
+                FlowTrace.Warn("Wallet", "WebGLWalletProvider fallthrough -> handoff target=" +
+                                         WebGLWalletBridge.HandoffSolflare + " (the chooser could not be shown)");
+                WebGLWalletBridge.OpenHandoff(WebGLWalletBridge.HandoffSolflare);
+                return;
+            }
+            FlowTrace.Step("Wallet", "WebGLWalletProvider chooser dismissed (reason=" + reason +
+                                     ") - nothing opened; the Connect door stays available.");
+        }
+
+        /// <summary>WO-2197: the origin the core reported, else this page's own origin
+        /// (scheme + host + port only - never the path or query, which can carry tokens).</summary>
+        private static string PageOrigin(string reported)
+        {
+            if (!string.IsNullOrEmpty(reported)) return reported;
+            try
+            {
+                string url = Application.absoluteURL;
+                if (string.IsNullOrEmpty(url)) return "unknown";
+                return new Uri(url).GetLeftPart(UriPartial.Authority);
+            }
+            catch (Exception)
+            {
+                return "unknown";
+            }
         }
 
         public UniTask Disconnect()

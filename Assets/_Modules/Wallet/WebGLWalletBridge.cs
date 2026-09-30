@@ -113,6 +113,10 @@ namespace DeNelle.Wallet
             public bool Framed;
             public string ReturnedFrom;
 
+            /// <summary>WO-2197: the handoff targets the page can open (wallet-handoff.js
+            /// TARGETS). Empty when an older cached template does not report them.</summary>
+            public string[] Targets;
+
             /// <summary>
             /// The one question Connect actually asks: a phone browser with no wallet
             /// injected is the ONLY shape where the SDK picker cannot help.
@@ -132,14 +136,16 @@ namespace DeNelle.Wallet
             public string injectedName;
             public bool framed;
             public string returned;
+            public string[] targets;
         }
 
         /// <summary>The Solflare browse target. Read at source in the CDN bundle and
-        /// confirmed against docs.solflare.com — it needs no session and no key.</summary>
-        internal const string HandoffSolflare = "solflare";
+        /// confirmed against docs.solflare.com — it needs no session and no key.
+        /// WO-2197: defined FROM <see cref="WebWalletFallbackPolicy"/>, the one C# home.</summary>
+        internal const string HandoffSolflare = WebWalletFallbackPolicy.TargetSolflare;
 
         /// <summary>The Phantom browse target — same shape, same bundle.</summary>
-        internal const string HandoffPhantom = "phantom";
+        internal const string HandoffPhantom = WebWalletFallbackPolicy.TargetPhantom;
 
         /// <summary>
         /// Reads the page's capability. NEVER throws: a refusal is a value, because a
@@ -151,6 +157,7 @@ namespace DeNelle.Wallet
             var cap = default(HandoffCapability);
             cap.InjectedName = string.Empty;
             cap.ReturnedFrom = string.Empty;
+            cap.Targets = Array.Empty<string>();
             try
             {
                 string json = EoaWalletHandoffCapability();
@@ -162,6 +169,7 @@ namespace DeNelle.Wallet
                 cap.InjectedName = dto.injectedName ?? string.Empty;
                 cap.Framed = dto.framed;
                 cap.ReturnedFrom = dto.returned ?? string.Empty;
+                cap.Targets = dto.targets ?? Array.Empty<string>();
             }
             catch (Exception ex)
             {
@@ -235,8 +243,9 @@ namespace DeNelle.Wallet
         //
         // ⛔ AND NEVER `Login cancelled`. Every non-connected outcome arrives here
         // with its own reason code — no-project-id / no-bundle / cancelled /
-        // timeout / failed — because WO-1957 §0 is a day lost to a redirect and a
-        // cancel wearing the same words.
+        // timeout / failed, and since WO-2197 origin-not-allowed / no-uri-timeout —
+        // because WO-1957 §0 is a day lost to a redirect and a cancel wearing the
+        // same words.
         // =====================================================================
 
         /// <summary>The WalletConnect-explorer slug AppKit's wallet button takes.</summary>
@@ -252,10 +261,20 @@ namespace DeNelle.Wallet
             public string Address;
             public string Reason;
             public string Detail;
+            /// <summary>WO-2197: the page origin the WalletConnect relay judged.</summary>
+            public string Origin;
+            /// <summary>WO-2197: whether a WalletConnect pairing uri ever arrived.</summary>
+            public bool UriSeen;
+            /// <summary>WO-2197: whether display_uri was observable (yes / pending /
+            /// failed / unsupported) - see WebWalletFallbackPolicy.RelayWasAsked.</summary>
+            public string UriObservable;
 
             public override string ToString() =>
                 "ok=" + Ok + " reason=" + (string.IsNullOrEmpty(Reason) ? "none" : Reason) +
                 " address=" + (string.IsNullOrEmpty(Address) ? "none" : Address) +
+                " origin=" + (string.IsNullOrEmpty(Origin) ? "unknown" : Origin) +
+                " uriSeen=" + UriSeen +
+                " uriObservable=" + (string.IsNullOrEmpty(UriObservable) ? "unknown" : UriObservable) +
                 (string.IsNullOrEmpty(Detail) ? string.Empty : " detail=" + Detail);
         }
 
@@ -267,6 +286,10 @@ namespace DeNelle.Wallet
             public string address;
             public string detail;
             public string projectId;
+            // WO-2197 (wallet-connect.core.js snapshot): never the pairing uri itself.
+            public string origin;
+            public bool uriSeen;
+            public string uriObservable;
         }
 
         /// <summary>
@@ -342,6 +365,9 @@ namespace DeNelle.Wallet
                             ? (result.Ok ? "connected" : "failed")
                             : dto.reason;
                         result.Detail = dto.detail ?? string.Empty;
+                        result.Origin = dto.origin ?? string.Empty;
+                        result.UriSeen = dto.uriSeen;
+                        result.UriObservable = dto.uriObservable ?? string.Empty;
                         if (result.Ok) FlowTrace.Step("Wallet", "Jupiter connect " + result);
                         else FlowTrace.Warn("Wallet", "Jupiter connect REFUSED " + result);
                         return result;
