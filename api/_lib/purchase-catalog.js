@@ -181,6 +181,38 @@ function isFlatSku(sku) {
     return skrFlatFor(sku) != null;
 }
 
+// ── REPEATABLE (consumable) SKUS — WO-2204, read out of the SAME generated catalog ──
+//
+// Owner ruling relayed 2026-10-01: consumable resource packs must be re-buyable any number
+// of times; only permanent one-time items are "already owned". The one authoring surface is
+// packs.json `repeatable` (an explicit boolean on every priced row), copied verbatim into
+// ./sku-catalog.generated.json - never re-typed here. A retired id in `legacySkus` maps to its
+// row, because the client's ownership sweep asks per ownership key (WO-1952). ⛔ An unknown
+// sku, or a row without an explicit `true`, is NOT repeatable: it keeps the original
+// permanent-entitlement reconcile, which is the behaviour every row had before this field.
+const REPEATABLE = Object.freeze((() => {
+    const out = {};
+    const rows = Array.isArray(SKU_CATALOG && SKU_CATALOG.packs) ? SKU_CATALOG.packs : [];
+    for (const row of rows) {
+        if (!row || row.sku == null) continue;
+        const rep = row.repeatable === true;
+        out[String(row.sku)] = rep;
+        const legacy = Array.isArray(row.legacySkus) ? row.legacySkus : [];
+        for (const alias of legacy) {
+            const a = alias == null ? '' : String(alias);
+            // A live sku is matched first and can never be shadowed by another row's alias.
+            if (a && !Object.prototype.hasOwnProperty.call(out, a)) out[a] = rep;
+        }
+    }
+    return out;
+})());
+
+/** True when buying this SKU again is a NEW purchase (a consumable), never a restore. */
+function isRepeatableSku(sku) {
+    const key = sku == null ? '' : String(sku);
+    return Object.prototype.hasOwnProperty.call(REPEATABLE, key) && REPEATABLE[key] === true;
+}
+
 // ⚠ RECORDED ON THE ROW AND ON THE WIRE where an oracle id would otherwise go, so
 // a disputed charge months later reads "no rate was consulted" instead of a
 // missing field a reader would guess at. purchase_quotes.rate_source is NOT NULL
@@ -584,6 +616,7 @@ module.exports = { DEVNET_CANARY_SKU, DEVNET_PACKS, MAINNET_CANARY_SKU, MAINNET_
     MAINNET_SKR_MINT, MAINNET_CANARY_OWNER, SKR_DECIMALS_BY_NETWORK, USD_ANCHORS,
     QUOTE_TTL_SECONDS, QUOTE_SETTLEMENT_GRACE_SECONDS, RATE_SOURCE,
     SKR_FLAT, FLAT_RATE_SOURCE, FLAT_ROW_RATE, skrFlatFor, isFlatSku, quoteFlatAmount,
+    isRepeatableSku,
     mainnetCanaryEnabled, walletAllowed, purchaseContract, purchaseRail, isPinnedSku,
     usdAnchor, quoteAmount, pinnedSkus, fetchSkrUsdRate, buildQuoteBody, discountLabelFor,
     quotableSkus,
