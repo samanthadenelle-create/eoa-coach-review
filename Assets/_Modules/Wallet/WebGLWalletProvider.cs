@@ -10,6 +10,7 @@ using UnityEngine.Networking;
 using DeNelle.Core.Backend;
 using DeNelle.Core.Diagnostics;
 using DeNelle.Core.Platform;
+using LocalText = DeNelle.Core.UI.LocalText;
 
 namespace DeNelle.Wallet
 {
@@ -495,7 +496,8 @@ namespace DeNelle.Wallet
         {
             if (!IsConnected)
                 return UniTask.FromResult(PaymentResult.Failure(
-                    packSku, currency, "No wallet is connected. Nothing was charged."));
+                    packSku, currency,
+                    LocalText.Get("store.pay.web_no_wallet", "No wallet is connected. Nothing was charged.")));
             return WebGLPaymentBuilder.SendPayment(_account.Address, packSku, currency, amount, network);
         }
 

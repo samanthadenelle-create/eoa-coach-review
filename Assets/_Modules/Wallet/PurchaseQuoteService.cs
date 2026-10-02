@@ -40,6 +40,7 @@ using DeNelle.Core.Backend;
 using Newtonsoft.Json;
 using UnityEngine;
 using UnityEngine.Networking;
+using LocalText = DeNelle.Core.UI.LocalText;
 
 namespace DeNelle.Wallet
 {
@@ -242,7 +243,8 @@ namespace DeNelle.Wallet
         public string UsdSavingLabel =>
             IsDiscounted && UsdAnchor.HasValue && UsdAnchor.Value > 0d &&
             UsdSaving.HasValue && UsdSaving.Value > 0d
-                ? $"was ${UsdAnchor.Value:0.00} - save ${UsdSaving.Value:0.00}"
+                ? LocalText.FormatWithFallback("store.pay.quote_was_save", "was {0} - save {1}",
+                    $"${UsdAnchor.Value:0.00}", $"${UsdSaving.Value:0.00}")
                 : string.Empty;
 
         // =====================================================================
@@ -389,10 +391,13 @@ namespace DeNelle.Wallet
             TimeSpan left = ends.Value - nowUtc;
             if (left.TotalMinutes < 1d) return string.Empty;
             if (left.TotalDays >= 1d)
-                return "ends in " + (int)left.TotalDays + "d " + left.Hours + "h";
+                return LocalText.FormatWithFallback("store.pay.quote_ends_days_hours", "ends in {0}d {1}h",
+                    (int)left.TotalDays, left.Hours);
             if (left.TotalHours >= 1d)
-                return "ends in " + (int)left.TotalHours + "h " + left.Minutes + "m";
-            return "ends in " + (int)left.TotalMinutes + "m";
+                return LocalText.FormatWithFallback("store.pay.quote_ends_hours_minutes", "ends in {0}h {1}m",
+                    (int)left.TotalHours, left.Minutes);
+            return LocalText.FormatWithFallback("store.pay.quote_ends_minutes", "ends in {0}m",
+                (int)left.TotalMinutes);
         }
 
     }

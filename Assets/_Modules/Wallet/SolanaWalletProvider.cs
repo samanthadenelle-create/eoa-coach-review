@@ -68,6 +68,7 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEngine;
 using UnityEngine.Networking;
+using LocalText = DeNelle.Core.UI.LocalText;
 
 #if SOLANA_SDK
 // VERIFIED (v1.2.9): Solana.Unity.SDK (Web3 facade), Solana.Unity.Wallet
@@ -598,7 +599,8 @@ namespace DeNelle.Wallet
         {
 #if SOLANA_SDK
             if (!_connected || !_account.IsValid)
-                return PaymentResult.Failure(packSku, currency, "No wallet connected.");
+                return PaymentResult.Failure(packSku, currency,
+                    LocalText.Get("store.pay.sol_no_wallet", "No wallet connected."));
 
 #if MAINNET_CANARY_TEST
             if (network == WalletNetwork.Mainnet &&
@@ -640,10 +642,12 @@ namespace DeNelle.Wallet
             // runs BEFORE this, so a fabricated wallet can never reach these lines.
             if (network == WalletNetwork.Mainnet && currency != CurrencyKind.Skr)
                 return PaymentResult.Failure(packSku, currency,
-                    "Mainnet purchases settle in SKR. Nothing has been charged.");
+                    LocalText.Get("store.pay.sol_mainnet_settle_note",
+                        "Mainnet purchases settle in SKR. Nothing has been charged."));
             if (network == WalletNetwork.Mainnet && !(amount > 0d))
                 return PaymentResult.Failure(packSku, currency,
-                    "No server price was issued for this pack, so nothing was charged. Try again in a moment.");
+                    LocalText.Get("store.pay.sol_no_server_price",
+                        "No server price was issued for this pack, so nothing was charged. Try again in a moment."));
 
 #endif
             // ⛔ THE RECIPIENT COMES FROM THE SERVER-BOUND QUOTE, ON EVERY NETWORK (one-sheet lane,
@@ -663,7 +667,8 @@ namespace DeNelle.Wallet
             var quotedAta = boundQuote != null ? boundQuote.RecipientAta : null;
             if (string.IsNullOrEmpty(recipient))
                 return PaymentResult.Failure(packSku, currency,
-                    "No server price was issued for this pack, so nothing was charged. Try again in a moment.");
+                    LocalText.Get("store.pay.sol_no_server_price",
+                        "No server price was issued for this pack, so nothing was charged. Try again in a moment."));
 
             // WO-766 SAFETY: this is the ONLY transfer-constructing code in the
             // wallet module, and it is UNREACHABLE in release builds -
@@ -679,7 +684,8 @@ namespace DeNelle.Wallet
                 // SDK-VERIFY: GetLatestBlockHashAsync -> Result.Value.Blockhash.
                 var blockHash = await rpc.GetLatestBlockHashAsync();
                 if (blockHash == null || !blockHash.WasSuccessful || blockHash.Result == null)
-                    return PaymentResult.Failure(packSku, currency, "Could not fetch a recent blockhash.");
+                    return PaymentResult.Failure(packSku, currency,
+                        LocalText.Get("store.pay.sol_no_blockhash", "Could not fetch a recent blockhash."));
                 var recentBlockhash = blockHash.Result.Value.Blockhash;
 
                 // WO-766: build the UNSIGNED transaction with the SDK-documented
@@ -735,7 +741,8 @@ namespace DeNelle.Wallet
                         Debug.LogError("[SolanaWalletProvider] quote recipientAta " + quotedAta +
                                        " != derived ATA " + toAta.Key + " for recipient " + recipient + " - refusing.");
                         return PaymentResult.Failure(packSku, currency,
-                            "The server's treasury account does not match this pack's quote; no payment was submitted.");
+                            LocalText.Get("store.pay.sol_treasury_mismatch",
+                                "The server's treasury account does not match this pack's quote; no payment was submitted."));
                     }
 
                     // Create the recipient ATA only when it does not exist. The SDK version in this
@@ -744,7 +751,8 @@ namespace DeNelle.Wallet
                     var recipientAta = await rpc.GetAccountInfoAsync(toAta.Key, Commitment.Confirmed);
                     if (recipientAta == null || !recipientAta.WasSuccessful || recipientAta.Result == null)
                         return PaymentResult.Failure(packSku, currency,
-                            "Could not verify the recipient token account; no payment was submitted.");
+                            LocalText.Get("store.pay.sol_recipient_unverified",
+                                "Could not verify the recipient token account; no payment was submitted."));
                     if (recipientAta.Result.Value == null)
                         tx.Instructions.Add(
                             AssociatedTokenAccountProgram.CreateAssociatedTokenAccount(from, to, mint));
@@ -794,13 +802,15 @@ namespace DeNelle.Wallet
                 }
                 if (signedWire == null || signedWire.Length == 0)
                     return PaymentResult.Failure(packSku, currency,
-                        "Wallet returned no signed transaction (cancelled or refused).");
+                        LocalText.Get("store.pay.sol_wallet_returned_nothing",
+                            "Wallet returned no signed transaction (cancelled or refused)."));
 
                 // Capture the deterministic signature before transport. If RPC accepts the wire
                 // but its response is lost, PackStore can still persist and reconcile this receipt.
                 if (!TryReadPrimarySignature(signedWire, out string signedSignature))
                     return PaymentResult.Failure(packSku, currency,
-                        "Wallet returned a malformed signed transaction; nothing was submitted.");
+                        LocalText.Get("store.pay.sol_wallet_malformed_signed",
+                            "Wallet returned a malformed signed transaction; nothing was submitted."));
 
                 // The pinned SDK collapses some HTTP/RPC failures into the opaque string
                 // "Unable to parse json", discarding the node response. Use explicit JSON-RPC
@@ -811,7 +821,8 @@ namespace DeNelle.Wallet
                 if (string.IsNullOrEmpty(submitted.signature))
                 {
                     return PaymentResult.Indeterminate(packSku, currency, amount, signedSignature,
-                        "Transaction submission outcome is unknown. Reconcile this receipt; do not pay again.");
+                        LocalText.Get("store.pay.sol_submit_unknown",
+                            "Transaction submission outcome is unknown. Reconcile this receipt; do not pay again."));
 #if false
                     var err = submitted.error;
                     return PaymentResult.Failure(packSku, currency, $"Transaction submission failed — {err}.");
@@ -821,7 +832,8 @@ namespace DeNelle.Wallet
                 var signature = submitted.signature;
                 if (!string.Equals(signature, signedSignature, StringComparison.Ordinal))
                     return PaymentResult.Indeterminate(packSku, currency, amount, signedSignature,
-                        "RPC returned a different signature. Reconcile the wallet-signed receipt; do not pay again.");
+                        LocalText.Get("store.pay.sol_signature_mismatch",
+                            "RPC returned a different signature. Reconcile the wallet-signed receipt; do not pay again."));
 
                 // ── Await devnet confirmation ────────────────────────────────
                 // RPC acceptance is the handoff point, not entitlement authority. Return the

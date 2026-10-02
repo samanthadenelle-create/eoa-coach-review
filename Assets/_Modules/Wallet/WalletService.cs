@@ -26,6 +26,7 @@ using DeNelle.Core.Backend;
 using DeNelle.Core.Diagnostics;
 using DeNelle.Core.Platform;
 using UnityEngine;
+using LocalText = DeNelle.Core.UI.LocalText;
 
 namespace DeNelle.Wallet
 {
@@ -329,7 +330,9 @@ namespace DeNelle.Wallet
         }
 
         /// <summary>Human-readable label for the active network — used by UI badges.</summary>
-        public string NetworkLabel => Network == WalletNetwork.Mainnet ? "Mainnet" : "Devnet";
+        public string NetworkLabel => Network == WalletNetwork.Mainnet
+            ? LocalText.Get("store.wallet.network_mainnet", "Mainnet")
+            : LocalText.Get("store.wallet.network_devnet", "Devnet");
 
         /// <summary>Raised whenever the connection status changes (connected / disconnected).</summary>
         public event Action<WalletStatus> StatusChanged;
@@ -373,11 +376,13 @@ namespace DeNelle.Wallet
         // development and release alike — deliberately NOT #if-guarded). Public
         // consts so the regression cases assert the exact reason, not a paraphrase.
         /// <summary>WO-931: <see cref="Pay"/>/<see cref="PayFlat"/> refusal reason when the resolved provider is the devnet stub.</summary>
-        public const string StubPaymentRefusalReason =
-            "Payments are unavailable: the devnet stub wallet cannot make a real payment.";
+        public static string StubPaymentRefusalReason =>
+            LocalText.Get("store.pay.sol_stub_refused",
+                "Payments are unavailable: the devnet stub wallet cannot make a real payment.");
         /// <summary>WO-931: refusal reason when a connected provider holds no signing key (fails <see cref="IsRealSigningWallet"/>).</summary>
-        public const string NonSigningPaymentRefusalReason =
-            "Payments are unavailable: the connected wallet provider holds no signing key.";
+        public static string NonSigningPaymentRefusalReason =>
+            LocalText.Get("store.pay.sol_nonsigning_refused",
+                "Payments are unavailable: the connected wallet provider holds no signing key.");
 
         /// <summary>
         /// Constructs the service over an explicit provider — used by tests and
@@ -556,7 +561,8 @@ namespace DeNelle.Wallet
                 }
                 else
                 {
-                    LastConnectError = "Connect was cancelled or refused by the wallet.";
+                    LastConnectError = LocalText.Get("store.wallet.connect_refused",
+                        "Connect was cancelled or refused by the wallet.");
                     FlowTrace.Warn("Wallet", "Connect resolved an INVALID account — cancelled or refused; staying disconnected.");
                     TrackConnectResult("refused", "invalid-account", null, Time.realtimeSinceStartup - connectStartedAt);
                 }
@@ -590,8 +596,9 @@ namespace DeNelle.Wallet
 
                 if (ourDeadline)
                 {
-                    LastConnectError = "Your wallet did not respond in " + (int)connectCeiling +
-                                       " seconds. Open your wallet app and try again.";
+                    LastConnectError = LocalText.FormatWithFallback("store.wallet.connect_timeout",
+                        "Your wallet did not respond in {0} seconds. Open your wallet app and try again.",
+                        (int)connectCeiling);
                     FlowTrace.Fail("Wallet",
                         $"Connect TIMED OUT after {elapsed:F1}s (our {connectCeiling}s deadline expired - " +
                         "no wallet app installed, or the handshake was never answered) — staying disconnected." +
@@ -599,7 +606,8 @@ namespace DeNelle.Wallet
                 }
                 else
                 {
-                    LastConnectError = "Your wallet refused the connection. Open your wallet app and try again.";
+                    LastConnectError = LocalText.Get("store.wallet.connect_refused_retry",
+                        "Your wallet refused the connection. Open your wallet app and try again.");
                     FlowTrace.Fail("Wallet",
                         $"Connect REFUSED by the wallet after {elapsed:F1}s (TimeoutException raised INSIDE the " +
                         $"provider, not our {ConnectTimeoutSeconds}s deadline): {ex.Message} — staying disconnected." +
@@ -612,7 +620,8 @@ namespace DeNelle.Wallet
             }
             catch (Exception ex)
             {
-                LastConnectError = "Wallet connect failed (" + ex.GetType().Name + ").";
+                LastConnectError = LocalText.FormatWithFallback("store.wallet.connect_failed_type",
+                    "Wallet connect failed ({0}).", ex.GetType().Name);
                 FlowTrace.Fail("Wallet", $"Connect FAILED: {ex.GetType().Name}: {ex.Message} — staying disconnected.");
                 TrackConnectResult("error", ex.GetType().Name, ex.Message, Time.realtimeSinceStartup - connectStartedAt);
                 SetStatus(WalletStatus.Disconnected);
@@ -747,14 +756,17 @@ namespace DeNelle.Wallet
             if (!IsConnected)
             {
                 FlowTrace.Warn("Wallet", $"Pay '{pack.Sku}' ({currency}): no wallet connected — aborted (player NOT charged).");
-                return PaymentResult.Failure(pack.Sku, currency, "No wallet connected — connect a wallet first.");
+                return PaymentResult.Failure(pack.Sku, currency,
+                    LocalText.Get("store.pay.sol_connect_first", "No wallet connected — connect a wallet first."));
             }
 
             var amount = pack.AmountFor(currency);
             if (amount <= 0d)
             {
                 FlowTrace.Fail("Wallet", $"Pay '{pack.Sku}': no price for {currency} (amount={amount}) — payment aborted.");
-                return PaymentResult.Failure(pack.Sku, currency, $"Pack '{pack.Sku}' has no price for {currency}.");
+                return PaymentResult.Failure(pack.Sku, currency,
+                    LocalText.FormatWithFallback("store.pay.sol_no_price_for_currency",
+                        "Pack '{0}' has no price for {1}.", pack.Sku, currency));
             }
 
             // WO-931 belt to the stub short-circuit above: with IsConnected now
@@ -817,13 +829,15 @@ namespace DeNelle.Wallet
             if (!IsConnected)
             {
                 FlowTrace.Warn("Wallet", $"PayFlat '{transactionId}' ({currency}): no wallet connected — aborted (player NOT charged).");
-                return PaymentResult.Failure(transactionId, currency, "No wallet connected.");
+                return PaymentResult.Failure(transactionId, currency,
+                    LocalText.Get("store.pay.sol_no_wallet", "No wallet connected."));
             }
 
             if (amount <= 0d)
             {
                 FlowTrace.Fail("Wallet", $"PayFlat '{transactionId}' ({currency}): amount must be > 0 (was {amount}) — aborted.");
-                return PaymentResult.Failure(transactionId, currency, "Amount must be > 0.");
+                return PaymentResult.Failure(transactionId, currency,
+                    LocalText.Get("store.pay.sol_amount_invalid", "Amount must be > 0."));
             }
 
             // WO-931 belt (see Pay): a connected provider that cannot attest a

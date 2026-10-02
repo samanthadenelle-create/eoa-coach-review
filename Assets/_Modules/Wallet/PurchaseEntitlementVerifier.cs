@@ -6,6 +6,7 @@ using DeNelle.Core.Backend;
 using Newtonsoft.Json;
 using UnityEngine;
 using UnityEngine.Networking;
+using LocalText = DeNelle.Core.UI.LocalText;
 
 namespace DeNelle.Wallet
 {
@@ -119,7 +120,8 @@ namespace DeNelle.Wallet
         {
             if (pack == null || wallet == null || !wallet.IsRealSigningWallet)
                 return new EntitlementVerificationResult(EntitlementVerificationState.Unavailable, null,
-                    error: "A connected signing wallet is required to verify this payment.");
+                    error: LocalText.Get("store.pay.verify_wallet_required",
+                        "A connected signing wallet is required to verify this payment."));
 
             PendingPurchase pending;
             try
@@ -131,15 +133,17 @@ namespace DeNelle.Wallet
             {
                 FlowTrace.Fail("Store", "verify_pending: pending_record_parse_failed.");
                 return new EntitlementVerificationResult(EntitlementVerificationState.Unavailable, null,
-                    error: "The pending purchase record is unreadable; contact support before paying again.");
+                    error: LocalText.Get("store.pay.verify_record_unreadable",
+                        "The pending purchase record is unreadable; contact support before paying again."));
             }
 
             if (pending == null || string.IsNullOrEmpty(pending.txSignature))
                 return new EntitlementVerificationResult(EntitlementVerificationState.Unavailable, null,
-                    error: "No pending payment exists.");
+                    error: LocalText.Get("store.pay.verify_no_pending", "No pending payment exists."));
             if (!string.Equals(pending.playerId, wallet.Account.Address, StringComparison.Ordinal))
                 return new EntitlementVerificationResult(EntitlementVerificationState.Rejected,
-                    pending.txSignature, error: "Connect the wallet that made this payment.");
+                    pending.txSignature, error: LocalText.Get("store.pay.verify_connect_payer",
+                        "Connect the wallet that made this payment."));
             string expectedNetwork = WireNetwork(wallet.Network);
             string expectedCurrency = currency.ToString().ToUpperInvariant();
             if (!string.Equals(pending.sku, pack.Sku, StringComparison.Ordinal) ||
@@ -147,7 +151,8 @@ namespace DeNelle.Wallet
                 !string.Equals(pending.currency, expectedCurrency, StringComparison.Ordinal))
                 return new EntitlementVerificationResult(EntitlementVerificationState.Rejected,
                     pending.txSignature,
-                    error: "The recorded payment does not match this SKU, network, and currency.");
+                    error: LocalText.Get("store.pay.verify_mismatch",
+                        "The recorded payment does not match this SKU, network, and currency."));
 
             byte[] body = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(new
             {
@@ -171,7 +176,8 @@ namespace DeNelle.Wallet
             req.SetRequestHeader("Accept", "application/json");
             if (!await BackendRequestSigner.TryAttachAsync(req, pending.playerId, body))
                 return new EntitlementVerificationResult(EntitlementVerificationState.Unavailable,
-                    pending.txSignature, error: "Could not authenticate the verification request.");
+                    pending.txSignature, error: LocalText.Get("store.pay.verify_auth_failed",
+                        "Could not authenticate the verification request."));
 
             try { await req.SendWebRequest(); }
             catch (Exception ex)
@@ -300,7 +306,8 @@ namespace DeNelle.Wallet
                         ? EntitlementVerificationState.Fulfilled : EntitlementVerificationState.Verified,
                     response.TxSignature, response.EntitlementId);
             return new EntitlementVerificationResult(EntitlementVerificationState.Rejected, null,
-                error: response?.Code ?? "No durable entitlement exists for this SKU.");
+                error: response?.Code ?? LocalText.Get("store.pay.verify_no_entitlement",
+                    "No durable entitlement exists for this SKU."));
         }
 
         /// <summary>

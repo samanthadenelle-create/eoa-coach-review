@@ -27,6 +27,7 @@ using System;
 using System.Runtime.InteropServices;
 using Cysharp.Threading.Tasks;
 using DeNelle.Core.Diagnostics;
+using LocalText = DeNelle.Core.UI.LocalText;
 
 namespace DeNelle.Wallet
 {
@@ -518,7 +519,7 @@ namespace DeNelle.Wallet
             string txBase64, string what)
         {
             if (string.IsNullOrEmpty(txBase64))
-                return (false, null, "There was nothing to sign.");
+                return (false, null, LocalText.Get("store.pay.web_sign_nothing", "There was nothing to sign."));
 
             EnsureInstalled();
 
@@ -527,10 +528,12 @@ namespace DeNelle.Wallet
             catch (Exception ex)
             {
                 FlowTrace.Fail("WebPay", "sign begin threw " + ex.GetType().Name + ": " + ex.Message);
-                return (false, null, "This build cannot reach the browser wallet. Nothing was signed.");
+                return (false, null, LocalText.Get("store.pay.web_sign_unreachable",
+                    "This build cannot reach the browser wallet. Nothing was signed."));
             }
             if (handle <= 0)
-                return (false, null, "The browser wallet bridge did not start. Nothing was signed.");
+                return (false, null, LocalText.Get("store.pay.web_sign_not_started",
+                    "The browser wallet bridge did not start. Nothing was signed."));
 
             FlowTrace.Step("WebPay", "sign requested (" + what + ") handle=" + handle +
                                      " wallet=" + WalletName());
@@ -545,30 +548,38 @@ namespace DeNelle.Wallet
                     {
                         string signed = EoaWalletBridgeSignResult(handle);
                         if (string.IsNullOrEmpty(signed))
-                            return (false, null, "The wallet returned an empty signature. Nothing was submitted.");
+                            return (false, null, LocalText.Get("store.pay.web_sign_empty",
+                                "The wallet returned an empty signature. Nothing was submitted."));
                         FlowTrace.Step("WebPay", "sign returned (" + what + ") bytes=" + signed.Length);
                         return (true, signed, null);
                     }
                     if (state == 2)
                     {
                         string message = EoaWalletBridgeSignResult(handle);
-                        if (string.IsNullOrEmpty(message)) message = "the wallet refused the signature";
+                        bool bridgeGaveNoReason = string.IsNullOrEmpty(message);
+                        if (bridgeGaveNoReason) message = "the wallet refused the signature";
                         FlowTrace.Fail("WebPay", "sign REFUSED (" + what + "): " + message);
+                        // The bridge's own text stays as sent; only the English default is keyed.
+                        string shownReason = bridgeGaveNoReason
+                            ? LocalText.Get("store.pay.web_sign_refused_default", "the wallet refused the signature")
+                            : message;
                         // The second sentence is the one that must always be true on
                         // this branch, and it is: the bridge reports an error only
                         // before any wire has been handed to the proxy.
-                        return (false, null, "Wallet did not sign: " + message +
-                                             ". Nothing was submitted and nothing was charged.");
+                        return (false, null, LocalText.FormatWithFallback("store.pay.web_sign_declined",
+                            "Wallet did not sign: {0}. Nothing was submitted and nothing was charged.",
+                            shownReason));
                     }
                     if (state == 3)
-                        return (false, null, "The browser wallet bridge lost the request. Nothing was submitted.");
+                        return (false, null, LocalText.Get("store.pay.web_sign_lost",
+                            "The browser wallet bridge lost the request. Nothing was submitted."));
 
                     if (UnityEngine.Time.realtimeSinceStartupAsDouble > deadline)
                     {
                         FlowTrace.Fail("WebPay", "sign TIMED OUT (" + what + ") after " +
                                                  SignDeadlineSeconds + "s");
-                        return (false, null,
-                            "The wallet approval was never completed. Nothing was submitted and nothing was charged.");
+                        return (false, null, LocalText.Get("store.pay.web_sign_incomplete",
+                            "The wallet approval was never completed. Nothing was submitted and nothing was charged."));
                     }
                     await UniTask.Yield();
                 }
