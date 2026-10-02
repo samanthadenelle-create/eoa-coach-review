@@ -478,9 +478,9 @@ const TUNABLE_KEYS = [
     { key: 'raid.deploy.spacingCm', kind: 'int' },
     { key: 'raid.deploy.bodyRadiusCm', kind: 'int' },
     // WO-2202 follow-up (owner 2026-10-01: "absolutely hate how slow movement is now"). Int PERCENT on
-    // BOTH hero speed caps, read by HeroLocomotion through DeNelle.Core.Combat.HeroGait. Default 100 =
-    // the caps as built. The client clamps to the band HeroGait derives (79..102); the Command Center
-    // offers the same range (tunable-manifest.js).
+    // BOTH hero speed caps, read by HeroLocomotion through DeNelle.Core.Combat.HeroGait. Default 140 =
+    // 40% faster than the base caps. The client clamps to the owner-ruled reachability band (79..140);
+    // the Command Center offers the same range (tunable-manifest.js).
     { key: 'hero.moveSpeedScalePct', kind: 'int' },
 ];
 
