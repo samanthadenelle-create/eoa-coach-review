@@ -482,6 +482,9 @@ const TUNABLE_KEYS = [
     // 40% faster than the base caps. The client clamps to the owner-ruled reachability band (79..140);
     // the Command Center offers the same range (tunable-manifest.js).
     { key: 'hero.moveSpeedScalePct', kind: 'int' },
+    // ORE Hall implementation gate. Default is pinned OFF by the Core registry;
+    // this client allowlist row grants neither endpoint nor production authority.
+    { key: 'ore.hall.enabled', kind: 'bool' },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────

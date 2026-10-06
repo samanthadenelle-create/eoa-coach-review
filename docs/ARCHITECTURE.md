@@ -1,5 +1,21 @@
 # Architecture — the one authoritative overview
 
+> 2026-10-06 endpoint delta supersedes the earlier passive-only summary below:
+> Core now supplies a compile-locked test-auth scope in its existing signer/cache,
+> with primitive queue/fence contracts. Hall's existing Integration assembly owns
+> the concrete adapters; Runtime does not reference Integration. Ordinary build
+> auth paths remain unchanged under reviewed variant parity checks. Actual world
+> owner wiring, native test-artifact auth and Seeker acceptance remain outstanding.
+> Neither this auth scope nor an on-device flag enables Wallet sign-only mode.
+
+> 2026-10-06 Core addition: BackendRequestSigner owns the passive session lifetime
+> revision/invalidation event (see Core catalog). Hall consumers must reread it,
+> explicitly marshal thread-affine work and refuse negative revisions. This is
+> not a second auth owner, endpoint authority, wallet network switch or late-writer
+> cancellation mechanism. Existing credential behavior is retained. Managed
+> 54-case/four-variant checks and fresh native compile passed; Hall runtime
+> consumer installation and device verification remain incomplete.
+
 > **Read this first for architecture.** This is the single hub that orients you to how the
 > project is built. It is intentionally concise: it states the load-bearing decisions and
 > points to the per-area **deep-dive docs** rather than restating them. When a deep-dive and
