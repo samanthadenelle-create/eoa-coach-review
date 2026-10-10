@@ -6,7 +6,7 @@ This is a small, disposable repository for the Radiants CLOCK IN AI coach. It is
 
 `git rev-list --count HEAD` on the game repository is **5829** changesets, from `2026-05-18` (`d0863ac`, the initial spec) through `2026-10-06` (`5afe186a310cfc3f79f8919dc8b06c57a7478ef7`, WO-2232).
 
-This snapshot keeps the **252** of those changesets that touched the files included here. Authors, dates, and messages are the originals. The hashes differ because each tree contains only these paths. See `HISTORY.md`.
+This snapshot keeps the **252** of those changesets that touched the files included here, dated 2026-05-18 through 2026-10-06. Authors, dates, and messages are the originals. The hashes differ because each tree contains only these paths. Packaging commits sit on top. See `HISTORY.md`.
 
 ```
 git rev-list --count HEAD

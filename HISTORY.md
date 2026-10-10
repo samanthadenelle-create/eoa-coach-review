@@ -14,7 +14,7 @@ The other changesets are art, scenes, work orders, and gameplay code that this r
 
 ## This snapshot
 
-252 changesets, replayed with the original author, author date, and message. One source changeset produced an empty tree here and was not replayed.
+252 game changesets, replayed with the original author, author date, and message. One source changeset produced an empty tree here and was not replayed. Packaging commits sit on top of those 252 (the review map, and any later note). `git rev-list --count HEAD` counts the packaging too. The 252 are the ones dated 2026-05-18 through 2026-10-06.
 
 | Month | Changesets in this snapshot |
 |---|---|
