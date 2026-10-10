@@ -14,6 +14,11 @@ git shortlog -sn HEAD
 git log --oneline
 ```
 
+The CLOCK IN deck is in this repository so it can be fetched without a Google account:
+
+- Text: https://raw.githubusercontent.com/samanthadenelle-create/eoa-coach-review/main/deck/DECK.md
+- PDF: https://github.com/samanthadenelle-create/eoa-coach-review/raw/main/deck/Encyclopedia-Elarion.pdf
+
 ## What to read
 
 | Path | What it is |
